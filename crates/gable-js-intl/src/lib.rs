@@ -1,0 +1,1 @@
+//! gable-js-intl
