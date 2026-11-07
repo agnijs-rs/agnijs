@@ -77,7 +77,11 @@ impl fmt::Display for Error {
             Error::Exception(e) => {
                 write!(f, "{}: {}", e.name, e.message)?;
                 for fr in &e.stack {
-                    write!(f, "\n    at {} ({}:{}:{})", fr.function, fr.script, fr.line, fr.column)?;
+                    write!(
+                        f,
+                        "\n    at {} ({}:{}:{})",
+                        fr.function, fr.script, fr.line, fr.column
+                    )?;
                 }
                 Ok(())
             }
@@ -86,7 +90,10 @@ impl fmt::Display for Error {
             Error::ForeignHandle => f.write_str("handle does not belong to this engine"),
             Error::UnknownRealm => f.write_str("unknown realm"),
             Error::BytecodeMismatch { expected, found } => {
-                write!(f, "bytecode version mismatch: expected {expected}, found {found}")
+                write!(
+                    f,
+                    "bytecode version mismatch: expected {expected}, found {found}"
+                )
             }
             Error::BytecodeCorrupt(m) => write!(f, "bytecode corrupt: {m}"),
             Error::Unsupported(what) => write!(f, "unsupported by this engine: {what}"),

@@ -8,3 +8,5 @@ repository.workspace = true
 description = "gable-js-parser"
 
 [dependencies]
+unicode-id-start.workspace = true
+gable-js-regex.workspace = true

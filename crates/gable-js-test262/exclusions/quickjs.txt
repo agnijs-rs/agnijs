@@ -1,0 +1,9 @@
+# Exclusions for the QuickJS-NG adapter. Format: <selector> | <reason>.
+# A rule without a reason makes the runner refuse to start.
+feature:IsHTMLDDA | the [[IsHTMLDDA]] slot is an Annex B web-compat hook the engine does not provide
+feature:tail-call-optimization | tail calls are an optional optimisation no shipping engine implements (spec section 15: out of scope)
+include:atomicsHelper.js | multi-agent tests need $262.agent; the engine runs one agent per host thread
+flag:CanBlockIsFalse | the runner always allows blocking on the main thread; these tests assert the opposite
+test/built-ins/Atomics/wait/ | Atomics.wait tests block the thread or need $262.agent
+test/built-ins/Atomics/waitAsync/ | Atomics.waitAsync tests need $262.agent and a timer-driven host
+test/built-ins/Atomics/notify/ | Atomics.notify tests need $262.agent

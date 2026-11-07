@@ -1,7 +1,7 @@
 //! The interim engine: QuickJS-NG (through `rquickjs`) behind the Gable
 //! engine interface.
 //!
-//! Design notes (see ADR 0005):
+//! Design notes (see ADR 0006):
 //!
 //! - All state lives in an `Rc<Shared>` with interior mutability, so host
 //!   callbacks that run while QuickJS is on the stack can build a fresh
@@ -112,7 +112,9 @@ impl<'js> JsClass<'js> for HostCell {
     fn prototype(_ctx: &Ctx<'js>) -> rquickjs::Result<Option<Object<'js>>> {
         Ok(None)
     }
-    fn constructor(_ctx: &Ctx<'js>) -> rquickjs::Result<Option<rquickjs::function::Constructor<'js>>> {
+    fn constructor(
+        _ctx: &Ctx<'js>,
+    ) -> rquickjs::Result<Option<rquickjs::function::Constructor<'js>>> {
         Ok(None)
     }
 }
@@ -140,7 +142,11 @@ impl Resolver for HostResolver {
                 }
             }
         }
-        let referrer = if base.is_empty() || base == ROOT_REFERRER { None } else { Some(base) };
+        let referrer = if base.is_empty() || base == ROOT_REFERRER {
+            None
+        } else {
+            Some(base)
+        };
         match shared.host.resolve_module(referrer, name, &attrs) {
             Ok(resolved) => Ok(resolved),
             Err(message) => {
@@ -173,7 +179,10 @@ impl Loader for HostLoader {
         let realm = realm_of(&shared, ctx);
         let module = match source {
             ModuleSource::Source(text) => {
-                shared.sources.borrow_mut().insert((realm.0, name.to_string()), text.clone());
+                shared
+                    .sources
+                    .borrow_mut()
+                    .insert((realm.0, name.to_string()), text.clone());
                 Module::declare(ctx.clone(), name, text)?
             }
             ModuleSource::Json(json) => {
@@ -197,7 +206,9 @@ impl Loader for HostLoader {
         // declared but not yet evaluated.
         let meta = module.meta()?;
         let meta_value = {
-            let mut engine = QuickJsEngine { shared: shared.clone() };
+            let mut engine = QuickJsEngine {
+                shared: shared.clone(),
+            };
             let meta_api = engine.to_api(ctx, meta.into_value());
             let r = shared.host.import_meta(&mut engine, realm, name, &meta_api);
             if let Err(e) = r {
@@ -246,7 +257,14 @@ impl QuickJsEngine {
             loader_error: RefCell::new(None),
         });
         let weak = Rc::downgrade(&shared);
-        shared.rt.set_loader(HostResolver { shared: weak.clone() }, HostLoader { shared: weak.clone() });
+        shared.rt.set_loader(
+            HostResolver {
+                shared: weak.clone(),
+            },
+            HostLoader {
+                shared: weak.clone(),
+            },
+        );
         {
             let weak = weak.clone();
             shared.rt.set_interrupt_handler(Some(Box::new(move || {
@@ -256,10 +274,15 @@ impl QuickJsEngine {
         {
             let weak = weak.clone();
             shared.rt.set_host_promise_rejection_tracker(Some(Box::new(
-                move |ctx: Ctx<'_>, promise: rquickjs::Value<'_>, reason: rquickjs::Value<'_>, handled: bool| {
+                move |ctx: Ctx<'_>,
+                      promise: rquickjs::Value<'_>,
+                      reason: rquickjs::Value<'_>,
+                      handled: bool| {
                     let Some(shared) = weak.upgrade() else { return };
                     let realm = realm_of(&shared, &ctx);
-                    let mut engine = QuickJsEngine { shared: shared.clone() };
+                    let mut engine = QuickJsEngine {
+                        shared: shared.clone(),
+                    };
                     let promise = engine.to_api(&ctx, promise);
                     let event = if handled {
                         RejectionEvent::Handle { promise }
@@ -277,7 +300,12 @@ impl QuickJsEngine {
     }
 
     fn context(&self, realm: RealmId) -> Result<Rc<Context>> {
-        self.shared.realms.borrow().get(realm.0 as usize).cloned().ok_or(Error::UnknownRealm)
+        self.shared
+            .realms
+            .borrow()
+            .get(realm.0 as usize)
+            .cloned()
+            .ok_or(Error::UnknownRealm)
     }
 
     /// Run `f` with a `Ctx` for `realm`, re-entrantly.
@@ -305,7 +333,13 @@ impl QuickJsEngine {
     fn enter(&mut self, realm: RealmId) -> Result<()> {
         self.reclaim_handles();
         let allowed = self.shared.host.can_compile_strings(realm);
-        let blocked = self.shared.compile_blocked.borrow().get(realm.0 as usize).copied().unwrap_or(false);
+        let blocked = self
+            .shared
+            .compile_blocked
+            .borrow()
+            .get(realm.0 as usize)
+            .copied()
+            .unwrap_or(false);
         if allowed == blocked {
             self.set_compile_blocked(realm, !allowed)?;
         }
@@ -322,12 +356,19 @@ impl QuickJsEngine {
                 let eval: rquickjs::Value = globals.get("eval")?;
                 let function: rquickjs::Value = globals.get("Function")?;
                 if slot.is_none() {
-                    *slot = Some((Persistent::save(ctx, eval.clone()), Persistent::save(ctx, function.clone())));
+                    *slot = Some((
+                        Persistent::save(ctx, eval.clone()),
+                        Persistent::save(ctx, function.clone()),
+                    ));
                 }
                 let throwing_eval = Function::new(ctx.clone(), throwing_eval)?.with_name("eval")?;
-                let throwing_function = Function::new(ctx.clone(), throwing_function)?.with_name("Function")?;
+                let throwing_function =
+                    Function::new(ctx.clone(), throwing_function)?.with_name("Function")?;
                 throwing_function.set_constructor(true);
-                if let Some(proto) = function.as_object().and_then(|f| f.get::<_, Object>("prototype").ok()) {
+                if let Some(proto) = function
+                    .as_object()
+                    .and_then(|f| f.get::<_, Object>("prototype").ok())
+                {
                     throwing_function.set("prototype", proto)?;
                 }
                 globals.set("eval", throwing_eval)?;
@@ -368,8 +409,16 @@ impl QuickJsEngine {
             let s = unsafe_to_string(ctx, &v).unwrap_or_default();
             return Value::BigInt(JsBigInt(s));
         }
-        let kind = if v.is_symbol() { HeapKind::Symbol } else { HeapKind::Object };
-        let handle = self.shared.handles.borrow_mut().insert(kind, Persistent::save(ctx, v));
+        let kind = if v.is_symbol() {
+            HeapKind::Symbol
+        } else {
+            HeapKind::Object
+        };
+        let handle = self
+            .shared
+            .handles
+            .borrow_mut()
+            .insert(kind, Persistent::save(ctx, v));
         match kind {
             HeapKind::Symbol => Value::Symbol(handle),
             HeapKind::Object => Value::Object(handle),
@@ -385,7 +434,8 @@ impl QuickJsEngine {
             Value::String(s) => new_js_string(ctx, s.units()),
             Value::BigInt(b) => {
                 let src = format!("{}n", b.0);
-                ctx.eval::<rquickjs::Value, _>(src).map_err(|e| Error::Internal(e.to_string()))?
+                ctx.eval::<rquickjs::Value, _>(src)
+                    .map_err(|e| Error::Internal(e.to_string()))?
             }
             Value::Symbol(h) | Value::Object(h) => {
                 let handles = self.shared.handles.borrow();
@@ -424,9 +474,8 @@ impl QuickJsEngine {
                 }
                 self.exception_from_value(ctx, exc)
             }
-            rquickjs::Error::Resolving { message, .. } | rquickjs::Error::Loading { message, .. } => {
-                Error::Host(message.unwrap_or_default())
-            }
+            rquickjs::Error::Resolving { message, .. }
+            | rquickjs::Error::Loading { message, .. } => Error::Host(message.unwrap_or_default()),
             other => {
                 let loader = self.shared.loader_error.borrow_mut().take();
                 match loader {
@@ -461,7 +510,12 @@ impl QuickJsEngine {
             (name, message, Vec::new())
         };
         let value = self.to_api(ctx, exc);
-        Error::Exception(Exception { value, name, message, stack })
+        Error::Exception(Exception {
+            value,
+            name,
+            message,
+            stack,
+        })
     }
 
     fn eval_in<'js>(
@@ -472,19 +526,22 @@ impl QuickJsEngine {
         flags: u32,
     ) -> Result<rquickjs::Value<'js>> {
         let cname = std::ffi::CString::new(name).map_err(|e| Error::Internal(e.to_string()))?;
-        let csrc = std::ffi::CString::new(source).map_err(|_| {
-            Error::Exception(Exception {
-                value: Value::Undefined,
-                name: "SyntaxError".into(),
-                message: "source contains a NUL byte".into(),
-                stack: vec![],
-            })
-        })?;
+        // JS_Eval takes a length, but QuickJS requires the buffer to be
+        // NUL-terminated as well; source text may itself contain NUL.
+        let mut csrc: Vec<u8> = Vec::with_capacity(source.len() + 1);
+        csrc.extend_from_slice(source.as_bytes());
+        csrc.push(0);
         // SAFETY: `ctx` is a live context; the source and name are valid
         // NUL-terminated buffers for the duration of the call; the returned
         // JSValue is owned by us and wrapped in a Value that frees it.
         let raw = unsafe {
-            qjs::JS_Eval(ctx.as_raw().as_ptr(), csrc.as_ptr(), source.len() as _, cname.as_ptr(), flags as i32)
+            qjs::JS_Eval(
+                ctx.as_raw().as_ptr(),
+                csrc.as_ptr() as *const std::ffi::c_char,
+                source.len() as _,
+                cname.as_ptr(),
+                flags as i32,
+            )
         };
         // SAFETY: `raw` is a fresh owned JSValue from this context.
         let value = unsafe { rquickjs::Value::from_raw(ctx.clone(), raw) };
@@ -518,7 +575,11 @@ impl QuickJsEngine {
             let f: Rc<HostFunction> = Rc::new(move |engine: &mut dyn Engine, cx: CallContext| {
                 let mut parts = Vec::with_capacity(cx.args.len());
                 for a in &cx.args {
-                    parts.push(engine.to_string(cx.realm, a).unwrap_or_else(|_| "<unprintable>".into()));
+                    parts.push(
+                        engine
+                            .to_string(cx.realm, a)
+                            .unwrap_or_else(|_| "<unprintable>".into()),
+                    );
                 }
                 host.console(cx.realm, level, parts);
                 Ok(Value::Undefined)
@@ -531,9 +592,13 @@ impl QuickJsEngine {
     }
 }
 
-const COMPILE_BLOCKED: &str = "new EvalError('code generation from strings is disallowed by the host')";
+const COMPILE_BLOCKED: &str =
+    "new EvalError('code generation from strings is disallowed by the host')";
 
-fn throwing_eval<'js>(ctx: Ctx<'js>, args: Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>> {
+fn throwing_eval<'js>(
+    ctx: Ctx<'js>,
+    args: Rest<rquickjs::Value<'js>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
     match args.0.into_iter().next() {
         Some(v) if v.is_string() => {
             let e: rquickjs::Value = ctx.eval(COMPILE_BLOCKED)?;
@@ -544,7 +609,10 @@ fn throwing_eval<'js>(ctx: Ctx<'js>, args: Rest<rquickjs::Value<'js>>) -> rquick
     }
 }
 
-fn throwing_function<'js>(ctx: Ctx<'js>, _args: Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>> {
+fn throwing_function<'js>(
+    ctx: Ctx<'js>,
+    _args: Rest<rquickjs::Value<'js>>,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
     let e: rquickjs::Value = ctx.eval(COMPILE_BLOCKED)?;
     Err(ctx.throw(e))
 }
@@ -554,16 +622,32 @@ fn throwing_function<'js>(ctx: Ctx<'js>, _args: Rest<rquickjs::Value<'js>>) -> r
 fn host_closure<'js>(
     shared: Weak<Shared>,
     f: Rc<HostFunction>,
-) -> impl Fn(Ctx<'js>, This<rquickjs::Value<'js>>, Rest<rquickjs::Value<'js>>) -> rquickjs::Result<rquickjs::Value<'js>> + 'js {
+) -> impl Fn(
+    Ctx<'js>,
+    This<rquickjs::Value<'js>>,
+    Rest<rquickjs::Value<'js>>,
+) -> rquickjs::Result<rquickjs::Value<'js>>
+       + 'js {
     move |ctx: Ctx<'js>, this: This<rquickjs::Value<'js>>, args: Rest<rquickjs::Value<'js>>| {
-        let Some(shared) = shared.upgrade() else { return Err(rquickjs::Error::Unknown) };
+        let Some(shared) = shared.upgrade() else {
+            return Err(rquickjs::Error::Unknown);
+        };
         let realm = realm_of(&shared, &ctx);
-        let mut engine = QuickJsEngine { shared: shared.clone() };
+        let mut engine = QuickJsEngine {
+            shared: shared.clone(),
+        };
         let this_api = engine.to_api(&ctx, this.0);
         let args_api: Vec<Value> = args.0.into_iter().map(|a| engine.to_api(&ctx, a)).collect();
-        let cx = CallContext { realm, this: this_api, args: args_api, new_target: None };
+        let cx = CallContext {
+            realm,
+            this: this_api,
+            args: args_api,
+            new_target: None,
+        };
         match f(&mut engine, cx) {
-            Ok(v) => engine.to_js(&ctx, &v).map_err(|err| engine.throw_api_error(&ctx, err)),
+            Ok(v) => engine
+                .to_js(&ctx, &v)
+                .map_err(|err| engine.throw_api_error(&ctx, err)),
             Err(err) => Err(engine.throw_api_error(&ctx, err)),
         }
     }
@@ -595,7 +679,9 @@ fn is_interrupt_or_oom(ctx: &Ctx<'_>, exc: &rquickjs::Value<'_>) -> bool {
     if exc.is_uncatchable_error() {
         return true;
     }
-    let Some(obj) = exc.as_object() else { return false };
+    let Some(obj) = exc.as_object() else {
+        return false;
+    };
     let name = obj
         .get::<_, rquickjs::Value>("name")
         .ok()
@@ -619,7 +705,12 @@ fn exception_message(ctx: &Ctx<'_>, exc: &rquickjs::Value<'_>) -> String {
 fn unsafe_to_string(ctx: &Ctx<'_>, v: &rquickjs::Value<'_>) -> Option<String> {
     // SAFETY: `v` is a live value of `ctx`; JS_ToString returns an owned
     // value which we wrap so it is freed.
-    let s = unsafe { rquickjs::Value::from_raw(ctx.clone(), qjs::JS_ToString(ctx.as_raw().as_ptr(), v.as_raw())) };
+    let s = unsafe {
+        rquickjs::Value::from_raw(
+            ctx.clone(),
+            qjs::JS_ToString(ctx.as_raw().as_ptr(), v.as_raw()),
+        )
+    };
     if s.is_exception() {
         let _ = ctx.catch();
         return None;
@@ -658,13 +749,20 @@ fn parse_stack(stack: &str) -> Vec<StackFrame> {
     let mut frames = Vec::new();
     for line in stack.lines() {
         let line = line.trim();
-        let Some(rest) = line.strip_prefix("at ") else { continue };
+        let Some(rest) = line.strip_prefix("at ") else {
+            continue;
+        };
         let (function, location) = match rest.rfind(" (") {
             Some(i) if rest.ends_with(')') => (rest[..i].trim(), &rest[i + 2..rest.len() - 1]),
             _ => ("", rest),
         };
         let (script, line_no, column) = split_location(location);
-        frames.push(StackFrame { function: function.to_string(), script, line: line_no, column });
+        frames.push(StackFrame {
+            function: function.to_string(),
+            script,
+            line: line_no,
+            column,
+        });
     }
     frames
 }
@@ -689,11 +787,29 @@ fn split_location(loc: &str) -> (String, u32, u32) {
 
 impl Engine for QuickJsEngine {
     fn info(&self) -> EngineInfo {
-        EngineInfo { name: "quickjs-ng", bytecode_format: BYTECODE_FORMAT }
+        EngineInfo {
+            name: "quickjs-ng",
+            bytecode_format: BYTECODE_FORMAT,
+        }
     }
 
     fn create_realm(&mut self) -> Result<RealmId> {
-        let context = Context::full(&self.shared.rt).map_err(|e| Error::Internal(e.to_string()))?;
+        let context = if DEPTH.with(|d| d.get()) > 0 {
+            // A host function is creating a realm ($262.createRealm does).
+            // `Context::full` takes the runtime lock, which the enclosing
+            // `Context::with` already holds, so build the context raw.
+            // SAFETY: the lock is held by this thread for this runtime, the
+            // new context belongs to it, and `from_raw` takes over the one
+            // reference `JS_NewContext` returns.
+            unsafe {
+                let rt = qjs::JS_GetRuntime(self.context(RealmId(0))?.as_raw().as_ptr());
+                let raw = qjs::JS_NewContext(rt);
+                let raw = std::ptr::NonNull::new(raw).ok_or(Error::OutOfMemory)?;
+                Context::from_raw(raw, self.shared.rt.clone())
+            }
+        } else {
+            Context::full(&self.shared.rt).map_err(|e| Error::Internal(e.to_string()))?
+        };
         let id = {
             let mut realms = self.shared.realms.borrow_mut();
             realms.push(Rc::new(context));
@@ -718,11 +834,17 @@ impl Engine for QuickJsEngine {
     }
 
     fn global_object(&mut self, realm: RealmId) -> Result<Value> {
-        self.with_api(realm, |e, ctx| Ok(e.to_api(ctx, ctx.globals().into_value())))
+        self.with_api(
+            realm,
+            |e, ctx| Ok(e.to_api(ctx, ctx.globals().into_value())),
+        )
     }
 
     fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Value> {
-        self.shared.sources.borrow_mut().insert((realm.0, name.to_string()), source.to_string());
+        self.shared
+            .sources
+            .borrow_mut()
+            .insert((realm.0, name.to_string()), source.to_string());
         self.with_api(realm, |e, ctx| {
             let v = e.eval_in(ctx, name, source, qjs::JS_EVAL_TYPE_GLOBAL)?;
             Ok(e.to_api(ctx, v))
@@ -742,9 +864,12 @@ impl Engine for QuickJsEngine {
                         Error::Exception(ex) => ex.message.clone(),
                         other => other.to_string(),
                     };
-                    let (promise, _resolve, reject) = ctx.promise().map_err(|e| Error::Internal(e.to_string()))?;
+                    let (promise, _resolve, reject) =
+                        ctx.promise().map_err(|e| Error::Internal(e.to_string()))?;
                     let reason = e.new_error_js(ctx, ErrorKind::Error, &message)?;
-                    reject.call::<_, ()>((reason,)).map_err(|e| Error::Internal(e.to_string()))?;
+                    reject
+                        .call::<_, ()>((reason,))
+                        .map_err(|e| Error::Internal(e.to_string()))?;
                     Ok(e.to_api(ctx, promise.into_value()))
                 }
             }
@@ -762,7 +887,10 @@ impl Engine for QuickJsEngine {
             for (class, data) in pending {
                 ran += 1;
                 let classes = shared.classes.borrow();
-                if let Some(f) = classes.get(class.0 as usize).and_then(|c| c.finalize.as_ref()) {
+                if let Some(f) = classes
+                    .get(class.0 as usize)
+                    .and_then(|c| c.finalize.as_ref())
+                {
                     f(data);
                 }
             }
@@ -778,7 +906,9 @@ impl Engine for QuickJsEngine {
                 Err(job_exc) => {
                     ran += 1;
                     let ctx_rc = job_exc.0.clone();
-                    let err = self.with_ctx_of(&ctx_rc, |e, ctx| e.convert_error(ctx, rquickjs::Error::Exception));
+                    let err = self.with_ctx_of(&ctx_rc, |e, ctx| {
+                        e.convert_error(ctx, rquickjs::Error::Exception)
+                    });
                     first_error.get_or_insert(err);
                     break;
                 }
@@ -795,12 +925,21 @@ impl Engine for QuickJsEngine {
     }
 
     fn script_source(&mut self, realm: RealmId, name: &str) -> Option<String> {
-        self.shared.sources.borrow().get(&(realm.0, name.to_string())).cloned()
+        self.shared
+            .sources
+            .borrow()
+            .get(&(realm.0, name.to_string()))
+            .cloned()
     }
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Vec<u8>> {
         self.with_api(realm, |e, ctx| {
-            let func = e.eval_in(ctx, name, source, qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY)?;
+            let func = e.eval_in(
+                ctx,
+                name,
+                source,
+                qjs::JS_EVAL_TYPE_GLOBAL | qjs::JS_EVAL_FLAG_COMPILE_ONLY,
+            )?;
             write_bytecode(ctx, &func)
         })
     }
@@ -811,7 +950,9 @@ impl Engine for QuickJsEngine {
                 ctx,
                 specifier,
                 source,
-                qjs::JS_EVAL_TYPE_MODULE | qjs::JS_EVAL_FLAG_STRICT | qjs::JS_EVAL_FLAG_COMPILE_ONLY,
+                qjs::JS_EVAL_TYPE_MODULE
+                    | qjs::JS_EVAL_FLAG_STRICT
+                    | qjs::JS_EVAL_FLAG_COMPILE_ONLY,
             )?;
             write_bytecode(ctx, &m)
         })
@@ -826,12 +967,19 @@ impl Engine for QuickJsEngine {
             let obj = unsafe {
                 rquickjs::Value::from_raw(
                     ctx.clone(),
-                    qjs::JS_ReadObject(ctx.as_raw().as_ptr(), payload.as_ptr(), payload.len() as _, qjs::JS_READ_OBJ_BYTECODE as i32),
+                    qjs::JS_ReadObject(
+                        ctx.as_raw().as_ptr(),
+                        payload.as_ptr(),
+                        payload.len() as _,
+                        qjs::JS_READ_OBJ_BYTECODE as i32,
+                    ),
                 )
             };
             if obj.is_exception() {
                 let _ = ctx.catch();
-                return Err(Error::BytecodeCorrupt("QuickJS rejected the bytecode".into()));
+                return Err(Error::BytecodeCorrupt(
+                    "QuickJS rejected the bytecode".into(),
+                ));
             }
             // SAFETY: JS_EvalFunction takes ownership of one reference to the
             // bytecode value, so we hand it a duplicate and let the wrapper
@@ -839,7 +987,10 @@ impl Engine for QuickJsEngine {
             let result = unsafe {
                 let raw = qjs::JS_DupValue(ctx.as_raw().as_ptr(), obj.as_raw());
                 drop(obj);
-                rquickjs::Value::from_raw(ctx.clone(), qjs::JS_EvalFunction(ctx.as_raw().as_ptr(), raw))
+                rquickjs::Value::from_raw(
+                    ctx.clone(),
+                    qjs::JS_EvalFunction(ctx.as_raw().as_ptr(), raw),
+                )
             };
             if result.is_exception() {
                 return Err(e.convert_error(ctx, rquickjs::Error::Exception));
@@ -855,7 +1006,10 @@ impl Engine for QuickJsEngine {
 
     fn memory_usage(&mut self) -> MemoryUsage {
         let u = self.shared.rt.memory_usage();
-        MemoryUsage { heap_bytes: u.memory_used_size.max(0) as usize, object_count: u.obj_count.max(0) as usize }
+        MemoryUsage {
+            heap_bytes: u.memory_used_size.max(0) as usize,
+            object_count: u.obj_count.max(0) as usize,
+        }
     }
 
     fn collect_garbage(&mut self) {
@@ -891,7 +1045,9 @@ impl Engine for QuickJsEngine {
             (Value::Object(_) | Value::Symbol(_), Value::Object(_) | Value::Symbol(_)) => {
                 let realm = self.main_realm();
                 self.with_ctx(realm, |ctx| {
-                    let (Ok(a), Ok(b)) = (self.to_js(ctx, a), self.to_js(ctx, b)) else { return false };
+                    let (Ok(a), Ok(b)) = (self.to_js(ctx, a), self.to_js(ctx, b)) else {
+                        return false;
+                    };
                     // SAFETY: both values are live values of this runtime.
                     unsafe { qjs::JS_IsStrictEqual(ctx.as_raw().as_ptr(), a.as_raw(), b.as_raw()) }
                 })
@@ -906,7 +1062,12 @@ impl Engine for QuickJsEngine {
         self.with_api(realm, |e, ctx| {
             let v = e.to_js(ctx, value)?;
             // SAFETY: `v` is a live value of `ctx`; the result is owned.
-            let s = unsafe { rquickjs::Value::from_raw(ctx.clone(), qjs::JS_ToString(ctx.as_raw().as_ptr(), v.as_raw())) };
+            let s = unsafe {
+                rquickjs::Value::from_raw(
+                    ctx.clone(),
+                    qjs::JS_ToString(ctx.as_raw().as_ptr(), v.as_raw()),
+                )
+            };
             if s.is_exception() {
                 return Err(e.convert_error(ctx, rquickjs::Error::Exception));
             }
@@ -954,7 +1115,8 @@ impl Engine for QuickJsEngine {
 
     fn new_symbol(&mut self, realm: RealmId, description: &str) -> Result<Value> {
         self.with_api(realm, |e, ctx| {
-            let s = rquickjs::Symbol::with_description(ctx.clone(), description).map_err(|err| e.convert_error(ctx, err))?;
+            let s = rquickjs::Symbol::with_description(ctx.clone(), description)
+                .map_err(|err| e.convert_error(ctx, err))?;
             Ok(e.to_api(ctx, s.into_value()))
         })
     }
@@ -969,7 +1131,13 @@ impl Engine for QuickJsEngine {
         })
     }
 
-    fn set(&mut self, realm: RealmId, object: &Value, key: &PropertyKey, value: &Value) -> Result<()> {
+    fn set(
+        &mut self,
+        realm: RealmId,
+        object: &Value,
+        key: &PropertyKey,
+        value: &Value,
+    ) -> Result<()> {
         self.with_api(realm, |e, ctx| {
             let obj = e.to_js(ctx, object)?;
             let obj = obj.into_object().ok_or_else(|| e.not_an_object(ctx))?;
@@ -984,7 +1152,8 @@ impl Engine for QuickJsEngine {
             let obj = e.to_js(ctx, object)?;
             let obj = obj.into_object().ok_or_else(|| e.not_an_object(ctx))?;
             let atom = e.key_to_js(ctx, key)?;
-            obj.contains_key(atom).map_err(|err| e.convert_error(ctx, err))
+            obj.contains_key(atom)
+                .map_err(|err| e.convert_error(ctx, err))
         })
     }
 
@@ -995,7 +1164,9 @@ impl Engine for QuickJsEngine {
             let atom = e.key_to_js(ctx, key)?;
             match obj.remove(atom) {
                 Ok(()) => Ok(true),
-                Err(rquickjs::Error::Exception) => Err(e.convert_error(ctx, rquickjs::Error::Exception)),
+                Err(rquickjs::Error::Exception) => {
+                    Err(e.convert_error(ctx, rquickjs::Error::Exception))
+                }
                 Err(_) => Ok(false),
             }
         })
@@ -1015,18 +1186,32 @@ impl Engine for QuickJsEngine {
         })
     }
 
-    fn call(&mut self, realm: RealmId, function: &Value, this: &Value, args: &[Value]) -> Result<Value> {
+    fn call(
+        &mut self,
+        realm: RealmId,
+        function: &Value,
+        this: &Value,
+        args: &[Value],
+    ) -> Result<Value> {
         self.with_api(realm, |e, ctx| {
             let f = e.to_js(ctx, function)?;
-            let f = f.into_function().ok_or_else(|| e.type_error(ctx, "not a function"))?;
+            let f = f
+                .into_function()
+                .ok_or_else(|| e.type_error(ctx, "not a function"))?;
             let this = e.to_js(ctx, this)?;
             let mut call_args = rquickjs::function::Args::new(ctx.clone(), args.len());
-            call_args.this(this).map_err(|err| e.convert_error(ctx, err))?;
+            call_args
+                .this(this)
+                .map_err(|err| e.convert_error(ctx, err))?;
             for a in args {
                 let v = e.to_js(ctx, a)?;
-                call_args.push_arg(v).map_err(|err| e.convert_error(ctx, err))?;
+                call_args
+                    .push_arg(v)
+                    .map_err(|err| e.convert_error(ctx, err))?;
             }
-            let r: rquickjs::Value = f.call_arg(call_args).map_err(|err| e.convert_error(ctx, err))?;
+            let r: rquickjs::Value = f
+                .call_arg(call_args)
+                .map_err(|err| e.convert_error(ctx, err))?;
             Ok(e.to_api(ctx, r))
         })
     }
@@ -1034,26 +1219,43 @@ impl Engine for QuickJsEngine {
     fn construct(&mut self, realm: RealmId, constructor: &Value, args: &[Value]) -> Result<Value> {
         self.with_api(realm, |e, ctx| {
             let f = e.to_js(ctx, constructor)?;
-            let f = f.into_function().ok_or_else(|| e.type_error(ctx, "not a constructor"))?;
-            let f = rquickjs::function::Constructor::from_value(f.into_value()).map_err(|err| e.convert_error(ctx, err))?;
+            let f = f
+                .into_function()
+                .ok_or_else(|| e.type_error(ctx, "not a constructor"))?;
+            let f = rquickjs::function::Constructor::from_value(f.into_value())
+                .map_err(|err| e.convert_error(ctx, err))?;
             let mut call_args = rquickjs::function::Args::new(ctx.clone(), args.len());
             for a in args {
                 let v = e.to_js(ctx, a)?;
-                call_args.push_arg(v).map_err(|err| e.convert_error(ctx, err))?;
+                call_args
+                    .push_arg(v)
+                    .map_err(|err| e.convert_error(ctx, err))?;
             }
-            let r: rquickjs::Value = f.construct_args(call_args).map_err(|err| e.convert_error(ctx, err))?;
+            let r: rquickjs::Value = f
+                .construct_args(call_args)
+                .map_err(|err| e.convert_error(ctx, err))?;
             Ok(e.to_api(ctx, r))
         })
     }
 
     fn is_array(&mut self, value: &Value) -> bool {
         let realm = self.main_realm();
-        self.with_ctx(realm, |ctx| self.to_js(ctx, value).map(|v| v.is_array()).unwrap_or(false)).unwrap_or(false)
+        self.with_ctx(realm, |ctx| {
+            self.to_js(ctx, value)
+                .map(|v| v.is_array())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 
     fn is_promise(&mut self, value: &Value) -> bool {
         let realm = self.main_realm();
-        self.with_ctx(realm, |ctx| self.to_js(ctx, value).map(|v| v.is_promise()).unwrap_or(false)).unwrap_or(false)
+        self.with_ctx(realm, |ctx| {
+            self.to_js(ctx, value)
+                .map(|v| v.is_promise())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
     }
 
     fn promise_state(&mut self, realm: RealmId, promise: &Value) -> Result<PromiseState> {
@@ -1066,10 +1268,14 @@ impl Engine for QuickJsEngine {
             let state = unsafe { qjs::JS_PromiseState(ctx.as_raw().as_ptr(), v.as_raw()) };
             Ok(match state {
                 qjs::JSPromiseStateEnum_JS_PROMISE_PENDING => PromiseState::Pending,
-                qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED | qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED => {
+                qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED
+                | qjs::JSPromiseStateEnum_JS_PROMISE_REJECTED => {
                     // SAFETY: as above; the result is an owned value.
                     let result = unsafe {
-                        rquickjs::Value::from_raw(ctx.clone(), qjs::JS_PromiseResult(ctx.as_raw().as_ptr(), v.as_raw()))
+                        rquickjs::Value::from_raw(
+                            ctx.clone(),
+                            qjs::JS_PromiseResult(ctx.as_raw().as_ptr(), v.as_raw()),
+                        )
                     };
                     let api = e.to_api(ctx, result);
                     if state == qjs::JSPromiseStateEnum_JS_PROMISE_FULFILLED {
@@ -1099,8 +1305,10 @@ impl Engine for QuickJsEngine {
     fn new_function(&mut self, realm: RealmId, name: &str, f: Rc<HostFunction>) -> Result<Value> {
         self.with_api(realm, |e, ctx| {
             let shared = Rc::downgrade(&e.shared);
-            let func = Function::new(ctx.clone(), host_closure(shared, f.clone())).map_err(|err| e.convert_error(ctx, err))?;
-            func.set_name(name).map_err(|err| e.convert_error(ctx, err))?;
+            let func = Function::new(ctx.clone(), host_closure(shared, f.clone()))
+                .map_err(|err| e.convert_error(ctx, err))?;
+            func.set_name(name)
+                .map_err(|err| e.convert_error(ctx, err))?;
             Ok(e.to_api(ctx, func.into_value()))
         })
     }
@@ -1126,17 +1334,33 @@ impl Engine for QuickJsEngine {
             .map(|c| c.name.clone())
             .ok_or_else(|| Error::Internal("unknown host class".into()))?;
         self.with_api(realm, |e, ctx| {
-            let cell = HostCell { class, data: Some(data), finalizers: Rc::downgrade(&e.shared.finalizers) };
-            let instance = rquickjs::Class::<HostCell>::instance(ctx.clone(), cell).map_err(|err| e.convert_error(ctx, err))?;
+            let cell = HostCell {
+                class,
+                data: Some(data),
+                finalizers: Rc::downgrade(&e.shared.finalizers),
+            };
+            let instance = rquickjs::Class::<HostCell>::instance(ctx.clone(), cell)
+                .map_err(|err| e.convert_error(ctx, err))?;
             let obj: Object = instance.into_inner();
             let proto: Option<Object> = match prototype {
                 Some(p) => e.to_js(ctx, p)?.into_object(),
-                None => Some(Object::new(ctx.clone()).map_err(|err| e.convert_error(ctx, err))?.get_prototype().unwrap()),
+                None => Some(
+                    Object::new(ctx.clone())
+                        .map_err(|err| e.convert_error(ctx, err))?
+                        .get_prototype()
+                        .unwrap(),
+                ),
             };
-            obj.set_prototype(proto.as_ref()).map_err(|err| e.convert_error(ctx, err))?;
-            let tag: rquickjs::Symbol = ctx.eval("Symbol.toStringTag").map_err(|err| e.convert_error(ctx, err))?;
-            obj.prop(tag, rquickjs::object::Property::from(name.as_str()).configurable())
+            obj.set_prototype(proto.as_ref())
                 .map_err(|err| e.convert_error(ctx, err))?;
+            let tag: rquickjs::Symbol = ctx
+                .eval("Symbol.toStringTag")
+                .map_err(|err| e.convert_error(ctx, err))?;
+            obj.prop(
+                tag,
+                rquickjs::object::Property::from(name.as_str()).configurable(),
+            )
+            .map_err(|err| e.convert_error(ctx, err))?;
             Ok(e.to_api(ctx, obj.into_value()))
         })
     }
@@ -1189,7 +1413,11 @@ impl Engine for QuickJsEngine {
 }
 
 impl QuickJsEngine {
-    fn with_ctx_of<R>(&mut self, context: &Context, f: impl FnOnce(&mut QuickJsEngine, &Ctx<'_>) -> R) -> R {
+    fn with_ctx_of<R>(
+        &mut self,
+        context: &Context,
+        f: impl FnOnce(&mut QuickJsEngine, &Ctx<'_>) -> R,
+    ) -> R {
         let shared = self.shared.clone();
         let mut view = QuickJsEngine { shared };
         if DEPTH.with(|d| d.get()) > 0 {
@@ -1204,11 +1432,21 @@ impl QuickJsEngine {
         }
     }
 
-    fn new_error_js<'js>(&mut self, ctx: &Ctx<'js>, kind: ErrorKind, message: &str) -> Result<rquickjs::Value<'js>> {
-        let ctor: rquickjs::Value = ctx.globals().get(kind.name()).map_err(|e| Error::Internal(e.to_string()))?;
-        let ctor = rquickjs::function::Constructor::from_value(ctor).map_err(|e| Error::Internal(e.to_string()))?;
+    fn new_error_js<'js>(
+        &mut self,
+        ctx: &Ctx<'js>,
+        kind: ErrorKind,
+        message: &str,
+    ) -> Result<rquickjs::Value<'js>> {
+        let ctor: rquickjs::Value = ctx
+            .globals()
+            .get(kind.name())
+            .map_err(|e| Error::Internal(e.to_string()))?;
+        let ctor = rquickjs::function::Constructor::from_value(ctor)
+            .map_err(|e| Error::Internal(e.to_string()))?;
         let msg = new_js_string(ctx, &message.encode_utf16().collect::<Vec<_>>());
-        ctor.construct::<_, rquickjs::Value>((msg,)).map_err(|e| self.convert_error(ctx, e))
+        ctor.construct::<_, rquickjs::Value>((msg,))
+            .map_err(|e| self.convert_error(ctx, e))
     }
 
     fn type_error(&mut self, ctx: &Ctx<'_>, message: &str) -> Error {
@@ -1227,12 +1465,15 @@ impl QuickJsEngine {
     fn throw_api_error(&mut self, ctx: &Ctx<'_>, err: Error) -> rquickjs::Error {
         let value = match err {
             Error::Exception(ex) => self.to_js(ctx, &ex.value).unwrap_or_else(|_| {
-                self.new_error_js(ctx, ErrorKind::Error, &ex.message).unwrap_or_else(|_| rquickjs::Value::new_undefined(ctx.clone()))
+                self.new_error_js(ctx, ErrorKind::Error, &ex.message)
+                    .unwrap_or_else(|_| rquickjs::Value::new_undefined(ctx.clone()))
             }),
             Error::Interrupted => {
                 // Propagate the interrupt as an uncatchable error.
                 // SAFETY: ctx is live; JS_ThrowInternalError sets the pending exception.
-                unsafe { qjs::JS_ThrowInternalError(ctx.as_raw().as_ptr(), c"interrupted".as_ptr()) };
+                unsafe {
+                    qjs::JS_ThrowInternalError(ctx.as_raw().as_ptr(), c"interrupted".as_ptr())
+                };
                 return rquickjs::Error::Exception;
             }
             other => self
@@ -1248,7 +1489,12 @@ fn write_bytecode(ctx: &Ctx<'_>, obj: &rquickjs::Value<'_>) -> Result<Vec<u8>> {
     // SAFETY: `obj` is a live compiled function or module of `ctx`. The
     // buffer QuickJS returns is ours to free with js_free after copying.
     unsafe {
-        let ptr = qjs::JS_WriteObject(ctx.as_raw().as_ptr(), &mut len, obj.as_raw(), qjs::JS_WRITE_OBJ_BYTECODE as i32);
+        let ptr = qjs::JS_WriteObject(
+            ctx.as_raw().as_ptr(),
+            &mut len,
+            obj.as_raw(),
+            qjs::JS_WRITE_OBJ_BYTECODE as i32,
+        );
         if ptr.is_null() {
             let _ = ctx.catch();
             return Err(Error::Internal("JS_WriteObject failed".into()));
@@ -1277,6 +1523,4 @@ mod tests {
         assert_eq!(frames[0].script, "test.js");
         assert_eq!((frames[0].line, frames[0].column), (2, 9));
     }
-
 }
-

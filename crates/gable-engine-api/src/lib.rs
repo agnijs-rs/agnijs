@@ -1,7 +1,7 @@
 //! The Gable engine interface: the boundary the Host runtime codes against,
 //! satisfied by the Gable engine and by the interim QuickJS-NG adapter.
 //!
-//! See `docs/js-engine-spec.md` section 7 and ADR 0005 for the design.
+//! See `docs/js-engine-spec.md` section 7 and ADR 0006 for the design.
 //!
 //! - [`Engine`]: evaluation, modules, jobs, bytecode, limits, values, host
 //!   functions and classes. Every call takes `&mut self`.
@@ -60,7 +60,10 @@ pub mod bytecode {
             .ok_or_else(|| Error::BytecodeCorrupt("unterminated format tag".into()))?;
         let found = String::from_utf8_lossy(&rest[..nul]).into_owned();
         if found != format {
-            return Err(Error::BytecodeMismatch { expected: format.to_string(), found });
+            return Err(Error::BytecodeMismatch {
+                expected: format.to_string(),
+                found,
+            });
         }
         Ok(&rest[nul + 1..])
     }

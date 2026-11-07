@@ -39,6 +39,7 @@ clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 rayon = "1"
 anyhow = "1"
+unicode-id-start = "1"
 
 [profile.release]
 debug = 1

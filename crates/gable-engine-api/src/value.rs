@@ -301,14 +301,18 @@ impl<T> HandleRegistry<T> {
         if handle.engine() != self.engine {
             return None;
         }
-        self.slots.get(handle.id() as usize).and_then(|s| s.as_ref())
+        self.slots
+            .get(handle.id() as usize)
+            .and_then(|s| s.as_ref())
     }
 
     pub fn get_mut(&mut self, handle: &Handle) -> Option<&mut T> {
         if handle.engine() != self.engine {
             return None;
         }
-        self.slots.get_mut(handle.id() as usize).and_then(|s| s.as_mut())
+        self.slots
+            .get_mut(handle.id() as usize)
+            .and_then(|s| s.as_mut())
     }
 
     /// Free the slots of every handle dropped since the last call. Returns

@@ -115,13 +115,25 @@ pub trait Engine {
     fn new_symbol(&mut self, realm: RealmId, description: &str) -> Result<Value>;
 
     fn get(&mut self, realm: RealmId, object: &Value, key: &PropertyKey) -> Result<Value>;
-    fn set(&mut self, realm: RealmId, object: &Value, key: &PropertyKey, value: &Value) -> Result<()>;
+    fn set(
+        &mut self,
+        realm: RealmId,
+        object: &Value,
+        key: &PropertyKey,
+        value: &Value,
+    ) -> Result<()>;
     fn has(&mut self, realm: RealmId, object: &Value, key: &PropertyKey) -> Result<bool>;
     fn delete(&mut self, realm: RealmId, object: &Value, key: &PropertyKey) -> Result<bool>;
     /// Own enumerable string keys, in property order.
     fn own_keys(&mut self, realm: RealmId, object: &Value) -> Result<Vec<PropertyKey>>;
 
-    fn call(&mut self, realm: RealmId, function: &Value, this: &Value, args: &[Value]) -> Result<Value>;
+    fn call(
+        &mut self,
+        realm: RealmId,
+        function: &Value,
+        this: &Value,
+        args: &[Value],
+    ) -> Result<Value>;
     fn construct(&mut self, realm: RealmId, constructor: &Value, args: &[Value]) -> Result<Value>;
 
     fn is_array(&mut self, value: &Value) -> bool;
