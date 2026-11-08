@@ -143,6 +143,10 @@ impl<'s> Parser<'s> {
             }
         }
 
+        // The member's own span (Function.prototype.toString of a static
+        // method omits `static`).
+        let start = self.tok.span.start;
+
         if let TokenKind::Ident {
             name,
             escaped: false,

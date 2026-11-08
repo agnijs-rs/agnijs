@@ -342,7 +342,7 @@ impl<'a> Compiler<'a> {
                                 Expression::Function(f) => f,
                                 _ => unreachable!("method value is a function"),
                             };
-                            self.method_closure(f, None)?;
+                            self.method_closure(f, None, p.span)?;
                             match p.kind {
                                 PropertyKind::Method => self.emit(Instr::DefineMethod {
                                     obj,
@@ -675,7 +675,10 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn emit_member_get(&mut self, r: &MemberRef) {
         match *r {
-            MemberRef::Named { obj, name } => self.emit(Instr::GetNamed { obj, name }),
+            MemberRef::Named { obj, name } => {
+                self.emit_get_named(obj, name);
+                return;
+            }
             MemberRef::Keyed { obj, key } => self.emit(Instr::GetKeyed { obj, key }),
             MemberRef::Super { this, func, key } => self.emit(Instr::GetSuper { this, func, key }),
             MemberRef::Private { obj, name } => self.emit(Instr::GetPrivate { obj, name }),
@@ -685,7 +688,10 @@ impl<'a> Compiler<'a> {
     pub(crate) fn emit_member_set(&mut self, r: &MemberRef) {
         let strict = self.fs_ref().strict;
         match *r {
-            MemberRef::Named { obj, name } => self.emit(Instr::SetNamed { obj, name, strict }),
+            MemberRef::Named { obj, name } => {
+                self.emit_set_named(obj, name, strict);
+                return;
+            }
             MemberRef::Keyed { obj, key } => self.emit(Instr::SetKeyed { obj, key, strict }),
             MemberRef::Super { this, func, key } => self.emit(Instr::SetSuper {
                 this,
@@ -1205,10 +1211,7 @@ impl<'a> Compiler<'a> {
         });
         // Return.
         let n_return = self.name("return");
-        self.emit(Instr::GetNamed {
-            obj: iter,
-            name: n_return,
-        });
+        self.emit_get_named(iter, n_return);
         let no_return = self.emit_jump(Instr::JumpIfNullish(0));
         self.emit(Instr::Star(method));
         self.emit(Instr::Call {
@@ -1227,10 +1230,7 @@ impl<'a> Compiler<'a> {
         // Throw.
         self.patch(to_throw);
         let n_throw = self.name("throw");
-        self.emit(Instr::GetNamed {
-            obj: iter,
-            name: n_throw,
-        });
+        self.emit_get_named(iter, n_throw);
         let no_throw = self.emit_jump(Instr::JumpIfNullish(0));
         self.emit(Instr::Star(method));
         self.emit(Instr::Call {
@@ -1263,17 +1263,11 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::ThrowIfNotObject(c));
         self.emit(Instr::Star(result));
         let n_done = self.name("done");
-        self.emit(Instr::GetNamed {
-            obj: result,
-            name: n_done,
-        });
+        self.emit_get_named(result, n_done);
         let done = self.emit_jump(Instr::JumpIfTrue(0));
         if is_async {
             let n_value = self.name("value");
-            self.emit(Instr::GetNamed {
-                obj: result,
-                name: n_value,
-            });
+            self.emit_get_named(result, n_value);
             self.emit(Instr::Yield { kind: mode });
         } else {
             self.emit(Instr::Ldar(result));
@@ -1289,16 +1283,10 @@ impl<'a> Compiler<'a> {
             reg: mode,
             offset: 0,
         });
-        self.emit(Instr::GetNamed {
-            obj: result,
-            name: n_value,
-        });
+        self.emit_get_named(result, n_value);
         let end = self.emit_jump(Instr::Jump(0));
         self.patch(is_return);
-        self.emit(Instr::GetNamed {
-            obj: result,
-            name: n_value,
-        });
+        self.emit_get_named(result, n_value);
         if is_async {
             self.emit(Instr::Await);
         }

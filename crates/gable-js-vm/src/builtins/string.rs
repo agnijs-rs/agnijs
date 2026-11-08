@@ -62,7 +62,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     let trim_start = vm.method(proto, "trimStart", 0, proto_trim_start);
     vm.method(proto, "valueOf", 0, proto_value_of);
     let iter = vm.well_known.iterator;
-    vm.method_sym(proto, iter, "[Symbol.iterator]", 0, proto_iterator);
+    vm.method_sym(proto, iter, "Symbol.iterator", 0, proto_iterator);
 
     // Annex B.
     vm.method(proto, "substr", 2, proto_substr);
@@ -154,6 +154,9 @@ fn string_from_char_code(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let n = vm.to_number(v)?;
         out.push(crate::convert::f64_to_uint16(n));
     }
+    if out.len() == 1 {
+        return Ok(Value::String(vm.heap.char_str(out[0])));
+    }
     Ok(vm.str_from_units(out))
 }
 
@@ -220,7 +223,8 @@ fn proto_char_at(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if pos < 0.0 || pos >= len {
         return Ok(Value::String(vm.names.empty));
     }
-    Ok(substring_value(vm, s, pos as usize, pos as usize + 1))
+    let unit = vm.heap.units(s).at(pos as usize);
+    Ok(Value::String(vm.heap.char_str(unit)))
 }
 
 fn proto_char_code_at(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -426,7 +430,7 @@ fn proto_match(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("String.prototype.match called on null or undefined");
     }
     let regexp = a.arg(0);
-    if !regexp.is_nullish() {
+    if regexp.is_object() {
         let key = PropKey::Sym(vm.well_known.match_);
         if let Some(matcher) = vm.get_method(regexp, key)? {
             return vm.call_value(matcher, regexp, &[a.this]);
@@ -443,7 +447,7 @@ fn proto_match_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("String.prototype.matchAll called on null or undefined");
     }
     let regexp = a.arg(0);
-    if !regexp.is_nullish() {
+    if regexp.is_object() {
         if is_regexp(vm, regexp)? {
             let Value::Object(ro) = regexp else {
                 unreachable!()
@@ -480,7 +484,7 @@ fn proto_search(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("String.prototype.search called on null or undefined");
     }
     let regexp = a.arg(0);
-    if !regexp.is_nullish() {
+    if regexp.is_object() {
         let key = PropKey::Sym(vm.well_known.search);
         if let Some(searcher) = vm.get_method(regexp, key)? {
             return vm.call_value(searcher, regexp, &[a.this]);
@@ -739,7 +743,7 @@ fn proto_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let search_value = a.arg(0);
     let replace_value = a.arg(1);
-    if !search_value.is_nullish() {
+    if search_value.is_object() {
         let key = PropKey::Sym(vm.well_known.replace);
         if let Some(replacer) = vm.get_method(search_value, key)? {
             return vm.call_value(replacer, search_value, &[a.this, replace_value]);
@@ -784,7 +788,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let search_value = a.arg(0);
     let replace_value = a.arg(1);
-    if !search_value.is_nullish() {
+    if search_value.is_object() {
         if is_regexp(vm, search_value)? {
             let Value::Object(ro) = search_value else {
                 unreachable!()
@@ -895,7 +899,7 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let separator = a.arg(0);
     let limit = a.arg(1);
-    if !separator.is_nullish() {
+    if separator.is_object() {
         let key = PropKey::Sym(vm.well_known.split);
         if let Some(splitter) = vm.get_method(separator, key)? {
             return vm.call_value(splitter, separator, &[a.this, limit]);
@@ -1037,7 +1041,25 @@ fn is_case_ignorable(c: char) -> bool {
             | '\u{2019}'
             | '\u{2024}'
             | '\u{2027}'
-    ) || ('\u{0300}'..='\u{036F}').contains(&c)
+    ) || ('\u{02B0}'..='\u{02FF}').contains(&c)
+        || ('\u{0300}'..='\u{036F}').contains(&c)
+        || ('\u{0600}'..='\u{0605}').contains(&c)
+        || ('\u{0610}'..='\u{061A}').contains(&c)
+        || ('\u{064B}'..='\u{065F}').contains(&c)
+        || ('\u{06D6}'..='\u{06DD}').contains(&c)
+        || ('\u{180B}'..='\u{180F}').contains(&c)
+        || ('\u{1AB0}'..='\u{1AFF}').contains(&c)
+        || ('\u{1D2C}'..='\u{1D6A}').contains(&c)
+        || ('\u{1DC0}'..='\u{1DFF}').contains(&c)
+        || ('\u{20D0}'..='\u{20F0}').contains(&c)
+        || ('\u{FE20}'..='\u{FE2F}').contains(&c)
+        || ('\u{1D167}'..='\u{1D169}').contains(&c)
+        || ('\u{1D17B}'..='\u{1D182}').contains(&c)
+        || ('\u{1D185}'..='\u{1D18B}').contains(&c)
+        || ('\u{1D1AA}'..='\u{1D1AD}').contains(&c)
+        || ('\u{1D242}'..='\u{1D244}').contains(&c)
+        || ('\u{E0001}'..='\u{E01EF}').contains(&c)
+        || matches!(c, '\u{061C}' | '\u{0640}' | '\u{0670}' | '\u{070F}' | '\u{FEFF}' | '\u{0374}' | '\u{037A}' | '\u{0559}')
         || ('\u{0483}'..='\u{0489}').contains(&c)
         || ('\u{0591}'..='\u{05BD}').contains(&c)
         || ('\u{200B}'..='\u{200F}').contains(&c)

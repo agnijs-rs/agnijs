@@ -14,6 +14,9 @@ pub(crate) struct FuncCtx {
     /// A base class constructor runs instance element initialisation on
     /// entry.
     pub is_base_ctor: bool,
+    /// Source text for Function.prototype.toString when it is wider than
+    /// the function node: the MethodDefinition or the class.
+    pub source_span: Option<Span>,
 }
 
 impl<'a> Compiler<'a> {
@@ -26,12 +29,18 @@ impl<'a> Compiler<'a> {
     }
 
     /// Compile a method (object literal or class) and emit `CreateClosure`.
-    pub(crate) fn method_closure(&mut self, f: &Function, name: Option<&str>) -> CResult<()> {
+    pub(crate) fn method_closure(
+        &mut self,
+        f: &Function,
+        name: Option<&str>,
+        source_span: Span,
+    ) -> CResult<()> {
         let idx = self.compile_function_decl(
             f,
             name,
             FuncCtx {
                 kind: Some(CodeKind::Method),
+                source_span: Some(source_span),
                 ..Default::default()
             },
         )?;
@@ -60,7 +69,8 @@ impl<'a> Compiler<'a> {
         let analysis = self.analyses.get(f);
         let name: Rc<str> = Rc::from(name.or(f.id.as_ref().map(|i| &*i.name)).unwrap_or(""));
         let kind = ctx.kind.unwrap_or(CodeKind::Function);
-        self.begin_function(name, kind, f.kind, f.strict, analysis.clone(), f.span);
+        let span = ctx.source_span.unwrap_or(f.span);
+        self.begin_function(name, kind, f.kind, f.strict, analysis.clone(), span);
         self.fs().is_derived_ctor = ctx.is_derived_ctor;
         self.function_body(
             &f.params,

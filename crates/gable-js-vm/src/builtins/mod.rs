@@ -10,6 +10,7 @@ pub mod function;
 pub mod generator;
 pub mod global;
 pub mod iterator;
+pub mod iterator_helpers;
 pub mod json;
 pub mod math;
 pub mod number;
@@ -39,6 +40,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     error::install(vm, realm);
     symbol::install(vm, realm);
     iterator::install(vm, realm);
+    iterator_helpers::install(vm, realm);
     generator::install(vm, realm);
     array::install(vm, realm);
     string::install(vm, realm);

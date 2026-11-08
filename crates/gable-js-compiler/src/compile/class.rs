@@ -81,6 +81,7 @@ impl<'a> Compiler<'a> {
                     is_derived_ctor: derived,
                     is_base_ctor: !derived,
                     self_name: None,
+                    source_span: Some(c.span),
                 },
             )?,
             None => self.default_constructor(&static_name, derived, c.span),
@@ -117,7 +118,7 @@ impl<'a> Compiler<'a> {
                     let m2 = self.mark();
                     if let PropertyKey::Private(p) = &m.key {
                         let name = self.private_name(p);
-                        self.method_closure(&m.value, None)?;
+                        self.method_closure(&m.value, None, m.span)?;
                         let f = self.alloc();
                         self.emit(Instr::Star(f));
                         self.emit(Instr::SetHomeObject { func: f, home });
@@ -147,7 +148,7 @@ impl<'a> Compiler<'a> {
                         continue;
                     }
                     let key = self.property_key_reg(&m.key)?;
-                    self.method_closure(&m.value, None)?;
+                    self.method_closure(&m.value, None, m.span)?;
                     match m.kind {
                         MethodKind::Get => self.emit(Instr::DefineGetter {
                             obj: home,

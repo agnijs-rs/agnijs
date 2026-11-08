@@ -182,6 +182,10 @@ pub struct Heap {
     pub stress_tick: u32,
     /// Optional memory limit; exceeding it after a collection is an error.
     pub memory_limit: Option<usize>,
+    /// One-byte single-character strings, allocated on first use and kept
+    /// alive as roots, so `s[i]`, `charAt` and `fromCharCode` do not
+    /// allocate for Latin-1 characters.
+    pub single_chars: Vec<Option<StrId>>,
 }
 
 impl Default for Heap {
@@ -211,6 +215,21 @@ impl Heap {
             stress_every: stress_every.unwrap_or(1),
             stress_tick: 0,
             memory_limit: None,
+            single_chars: vec![None; 256],
+        }
+    }
+
+    /// The string holding one UTF-16 code unit; cached for units below 256.
+    pub fn char_str(&mut self, unit: u16) -> StrId {
+        if unit < 256 {
+            if let Some(s) = self.single_chars[unit as usize] {
+                return s;
+            }
+            let s = self.alloc_str_latin1(vec![unit as u8]);
+            self.single_chars[unit as usize] = Some(s);
+            s
+        } else {
+            self.alloc_str_utf16(vec![unit])
         }
     }
 

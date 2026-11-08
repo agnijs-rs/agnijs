@@ -255,16 +255,38 @@ impl Vm {
             }
 
             // ---- property access ----
-            Instr::GetNamed { obj, name } => {
+            Instr::GetNamed { obj, name, ic } => {
                 let o = reg!(obj);
+                if let Value::Object(oid) = o {
+                    if let Some(v) = self.ic_get(code, ic, oid) {
+                        set_acc!(v);
+                        return Ok(Flow::Next);
+                    }
+                }
                 let key = self.name_key(code, name);
+                if let Value::Object(oid) = o {
+                    self.ic_fill_get(code, ic, oid, key);
+                }
                 let v = self.get_value_named(o, key, &code.names[name as usize].clone())?;
                 set_acc!(v);
             }
-            Instr::SetNamed { obj, name, strict } => {
+            Instr::SetNamed {
+                obj,
+                name,
+                strict,
+                ic,
+            } => {
                 let o = reg!(obj);
-                let key = self.name_key(code, name);
                 let v = acc!();
+                if let Value::Object(oid) = o {
+                    if self.ic_set(code, ic, oid, v) {
+                        return Ok(Flow::Next);
+                    }
+                }
+                let key = self.name_key(code, name);
+                if let Value::Object(oid) = o {
+                    self.ic_fill_set(code, ic, oid, key);
+                }
                 self.put_value(o, key, v, strict)?;
             }
             Instr::GetKeyed { obj, key } => {
@@ -910,16 +932,25 @@ impl Vm {
                     // [[Construct]] performs these checks after the body has
                     // completed, so the frame's own handlers must not see
                     // the error.
+                    // The caller's realm: these checks belong to
+                    // [[Construct]] after the callee context is removed.
+                    let caller_realm = if fi > 0 {
+                        self.frames[fi - 1].realm
+                    } else {
+                        self.current_realm
+                    };
                     if !v.is_undefined() {
                         self.uncatchable = true;
-                        return Err(self.throw_type(
+                        return Err(self.throw_in(
+                            caller_realm,
+                            ErrorType::TypeError,
                             "Derived constructors may only return object or undefined",
                         ));
                     }
                     let t = reg!(this);
                     if t.is_empty() {
                         self.uncatchable = true;
-                        return Err(self.throw_reference("Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
+                        return Err(self.throw_in(caller_realm, ErrorType::ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
                     }
                     set_acc!(t);
                 }

@@ -133,7 +133,7 @@ impl Vm {
                     let len = self.heap.str_len(s);
                     if (i as usize) < len {
                         let unit = self.heap.units(s).at(i as usize);
-                        let ch = self.heap.alloc_str_utf16(vec![unit]);
+                        let ch = self.heap.char_str(unit);
                         return Ok(Some(Property::data(
                             Value::String(ch),
                             Attrs::new(false, true, false),
@@ -450,6 +450,14 @@ impl Vm {
         if new_len as f64 != number_len {
             return Err(self.throw_range("Invalid array length"));
         }
+        // Step 8: the coercions above may have changed the length or made
+        // it non-writable.
+        let (old_len, writable) = {
+            let Class::Array(a) = &self.heap.obj(o).class else {
+                unreachable!()
+            };
+            (a.length, a.length_writable)
+        };
         let cur = Property::data(
             Value::Number(old_len as f64),
             Attrs::new(writable, false, false),
@@ -583,7 +591,7 @@ impl Vm {
                         let len = self.heap.str_len(s);
                         if (i as usize) < len {
                             let unit = self.heap.units(s).at(i as usize);
-                            return Ok(Value::String(self.heap.alloc_str_utf16(vec![unit])));
+                            return Ok(Value::String(self.heap.char_str(unit)));
                         }
                     }
                     PropKey::Str(n) if n == self.names.length => {

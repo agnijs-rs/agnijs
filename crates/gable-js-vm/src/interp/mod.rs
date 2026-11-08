@@ -8,6 +8,7 @@
 pub mod calls;
 pub mod generator;
 pub mod globals;
+pub mod ic;
 pub mod step;
 
 use crate::value::{EnvId, ObjId, Value};

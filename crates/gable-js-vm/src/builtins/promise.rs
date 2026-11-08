@@ -516,7 +516,7 @@ pub fn install(vm: &mut Vm, realm: gable_engine_api::RealmId) {
     vm.accessor_sym(
         ctor,
         vm.well_known.species,
-        "[Symbol.species]",
+        "Symbol.species",
         species_getter,
     );
 }
@@ -651,14 +651,19 @@ fn promise_try(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if !a.this.is_object() {
         return Err(vm.throw_type("Promise.try called on non-object"));
     }
-    let cap = new_promise_capability(vm, a.this)?;
+    if !vm.is_constructor(a.this) {
+        return Err(vm.throw_type("Promise.try called on a non-constructor"));
+    }
     let args: Vec<Value> = a.args.iter().skip(1).copied().collect();
     match vm.call_value(a.arg(0), Value::Undefined, &args) {
-        Ok(v) => resolve_capability(vm, &cap, v)?,
-        Err(Fault::Throw(e)) => reject_capability(vm, &cap, e)?,
-        Err(f) => return Err(f),
+        Ok(v) => Ok(Value::Object(promise_resolve(vm, a.this, v)?)),
+        Err(Fault::Throw(e)) => {
+            let cap = new_promise_capability(vm, a.this)?;
+            reject_capability(vm, &cap, e)?;
+            Ok(Value::Object(cap.promise))
+        }
+        Err(f) => Err(f),
     }
-    Ok(Value::Object(cap.promise))
 }
 
 /// GetPromiseResolve(C).
@@ -893,30 +898,50 @@ fn promise_any(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn promise_race(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let c = a.this;
     let cap = new_promise_capability(vm, c)?;
-    let body = |vm: &mut Vm| -> JsResult<Value> {
-        let resolve_fn = get_promise_resolve(vm, c)?;
-        let (iter, next) = vm.get_iterator(a.arg(0), false)?;
+    let reject_with = |vm: &mut Vm, f: Fault| -> JsResult<Value> {
+        match f {
+            Fault::Throw(e) => {
+                vm.call_value(cap.reject, Value::Undefined, &[e])?;
+                Ok(Value::Object(cap.promise))
+            }
+            other => Err(other),
+        }
+    };
+    let resolve_fn = match get_promise_resolve(vm, c) {
+        Ok(f) => f,
+        Err(f) => return reject_with(vm, f),
+    };
+    let (iter, next) = match vm.get_iterator(a.arg(0), false) {
+        Ok(r) => r,
+        Err(f) => return reject_with(vm, f),
+    };
+    let body = |vm: &mut Vm| -> Result<(), CombAbrupt> {
         loop {
-            let item = match vm.iterator_step_value(iter, next)? {
-                Some(v) => v,
-                None => break,
+            let item = match vm.iterator_step_value(iter, next) {
+                Ok(Some(v)) => v,
+                Ok(None) => return Ok(()),
+                Err(f) => return Err(CombAbrupt::Iterator(f)),
             };
-            let next_promise = vm.call_value(resolve_fn, c, &[item])?;
+            let next_promise = vm
+                .call_value(resolve_fn, c, &[item])
+                .map_err(CombAbrupt::Other)?;
             vm.invoke(
                 next_promise,
                 PropKey::Str(vm.names.then),
                 &[cap.resolve, cap.reject],
-            )?;
+            )
+            .map_err(CombAbrupt::Other)?;
         }
-        Ok(Value::Object(cap.promise))
     };
     match body(vm) {
-        Ok(v) => Ok(v),
-        Err(Fault::Throw(e)) => {
-            vm.call_value(cap.reject, Value::Undefined, &[e])?;
-            Ok(Value::Object(cap.promise))
+        Ok(()) => Ok(Value::Object(cap.promise)),
+        Err(CombAbrupt::Iterator(f)) => reject_with(vm, f),
+        Err(CombAbrupt::Other(f)) => {
+            if matches!(f, Fault::Throw(_)) {
+                vm.iterator_close_swallow(iter);
+            }
+            reject_with(vm, f)
         }
-        Err(f) => Err(f),
     }
 }
 

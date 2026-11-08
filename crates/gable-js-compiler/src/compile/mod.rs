@@ -163,6 +163,8 @@ pub(crate) enum Ctl {
 }
 
 pub(crate) struct FnState {
+    /// Inline caches allocated so far (GetNamed / SetNamed sites).
+    pub ic_count: u16,
     pub kind: CodeKind,
     pub function_kind: FunctionKind,
     pub strict: bool,
@@ -1084,6 +1086,7 @@ impl<'a> Compiler<'a> {
         let poisoned =
             analysis.has_eval_inside || kind == CodeKind::Module || kind == CodeKind::Eval;
         self.fns.push(FnState {
+            ic_count: 0,
             kind,
             function_kind,
             strict,
@@ -1148,7 +1151,36 @@ impl<'a> Compiler<'a> {
             source: self.source.clone(),
             span: fs.span,
             module: fs.module.map(Rc::new),
+            ic: (0..fs.ic_count)
+                .map(|_| std::cell::Cell::new(IcEntry::EMPTY))
+                .collect(),
         })
+    }
+
+    /// Allocate an inline-cache slot for a named property access.
+    pub(crate) fn ic(&mut self) -> IcIdx {
+        let fs = self.fs();
+        if fs.ic_count == NO_IC {
+            return NO_IC;
+        }
+        let i = fs.ic_count;
+        fs.ic_count += 1;
+        i
+    }
+
+    pub(crate) fn emit_get_named(&mut self, obj: Reg, name: NameIdx) {
+        let ic = self.ic();
+        self.emit(Instr::GetNamed { obj, name, ic });
+    }
+
+    pub(crate) fn emit_set_named(&mut self, obj: Reg, name: NameIdx, strict: bool) {
+        let ic = self.ic();
+        self.emit(Instr::SetNamed {
+            obj,
+            name,
+            strict,
+            ic,
+        });
     }
 
     pub(crate) fn add_function(&mut self, cb: Rc<CodeBlock>) -> FuncIdx {

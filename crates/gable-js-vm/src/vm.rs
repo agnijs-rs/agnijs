@@ -716,6 +716,16 @@ impl Vm {
         Fault::Throw(self.make_error(ty, message))
     }
 
+    /// An error whose prototype comes from `realm` rather than the current
+    /// realm.
+    pub fn throw_in(&mut self, realm: RealmId, ty: ErrorType, message: &str) -> Fault {
+        let saved = self.current_realm;
+        self.current_realm = realm;
+        let e = self.make_error(ty, message);
+        self.current_realm = saved;
+        Fault::Throw(e)
+    }
+
     pub fn throw_type(&mut self, message: &str) -> Fault {
         self.throw(ErrorType::TypeError, message)
     }

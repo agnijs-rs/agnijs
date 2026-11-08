@@ -5,7 +5,7 @@ use super::{ConstructKind, Flow, Frame, FrameKind, RunOutcome};
 use crate::object::{BoundData, Class, ConstructorKind, FunctionData, ObjectData, ThisMode};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
-use crate::vm::{Fault, JsResult, Vm};
+use crate::vm::{ErrorType, Fault, JsResult, Vm};
 use gable_engine_api::RealmId;
 use gable_js_compiler::bytecode::{CodeBlock, CodeKind};
 use gable_js_parser::ast::FunctionKind;
@@ -92,10 +92,13 @@ impl Vm {
             if let Class::Function(fd) = &self.heap.obj(fo).class {
                 if fd.code.function_kind == FunctionKind::Normal {
                     if fd.is_class_constructor {
+                        let realm = fd.realm;
                         let name = self.function_name_for_error(fo);
-                        return Err(self.throw_type(&format!(
-                            "Class constructor {name} cannot be invoked without 'new'"
-                        )));
+                        return Err(self.throw_in(
+                            realm,
+                            ErrorType::TypeError,
+                            &format!("Class constructor {name} cannot be invoked without 'new'"),
+                        ));
                     }
                     self.push_function_frame(
                         fo,
@@ -226,10 +229,13 @@ impl Vm {
         match &self.heap.obj(fo).class {
             Class::Function(fd) => {
                 if fd.is_class_constructor {
+                    let realm = fd.realm;
                     let name = self.function_name_for_error(fo);
-                    return Err(self.throw_type(&format!(
-                        "Class constructor {name} cannot be invoked without 'new'"
-                    )));
+                    return Err(self.throw_in(
+                        realm,
+                        ErrorType::TypeError,
+                        &format!("Class constructor {name} cannot be invoked without 'new'"),
+                    ));
                 }
                 let kind = fd.code.function_kind;
                 match kind {

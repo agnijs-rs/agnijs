@@ -307,6 +307,9 @@ impl Vm {
         roots.values(&self.regs);
         roots.values(&self.roots);
         roots.values(&self.keep_alive);
+        for s in self.heap.single_chars.iter().flatten() {
+            roots.str(*s);
+        }
         for h in self.handles.iter() {
             roots.value(*h);
         }

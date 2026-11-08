@@ -104,7 +104,7 @@ impl<'a> Compiler<'a> {
                     let name = static_key_name(&prop.key).unwrap();
                     if Self::utf16_is_str(&name) {
                         let n = self.name(&utf16_to_string(&name));
-                        self.emit(Instr::GetNamed { obj: src, name: n });
+                        self.emit_get_named(src, n);
                     } else {
                         let key = self.property_key_reg(&prop.key)?;
                         self.emit(Instr::GetKeyed { obj: src, key });

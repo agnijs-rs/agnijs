@@ -12,6 +12,7 @@
 
 use gable_js_parser::ast::FunctionKind;
 use gable_js_parser::span::Span;
+use std::cell::Cell;
 use std::rc::Rc;
 
 /// A register index in the current frame.
@@ -161,16 +162,18 @@ pub enum Instr {
     LdaImport(u32),
 
     // ---- property access -------------------------------------------------
-    /// acc = obj.name
+    /// acc = obj.name. `ic` indexes the code block's inline caches.
     GetNamed {
         obj: Reg,
         name: NameIdx,
+        ic: IcIdx,
     },
     /// obj.name = acc
     SetNamed {
         obj: Reg,
         name: NameIdx,
         strict: bool,
+        ic: IcIdx,
     },
     /// acc = obj[key]
     GetKeyed {
@@ -693,6 +696,34 @@ pub struct SourceText {
     pub text: Rc<str>,
 }
 
+/// Index of an inline cache in `CodeBlock::ic`; `NO_IC` when the function
+/// ran out of slots.
+pub type IcIdx = u16;
+pub const NO_IC: IcIdx = u16::MAX;
+
+/// A monomorphic inline cache for a named property access: the receiver
+/// shape it was recorded for and where the property lives. `holder` is
+/// `NO_HOLDER` for an own property, otherwise the prototype object (by id)
+/// that held it, whose shape must still be `holder_shape`. The VM owns the
+/// meaning of the ids; the compiler only allocates the slots.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IcEntry {
+    pub shape: u32,
+    pub holder: u32,
+    pub holder_shape: u32,
+    pub slot: u32,
+}
+
+impl IcEntry {
+    pub const NO_HOLDER: u32 = u32::MAX;
+    pub const EMPTY: IcEntry = IcEntry {
+        shape: u32::MAX,
+        holder: u32::MAX,
+        holder_shape: u32::MAX,
+        slot: u32::MAX,
+    };
+}
+
 /// A compiled function (or script, module, eval body).
 #[derive(Debug)]
 pub struct CodeBlock {
@@ -726,6 +757,8 @@ pub struct CodeBlock {
     pub span: Span,
     /// Module metadata (module code only).
     pub module: Option<Rc<ModuleInfo>>,
+    /// Inline caches, one per GetNamed / SetNamed site; filled by the VM.
+    pub ic: Box<[Cell<IcEntry>]>,
 }
 
 /// Static module structure (ES Module Record fields).
