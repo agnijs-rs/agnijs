@@ -106,7 +106,7 @@ fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let x = this_number_value(vm, a.this)?;
-    Ok(Value::String(vm.number_to_string(x)))
+    super::intl::numberformat::to_locale_string(vm, Value::Number(x), a.arg(0), a.arg(1))
 }
 
 fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

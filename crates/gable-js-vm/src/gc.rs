@@ -180,6 +180,7 @@ impl Class {
             Class::Promise(p) => p.trace(t),
             Class::RegExp(r) => r.trace(t),
             Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m.trace(t),
+            Class::Intl(d) => d.trace(t),
             Class::MapIterator(i) | Class::SetIterator(i) => t.opt_obj(i.target),
             Class::WeakRef(v) => {
                 // Weak: the target is handled after marking.
@@ -332,6 +333,7 @@ impl Vm {
             for (_, o) in r.template_cache.values() {
                 roots.obj(*o);
             }
+            roots.sym(r.intl_fallback);
         }
         for s in self.names.all() {
             roots.str(s);

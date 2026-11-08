@@ -51,8 +51,8 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.method(proto, "split", 2, proto_split);
     vm.method(proto, "startsWith", 1, proto_starts_with);
     vm.method(proto, "substring", 2, proto_substring);
-    vm.method(proto, "toLocaleLowerCase", 0, proto_to_lower_case);
-    vm.method(proto, "toLocaleUpperCase", 0, proto_to_upper_case);
+    vm.method(proto, "toLocaleLowerCase", 0, proto_to_locale_lower_case);
+    vm.method(proto, "toLocaleUpperCase", 0, proto_to_locale_upper_case);
     vm.method(proto, "toLowerCase", 0, proto_to_lower_case);
     vm.method(proto, "toString", 0, proto_value_of);
     vm.method(proto, "toUpperCase", 0, proto_to_upper_case);
@@ -398,6 +398,8 @@ fn proto_to_well_formed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn proto_locale_compare(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "localeCompare")?;
     let that = vm.to_string(a.arg(0))?;
+    return super::intl::collator::locale_compare(vm, Value::String(s), Value::String(that), a.arg(1), a.arg(2));
+    #[allow(unreachable_code)]
     // Compare by code point after NFC normalisation would be ideal; we
     // compare canonical forms by code unit, which is a consistent total order.
     let su = units_of(vm, s);
@@ -1128,6 +1130,28 @@ fn proto_to_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let u = units_of(vm, s);
     let out = case_map(&u, false);
     Ok(vm.str_from_units(out))
+}
+
+/// ECMA-402 TransformCase: the requested locale's case mapping (the host
+/// default locale when none is given).
+fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<Value> {
+    let s = this_str(vm, a, name)?;
+    let requested = super::intl::abstract_ops::canonicalize_locale_list(vm, a.arg(0))?;
+    let tag = match requested.first() {
+        Some(t) => t.clone(),
+        None => super::intl::abstract_ops::default_locale(vm),
+    };
+    let u = units_of(vm, s);
+    let out = gable_js_intl::casemap::map_utf16(&u, &tag, upper);
+    Ok(vm.str_from_units(out))
+}
+
+fn proto_to_locale_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    locale_case(vm, a, "toLocaleLowerCase", false)
+}
+
+fn proto_to_locale_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    locale_case(vm, a, "toLocaleUpperCase", true)
 }
 
 fn proto_to_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

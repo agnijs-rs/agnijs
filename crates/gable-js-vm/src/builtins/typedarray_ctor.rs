@@ -1118,7 +1118,7 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         let v = elem(vm, o, k);
         if !v.is_nullish() {
-            let r = vm.invoke_str(v, "toLocaleString", &[])?;
+            let r = vm.invoke_str(v, "toLocaleString", &[a.arg(0), a.arg(1)])?;
             let s = vm.to_string(r)?;
             let u = vm.heap.units(s);
             b.push_units(&u);

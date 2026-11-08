@@ -273,6 +273,8 @@ pub enum Class {
     IteratorHelper(Box<crate::builtins::iterator::HelperState>),
     WrapForValidIterator { iterator: Value, next: Value },
     Host(Box<HostObjectData>),
+    /// An ECMA-402 service object (`Intl.NumberFormat` and friends).
+    Intl(Box<crate::builtins::intl::IntlData>),
 }
 
 #[derive(Clone, Copy, Debug)]

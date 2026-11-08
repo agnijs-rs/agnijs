@@ -4,6 +4,7 @@
 //! `Host::time_zone_offset_ms`, `Host::time_zone_name`), so the engine
 //! itself knows no platform and defaults to UTC.
 
+use super::intl::datetimeformat::{Defaults, Required};
 use gable_engine_api::RealmId;
 
 use crate::convert::Hint;
@@ -718,9 +719,9 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.method(proto, "toDateString", 0, to_date_string_m);
     vm.method(proto, "toISOString", 0, to_iso_string_m);
     vm.method(proto, "toJSON", 1, to_json);
-    vm.method(proto, "toLocaleDateString", 0, to_date_string_m);
-    vm.method(proto, "toLocaleString", 0, to_string_m);
-    vm.method(proto, "toLocaleTimeString", 0, to_time_string_m);
+    vm.method(proto, "toLocaleDateString", 0, to_locale_date_string_m);
+    vm.method(proto, "toLocaleString", 0, to_locale_string_m);
+    vm.method(proto, "toLocaleTimeString", 0, to_locale_time_string_m);
     vm.method(proto, "toString", 0, to_string_m);
     vm.method(proto, "toTimeString", 0, to_time_string_m);
     let utc_s = vm.method(proto, "toUTCString", 0, to_utc_string_m);
@@ -734,6 +735,28 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
 }
 
 // ---- constructor and statics -------------------------------------------------------------
+
+fn to_locale_string_m(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    to_locale(vm, a, "toLocaleString", Required::Any, Defaults::All)
+}
+
+fn to_locale_date_string_m(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    to_locale(vm, a, "toLocaleDateString", Required::Date, Defaults::Date)
+}
+
+fn to_locale_time_string_m(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    to_locale(vm, a, "toLocaleTimeString", Required::Time, Defaults::Time)
+}
+
+/// ECMA-402 Date.prototype.toLocale*String: an invalid date is the
+/// string "Invalid Date", anything else goes through Intl.DateTimeFormat.
+fn to_locale(vm: &mut Vm, a: &CallArgs, method: &str, required: Required, defaults: Defaults) -> JsResult<Value> {
+    let (_, t) = this_time_value(vm, a.this, method)?;
+    if t.is_nan() {
+        return Ok(vm.str("Invalid Date"));
+    }
+    super::intl::datetimeformat::date_to_locale_string(vm, t, a.arg(0), a.arg(1), required, defaults)
+}
 
 fn this_time_value(vm: &mut Vm, this: Value, method: &str) -> JsResult<(ObjId, f64)> {
     if let Value::Object(o) = this {

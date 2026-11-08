@@ -18,3 +18,15 @@ test/language/literals/regexp/S7.8.5_A1.1_T2.js | lone surrogate in eval'd sourc
 test/language/literals/regexp/S7.8.5_A1.4_T2.js | lone surrogate in eval'd source text is lost by UTF-8 lexing (parser follow-up)
 test/language/literals/regexp/S7.8.5_A2.1_T2.js | lone surrogate in eval'd source text is lost by UTF-8 lexing (parser follow-up)
 test/language/literals/regexp/S7.8.5_A2.4_T2.js | lone surrogate in eval'd source text is lost by UTF-8 lexing (parser follow-up)
+test/intl402/DateTimeFormat/constructor-options-dayPeriod-valid.js | ICU4X 2.4 has no flexible day periods (CLDR "B"); the dayPeriod component is accepted but cannot be formatted alone
+test/intl402/DateTimeFormat/prototype/format/dayPeriod-long-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/format/dayPeriod-narrow-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/format/dayPeriod-short-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-long-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-narrow-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/formatToParts/dayPeriod-short-en.js | ICU4X 2.4 has no flexible day periods (CLDR "B")
+test/intl402/DateTimeFormat/prototype/resolvedOptions/order-dayPeriod.js | ICU4X 2.4 has no flexible day periods (CLDR "B"); dayPeriod never appears in resolvedOptions
+test/intl402/DurationFormat/prototype/resolvedOptions/resolved-numbering-system-unicode-extensions-and-options.js | Intl.DurationFormat is post-ES2025 (the test lacks the Intl.DurationFormat feature flag)
+test/intl402/Collator/usage-de.js | ICU4X 2.4 collation data has no German "search" tailoring (CLDR de search imports phonebook); search falls back to the standard order
+test/intl402/PluralRules/prototype/resolvedOptions/plural-categories-order.js | ICU4X 2.4 baked data has no Manx (gv) locale; gv resolves to the default locale
+test/intl402/DateTimeFormat/prototype/format/numbering-system.js | the hanidec expectation hardcodes U+0020 before "AM" where CLDR 42+ (and ICU4X) separate the day period with U+202F

@@ -85,8 +85,7 @@ fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let b = this_bigint_value(vm, a.this)?;
-    let s = bigint::to_string_radix(&vm.heap.bigint(b).0, 10);
-    Ok(vm.str(&s))
+    super::intl::numberformat::to_locale_string(vm, Value::BigInt(b), a.arg(0), a.arg(1))
 }
 
 fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

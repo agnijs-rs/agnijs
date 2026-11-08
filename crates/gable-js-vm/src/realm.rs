@@ -2,7 +2,7 @@
 
 use crate::env::Environment;
 use crate::object::{Class, ObjectData};
-use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, Value};
+use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, SymId, Value};
 use crate::vm::Vm;
 use gable_engine_api::RealmId;
 use gable_js_compiler::bytecode::{BindingKind, CodeBlock};
@@ -139,6 +139,26 @@ intrinsics! {
     IteratorHelperPrototype,
     WrapForValidIteratorPrototype,
     Intl,
+    IntlLocale,
+    IntlLocalePrototype,
+    IntlNumberFormat,
+    IntlNumberFormatPrototype,
+    IntlPluralRules,
+    IntlPluralRulesPrototype,
+    IntlDateTimeFormat,
+    IntlDateTimeFormatPrototype,
+    IntlCollator,
+    IntlCollatorPrototype,
+    IntlListFormat,
+    IntlListFormatPrototype,
+    IntlRelativeTimeFormat,
+    IntlRelativeTimeFormatPrototype,
+    IntlSegmenter,
+    IntlSegmenterPrototype,
+    IntlSegmentsPrototype,
+    IntlSegmentIteratorPrototype,
+    IntlDisplayNames,
+    IntlDisplayNamesPrototype,
 }
 
 /// A global lexical binding (`let`, `const`, `class` at script top level).
@@ -161,6 +181,9 @@ pub struct Realm {
     /// Names declared by `var` and function declarations of scripts
     /// (the global environment record's [[VarNames]]).
     pub var_names: hashbrown::HashSet<Rc<str>>,
+    /// %Intl%.[[FallbackSymbol]]: a fresh ordinary symbol per realm for
+    /// the legacy `Intl.NumberFormat.call(obj)` chaining.
+    pub intl_fallback: SymId,
 }
 
 impl Realm {
@@ -192,6 +215,10 @@ impl Vm {
         let object_prototype = self.alloc(ObjectData::new(None, Class::Ordinary));
         let global = self.alloc(ObjectData::new(Some(object_prototype), Class::Ordinary));
         let global_env = self.heap.alloc_env(Environment::Global(id));
+        let intl_fallback = self.heap.alloc_symbol(crate::symbol::SymbolData::new(
+            Some(self.names.IntlLegacyConstructedSymbol),
+            crate::symbol::SymbolKind::Normal,
+        ));
         let realm = Realm {
             id,
             global,
@@ -201,6 +228,7 @@ impl Vm {
             template_cache: HashMap::new(),
             script_names: Vec::new(),
             var_names: hashbrown::HashSet::new(),
+            intl_fallback,
         };
         self.realms.push(realm);
         self.current_realm = id;

@@ -213,6 +213,7 @@ names! {
     Symbol_replace = "Symbol.replace",
     Symbol_search = "Symbol.search",
     Symbol_split = "Symbol.split",
+    IntlLegacyConstructedSymbol = "IntlLegacyConstructedSymbol",
     this_binding = "*this*",
     new_target_binding = "*new.target*",
     func_binding = "*func*",

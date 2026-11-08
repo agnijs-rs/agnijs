@@ -128,6 +128,19 @@ pub trait Host {
         let _ = epoch_ms;
         "Coordinated Universal Time".to_string()
     }
+
+    /// DefaultLocale for ECMA-402: the BCP 47 tag the `Intl` constructors
+    /// fall back to. The engine canonicalizes it and substitutes `en-US`
+    /// when the tag is invalid or has no locale data.
+    fn default_locale(&self) -> String {
+        "en-US".to_string()
+    }
+
+    /// DefaultTimeZone for ECMA-402: the IANA zone `Intl.DateTimeFormat`
+    /// uses when none is given. Unknown names fall back to `UTC`.
+    fn default_time_zone(&self) -> String {
+        "UTC".to_string()
+    }
 }
 
 /// The arguments of a host function call.

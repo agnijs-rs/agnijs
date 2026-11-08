@@ -12,6 +12,7 @@ pub mod error;
 pub mod function;
 pub mod generator;
 pub mod global;
+pub mod intl;
 pub mod iterator;
 pub mod iterator_helpers;
 pub mod json;
@@ -60,6 +61,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     collections::install(vm, realm);
     date::install(vm, realm);
     typedarray::install(vm, realm);
+    intl::install(vm, realm);
     global::install(vm, realm);
 }
 

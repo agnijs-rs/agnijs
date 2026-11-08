@@ -63,6 +63,11 @@ enum Cmd {
         /// Also run `test/intl402`, reported in its own directory bucket.
         #[arg(long)]
         include_intl402: bool,
+        /// Run only `test/intl402`, compared with (or, with
+        /// `--update-baseline`, written to) its own baseline
+        /// `<crate>/baselines/<engine>-intl402.json`.
+        #[arg(long)]
+        only_intl402: bool,
         /// Print every failure message.
         #[arg(long)]
         verbose: bool,
@@ -164,6 +169,7 @@ fn main() -> Result<()> {
             no_baseline,
             output,
             include_intl402,
+            only_intl402,
             verbose,
         } => run(RunArgs {
             engine,
@@ -177,6 +183,7 @@ fn main() -> Result<()> {
             no_baseline,
             output,
             include_intl402,
+            only_intl402,
             verbose,
         }),
     }
@@ -230,6 +237,7 @@ struct RunArgs {
     no_baseline: bool,
     output: Option<PathBuf>,
     include_intl402: bool,
+    only_intl402: bool,
     verbose: bool,
 }
 
@@ -294,11 +302,16 @@ fn run(args: RunArgs) -> Result<()> {
         }
     };
 
+    let filters = if args.only_intl402 && args.filters.is_empty() {
+        vec!["test/intl402/".to_string()]
+    } else {
+        args.filters.clone()
+    };
     let sel = Selection {
         cut: &cut,
         exclusions: &exclusions,
-        filters: args.filters.clone(),
-        include_intl402: args.include_intl402,
+        filters,
+        include_intl402: args.include_intl402 || args.only_intl402,
     };
     let (cases, skipped) = suite::discover(root, &sel)?;
     let harness = suite::load_harness(root)?;
@@ -367,7 +380,10 @@ fn run(args: RunArgs) -> Result<()> {
 
     let baseline_path = args
         .baseline
-        .unwrap_or_else(|| crate_dir().join(format!("baselines/{}.json", args.engine)));
+        .unwrap_or_else(|| {
+            let suffix = if args.only_intl402 { "-intl402" } else { "" };
+            crate_dir().join(format!("baselines/{}{}.json", args.engine, suffix))
+        });
     if args.update_baseline {
         if !args.filters.is_empty() {
             bail!("--update-baseline needs a full run (no --filter)");
