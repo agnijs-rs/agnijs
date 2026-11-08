@@ -5,7 +5,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use gable_js_test262::exclusions::Exclusions;
 use gable_js_test262::features::{parse_name_list, FeatureCut, FeatureList};
-use gable_js_test262::runner::Factory;
+use gable_js_test262::runner::Mode;
 use gable_js_test262::suite::{self, Baseline, RunOptions, Selection};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -30,7 +30,7 @@ enum Cmd {
     },
     /// Run the suite.
     Run {
-        /// Engine under test: `quickjs`.
+        /// Engine under test: `quickjs` (full run) or `parse` (gable-js-parser, parse only).
         #[arg(long, default_value = "quickjs")]
         engine: String,
         /// Path to the test262 checkout (default: `<crate>/../../test262`).
@@ -161,10 +161,11 @@ struct RunArgs {
     verbose: bool,
 }
 
-fn factory_for(engine: &str) -> Result<Factory> {
+fn factory_for(engine: &str) -> Result<Mode> {
     match engine {
-        "quickjs" => Ok(Arc::new(|host| gable_engine_quickjs::make_engine(host))),
-        other => bail!("unknown engine {other:?}; available: quickjs"),
+        "quickjs" => Ok(Mode::Engine(Arc::new(|host| gable_engine_quickjs::make_engine(host)))),
+        "parse" => Ok(Mode::ParseOnly),
+        other => bail!("unknown engine {other:?}; available: quickjs, parse"),
     }
 }
 

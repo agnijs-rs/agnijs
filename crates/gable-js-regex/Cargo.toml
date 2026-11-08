@@ -9,3 +9,4 @@ description = "gable-js-regex"
 
 [dependencies]
 regress.workspace = true
+unicode-id-start.workspace = true

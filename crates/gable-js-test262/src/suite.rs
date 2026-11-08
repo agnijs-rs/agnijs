@@ -4,7 +4,7 @@
 use crate::exclusions::Exclusions;
 use crate::features::FeatureCut;
 use crate::metadata;
-use crate::runner::{self, Factory, HarnessFiles, Outcome, RunResult, TestCase};
+use crate::runner::{self, HarnessFiles, Mode, Outcome, RunResult, TestCase};
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -243,7 +243,7 @@ pub struct RunOptions {
 pub fn run_all(
     cases: &[TestCase],
     skipped: BTreeMap<String, Skip>,
-    factory: Factory,
+    mode: Mode,
     harness: &HarnessFiles,
     opts: &RunOptions,
     progress: &(dyn Fn(usize, usize) + Sync),
@@ -257,7 +257,7 @@ pub fn run_all(
         cases
             .par_iter()
             .map(|case| {
-                let runs = runner::run_test(case, &factory, harness, opts.timeout);
+                let runs = runner::run_test(case, &mode, harness, opts.timeout);
                 let n = done.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 progress(n, total);
                 TestReport {

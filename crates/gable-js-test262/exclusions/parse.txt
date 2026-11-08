@@ -1,0 +1,2 @@
+# Exclusions for the parse-only run of gable-js-parser (M1).
+# Format: one entry per line, `# ` comments; see exclusions/quickjs.txt.

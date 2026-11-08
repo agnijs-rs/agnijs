@@ -17,6 +17,16 @@ use std::time::{Duration, Instant};
 /// Builds a fresh engine for one test run.
 pub type Factory = Arc<dyn Fn(Rc<dyn Host>) -> Box<dyn Engine> + Send + Sync>;
 
+/// How a test is run: through a full engine, or parsed only.
+#[derive(Clone)]
+pub enum Mode {
+    /// Evaluate with a fresh engine from the factory.
+    Engine(Factory),
+    /// Parse with `gable-js-parser` only: positive tests must parse, tests
+    /// negative in the `parse` phase must fail to parse, nothing runs.
+    ParseOnly,
+}
+
 /// Harness files by name (`assert.js`, ...).
 pub type HarnessFiles = HashMap<String, String>;
 
@@ -121,10 +131,14 @@ fn normalize(p: &Path) -> String {
 /// Run a test (once or twice as its flags require).
 pub fn run_test(
     case: &TestCase,
-    factory: &Factory,
+    mode: &Mode,
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Vec<RunResult> {
+    let factory = match mode {
+        Mode::Engine(f) => f,
+        Mode::ParseOnly => return parse_test(case, harness),
+    };
     let m = &case.meta;
     if m.is_module() || m.is_raw() {
         return vec![RunResult {
@@ -146,6 +160,56 @@ pub fn run_test(
         });
     }
     runs
+}
+
+/// Parse-only run (see `Mode::ParseOnly`).
+fn parse_test(case: &TestCase, harness: &HarnessFiles) -> Vec<RunResult> {
+    let m = &case.meta;
+    if m.is_module() || m.is_raw() {
+        return vec![RunResult { strict: None, outcome: parse_once(case, false, harness) }];
+    }
+    let mut runs = Vec::new();
+    if !m.has_flag("onlyStrict") {
+        runs.push(RunResult { strict: Some(false), outcome: parse_once(case, false, harness) });
+    }
+    if !m.has_flag("noStrict") {
+        runs.push(RunResult { strict: Some(true), outcome: parse_once(case, true, harness) });
+    }
+    runs
+}
+
+fn parse_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcome {
+    let meta = &case.meta;
+    if !meta.is_raw() {
+        let mut files: Vec<&str> = vec!["assert.js", "sta.js"];
+        if meta.is_async() {
+            files.push("doneprintHandle.js");
+        }
+        files.extend(meta.includes.iter().map(String::as_str));
+        for f in files {
+            let Some(src) = harness.get(f) else {
+                return Outcome::Fail(format!("missing harness file {f}"));
+            };
+            if let Err(e) = gable_js_parser::parse_script(src) {
+                return Outcome::Fail(format!("harness {f} failed to parse: {e}"));
+            }
+        }
+    }
+    let result = if meta.is_module() {
+        gable_js_parser::parse_module(&case.source).map(|_| ())
+    } else if strict {
+        gable_js_parser::parse_script(&format!("\"use strict\";
+{}", case.source)).map(|_| ())
+    } else {
+        gable_js_parser::parse_script(&case.source).map(|_| ())
+    };
+    let expects_parse_error = matches!(&meta.negative, Some(n) if n.phase == "parse");
+    match (expects_parse_error, result) {
+        (false, Ok(())) => Outcome::Pass,
+        (false, Err(e)) => Outcome::Fail(format!("SyntaxError: {e}")),
+        (true, Err(_)) => Outcome::Pass,
+        (true, Ok(())) => Outcome::Fail("expected SyntaxError in phase parse but the source parsed".into()),
+    }
 }
 
 fn run_once(
