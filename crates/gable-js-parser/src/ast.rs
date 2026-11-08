@@ -508,7 +508,9 @@ impl PropertyKey {
         match self {
             PropertyKey::Ident(i) => Some(i.name.encode_utf16().collect()),
             PropertyKey::String(s) => Some(s.value.to_vec()),
-            PropertyKey::Number(n, _) => Some(crate::number::to_js_string(*n).encode_utf16().collect()),
+            PropertyKey::Number(n, _) => {
+                Some(crate::number::to_js_string(*n).encode_utf16().collect())
+            }
             PropertyKey::BigInt(b, _) => Some(b.encode_utf16().collect()),
             _ => None,
         }
@@ -860,7 +862,11 @@ pub enum ImportSpecifier {
     /// `import * as ns from`
     Namespace(Ident),
     /// `import { a as b } from`
-    Named { imported: ModuleExportName, local: Ident, span: Span },
+    Named {
+        imported: ModuleExportName,
+        local: Ident,
+        span: Span,
+    },
 }
 
 #[derive(Debug)]

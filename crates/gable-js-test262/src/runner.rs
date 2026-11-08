@@ -25,6 +25,9 @@ pub enum Mode {
     /// Parse with `gable-js-parser` only: positive tests must parse, tests
     /// negative in the `parse` phase must fail to parse, nothing runs.
     ParseOnly,
+    /// Parse and compile to bytecode without running (checks the compiler
+    /// against every in-scope test).
+    CompileOnly,
 }
 
 /// Harness files by name (`assert.js`, ...).
@@ -137,7 +140,8 @@ pub fn run_test(
 ) -> Vec<RunResult> {
     let factory = match mode {
         Mode::Engine(f) => f,
-        Mode::ParseOnly => return parse_test(case, harness),
+        Mode::ParseOnly => return parse_test(case, harness, false),
+        Mode::CompileOnly => return parse_test(case, harness, true),
     };
     let m = &case.meta;
     if m.is_module() || m.is_raw() {
@@ -163,22 +167,34 @@ pub fn run_test(
 }
 
 /// Parse-only run (see `Mode::ParseOnly`).
-fn parse_test(case: &TestCase, harness: &HarnessFiles) -> Vec<RunResult> {
+fn parse_test(case: &TestCase, harness: &HarnessFiles, compile: bool) -> Vec<RunResult> {
     let m = &case.meta;
     if m.is_module() || m.is_raw() {
-        return vec![RunResult { strict: None, outcome: parse_once(case, false, harness) }];
+        return vec![RunResult {
+            strict: None,
+            outcome: parse_once(case, false, harness, compile),
+        }];
     }
     let mut runs = Vec::new();
     if !m.has_flag("onlyStrict") {
-        runs.push(RunResult { strict: Some(false), outcome: parse_once(case, false, harness) });
+        runs.push(RunResult {
+            strict: Some(false),
+            outcome: parse_once(case, false, harness, compile),
+        });
     }
     if !m.has_flag("noStrict") {
-        runs.push(RunResult { strict: Some(true), outcome: parse_once(case, true, harness) });
+        runs.push(RunResult {
+            strict: Some(true),
+            outcome: parse_once(case, true, harness, compile),
+        });
     }
     runs
 }
 
-fn parse_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcome {
+fn parse_once(case: &TestCase, strict: bool, harness: &HarnessFiles, compile: bool) -> Outcome {
+    if compile {
+        return compile_once(case, strict, harness);
+    }
     let meta = &case.meta;
     if !meta.is_raw() {
         let mut files: Vec<&str> = vec!["assert.js", "sta.js"];
@@ -198,8 +214,12 @@ fn parse_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcome 
     let result = if meta.is_module() {
         gable_js_parser::parse_module(&case.source).map(|_| ())
     } else if strict {
-        gable_js_parser::parse_script(&format!("\"use strict\";
-{}", case.source)).map(|_| ())
+        gable_js_parser::parse_script(&format!(
+            "\"use strict\";
+{}",
+            case.source
+        ))
+        .map(|_| ())
     } else {
         gable_js_parser::parse_script(&case.source).map(|_| ())
     };
@@ -208,7 +228,59 @@ fn parse_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcome 
         (false, Ok(())) => Outcome::Pass,
         (false, Err(e)) => Outcome::Fail(format!("SyntaxError: {e}")),
         (true, Err(_)) => Outcome::Pass,
-        (true, Ok(())) => Outcome::Fail("expected SyntaxError in phase parse but the source parsed".into()),
+        (true, Ok(())) => {
+            Outcome::Fail("expected SyntaxError in phase parse but the source parsed".into())
+        }
+    }
+}
+
+fn compile_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcome {
+    let meta = &case.meta;
+    if !meta.is_raw() {
+        let mut files: Vec<&str> = vec!["assert.js", "sta.js"];
+        if meta.is_async() {
+            files.push("doneprintHandle.js");
+        }
+        files.extend(meta.includes.iter().map(String::as_str));
+        for f in files {
+            let Some(src) = harness.get(f) else {
+                return Outcome::Fail(format!("missing harness file {f}"));
+            };
+            if let Err(e) = gable_js_compiler::compile_script(src, f) {
+                return Outcome::Fail(format!("harness {f} failed to compile: {e}"));
+            }
+        }
+    }
+    let name = case.path.to_string_lossy().to_string();
+    let result = std::panic::catch_unwind(|| {
+        if meta.is_module() {
+            gable_js_compiler::compile_module(&case.source, &name).map(|_| ())
+        } else if strict {
+            gable_js_compiler::compile_script(&format!("\"use strict\";\n{}", case.source), &name)
+                .map(|_| ())
+        } else {
+            gable_js_compiler::compile_script(&case.source, &name).map(|_| ())
+        }
+    });
+    let result = match result {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown panic".into());
+            return Outcome::Fail(format!("compiler panic: {msg}"));
+        }
+    };
+    let expects_parse_error = matches!(&meta.negative, Some(n) if n.phase == "parse");
+    match (expects_parse_error, result) {
+        (false, Ok(())) => Outcome::Pass,
+        (false, Err(e)) => Outcome::Fail(format!("{e}")),
+        (true, Err(_)) => Outcome::Pass,
+        (true, Ok(())) => {
+            Outcome::Fail("expected SyntaxError in phase parse but the source compiled".into())
+        }
     }
 }
 

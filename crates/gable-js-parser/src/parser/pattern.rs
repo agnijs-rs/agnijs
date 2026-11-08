@@ -24,7 +24,11 @@ impl<'s> Parser<'s> {
         if self.at(Punct::Eq) {
             self.advance()?;
             let right = self.with_in(true, |p| p.parse_assignment_expression())?;
-            return Ok(Pattern::Assignment(Box::new(AssignmentPattern { left: target, right, span: self.span_from(start) })));
+            return Ok(Pattern::Assignment(Box::new(AssignmentPattern {
+                left: target,
+                right,
+                span: self.span_from(start),
+            })));
         }
         Ok(target)
     }
@@ -43,7 +47,10 @@ impl<'s> Parser<'s> {
                 let s = self.tok.span.start;
                 self.advance()?;
                 let argument = self.parse_binding_target()?;
-                elements.push(Some(Pattern::Rest(Box::new(RestElement { argument, span: self.span_from(s) }))));
+                elements.push(Some(Pattern::Rest(Box::new(RestElement {
+                    argument,
+                    span: self.span_from(s),
+                }))));
                 if !self.at(Punct::RBracket) {
                     return self.err("rest element must be last", self.tok.span);
                 }
@@ -55,7 +62,10 @@ impl<'s> Parser<'s> {
             }
         }
         self.expect(Punct::RBracket)?;
-        Ok(Pattern::Array(Box::new(ArrayPattern { elements, span: self.span_from(start) })))
+        Ok(Pattern::Array(Box::new(ArrayPattern {
+            elements,
+            span: self.span_from(start),
+        })))
     }
 
     fn parse_object_binding_pattern(&mut self) -> Result<Pattern> {
@@ -77,29 +87,52 @@ impl<'s> Parser<'s> {
             let key = self.parse_property_key(false)?;
             if self.eat(Punct::Colon)? {
                 let value = self.parse_binding_element()?;
-                properties.push(ObjectPatternProperty { key, value, shorthand: false, span: self.span_from(pstart) });
+                properties.push(ObjectPatternProperty {
+                    key,
+                    value,
+                    shorthand: false,
+                    span: self.span_from(pstart),
+                });
             } else {
                 // Shorthand: the key must be a valid binding identifier.
-                let (PropertyKey::Ident(id), TokenKind::Ident { escaped, .. }) = (&key, &key_tok.kind) else {
+                let (PropertyKey::Ident(id), TokenKind::Ident { escaped, .. }) =
+                    (&key, &key_tok.kind)
+                else {
                     return self.unexpected();
                 };
                 self.check_identifier(&id.name, id.span, *escaped)?;
                 self.check_binding_identifier(&id.name, id.span)?;
-                let ident = Ident { name: id.name.clone(), span: id.span };
+                let ident = Ident {
+                    name: id.name.clone(),
+                    span: id.span,
+                };
                 let mut value = Pattern::Ident(ident);
                 if self.at(Punct::Eq) {
                     self.advance()?;
                     let right = self.with_in(true, |p| p.parse_assignment_expression())?;
-                    value = Pattern::Assignment(Box::new(AssignmentPattern { left: value, right, span: self.span_from(pstart) }));
+                    value = Pattern::Assignment(Box::new(AssignmentPattern {
+                        left: value,
+                        right,
+                        span: self.span_from(pstart),
+                    }));
                 }
-                properties.push(ObjectPatternProperty { key, value, shorthand: true, span: self.span_from(pstart) });
+                properties.push(ObjectPatternProperty {
+                    key,
+                    value,
+                    shorthand: true,
+                    span: self.span_from(pstart),
+                });
             }
             if !self.at(Punct::RBrace) {
                 self.expect(Punct::Comma)?;
             }
         }
         self.expect(Punct::RBrace)?;
-        Ok(Pattern::Object(Box::new(ObjectPattern { properties, rest, span: self.span_from(start) })))
+        Ok(Pattern::Object(Box::new(ObjectPattern {
+            properties,
+            rest,
+            span: self.span_from(start),
+        })))
     }
 
     /// Convert an expression parsed under the cover grammar into a pattern.
@@ -109,7 +142,12 @@ impl<'s> Parser<'s> {
         match e {
             Expression::Ident(id) => {
                 self.check_binding_identifier(&id.name, id.span)?;
-                if binding && !self.ctx.strict && Self::is_strict_reserved(&id.name) && &*id.name != "yield" && &*id.name != "let" {
+                if binding
+                    && !self.ctx.strict
+                    && Self::is_strict_reserved(&id.name)
+                    && &*id.name != "yield"
+                    && &*id.name != "let"
+                {
                     // fine in sloppy code
                 }
                 Ok(Pattern::Ident(id))
@@ -142,14 +180,21 @@ impl<'s> Parser<'s> {
                             }
                             let argument = self.expr_to_pattern(s.argument, binding)?;
                             if matches!(argument, Pattern::Assignment(_)) {
-                                return self.err("rest element may not have an initializer", s.span);
+                                return self
+                                    .err("rest element may not have an initializer", s.span);
                             }
-                            elements.push(Some(Pattern::Rest(Box::new(RestElement { argument, span: s.span }))));
+                            elements.push(Some(Pattern::Rest(Box::new(RestElement {
+                                argument,
+                                span: s.span,
+                            }))));
                         }
                         Some(e) => elements.push(Some(self.expr_to_pattern(e, binding)?)),
                     }
                 }
-                Ok(Pattern::Array(Box::new(ArrayPattern { elements, span: a.span })))
+                Ok(Pattern::Array(Box::new(ArrayPattern {
+                    elements,
+                    span: a.span,
+                })))
             }
             Expression::Object(o) => {
                 let o = *o;
@@ -166,8 +211,12 @@ impl<'s> Parser<'s> {
                                 return self.err("rest element must be last", s.span);
                             }
                             let target = match s.argument.unparen() {
-                                Expression::Ident(_) => self.expr_to_pattern(s.argument, binding)?,
-                                Expression::Member(_) if !binding => self.expr_to_pattern(s.argument, binding)?,
+                                Expression::Ident(_) => {
+                                    self.expr_to_pattern(s.argument, binding)?
+                                }
+                                Expression::Member(_) if !binding => {
+                                    self.expr_to_pattern(s.argument, binding)?
+                                }
                                 _ => return self.err("invalid rest element", s.span),
                             };
                             rest = Some(target);
@@ -177,11 +226,20 @@ impl<'s> Parser<'s> {
                                 return self.err("invalid destructuring assignment target", p.span);
                             }
                             let value = self.expr_to_pattern(p.value, binding)?;
-                            properties.push(ObjectPatternProperty { key: p.key, value, shorthand: p.shorthand, span: p.span });
+                            properties.push(ObjectPatternProperty {
+                                key: p.key,
+                                value,
+                                shorthand: p.shorthand,
+                                span: p.span,
+                            });
                         }
                     }
                 }
-                Ok(Pattern::Object(Box::new(ObjectPattern { properties, rest, span: o.span })))
+                Ok(Pattern::Object(Box::new(ObjectPattern {
+                    properties,
+                    rest,
+                    span: o.span,
+                })))
             }
             Expression::Assignment(a) => {
                 let a = *a;
@@ -193,8 +251,16 @@ impl<'s> Parser<'s> {
                 if let Pattern::Ident(id) = &a.left {
                     self.check_binding_identifier(&id.name, id.span)?;
                 }
-                let left = if binding { self.repattern_as_binding(a.left)? } else { a.left };
-                Ok(Pattern::Assignment(Box::new(AssignmentPattern { left, right: a.right, span: a.span })))
+                let left = if binding {
+                    self.repattern_as_binding(a.left)?
+                } else {
+                    a.left
+                };
+                Ok(Pattern::Assignment(Box::new(AssignmentPattern {
+                    left,
+                    right: a.right,
+                    span: a.span,
+                })))
             }
             other => self.err("invalid destructuring assignment target", other.span()),
         }
@@ -212,7 +278,13 @@ impl<'s> Parser<'s> {
             Pattern::Object(o) => {
                 let mut o = *o;
                 for prop in o.properties.iter_mut() {
-                    let v = std::mem::replace(&mut prop.value, Pattern::Ident(Ident { name: Rc::from(""), span: prop.span }));
+                    let v = std::mem::replace(
+                        &mut prop.value,
+                        Pattern::Ident(Ident {
+                            name: Rc::from(""),
+                            span: prop.span,
+                        }),
+                    );
                     prop.value = self.repattern_as_binding(v)?;
                 }
                 if let Some(r) = o.rest.take() {
@@ -245,11 +317,18 @@ impl<'s> Parser<'s> {
     /// A simple assignment target: identifier or member expression (call
     /// expressions too in sloppy code, Annex B, as a runtime error).
     /// `logical` is set for `&&=`, `||=`, `??=`, which reject calls.
-    pub(crate) fn expr_to_simple_target(&mut self, e: Expression, logical: bool) -> Result<Pattern> {
+    pub(crate) fn expr_to_simple_target(
+        &mut self,
+        e: Expression,
+        logical: bool,
+    ) -> Result<Pattern> {
         match e.unparen() {
             Expression::Ident(id) => {
                 if self.ctx.strict && (&*id.name == "eval" || &*id.name == "arguments") {
-                    return self.err(format!("cannot assign to '{}' in strict mode", id.name), id.span);
+                    return self.err(
+                        format!("cannot assign to '{}' in strict mode", id.name),
+                        id.span,
+                    );
                 }
                 match e {
                     Expression::Ident(id) => Ok(Pattern::Ident(id)),
@@ -257,7 +336,9 @@ impl<'s> Parser<'s> {
                 }
             }
             Expression::Member(_) => Ok(Pattern::Expression(Box::new(e))),
-            Expression::Call(c) if !self.ctx.strict && !logical && !c.optional => Ok(Pattern::Expression(Box::new(e))),
+            Expression::Call(c) if !self.ctx.strict && !logical && !c.optional => {
+                Ok(Pattern::Expression(Box::new(e)))
+            }
             _ => self.err("invalid assignment target", e.span()),
         }
     }

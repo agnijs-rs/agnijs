@@ -15,7 +15,7 @@ pub mod parser;
 pub mod span;
 
 pub use error::SyntaxError;
-pub use parser::{parse_module, parse_script};
+pub use parser::{parse_eval, parse_module, parse_script, EvalOptions};
 pub use span::{LineCol, LineTable, Span};
 
 #[cfg(test)]

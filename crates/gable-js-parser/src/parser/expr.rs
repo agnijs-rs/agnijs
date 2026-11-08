@@ -38,10 +38,17 @@ impl<'s> Parser<'s> {
         while self.eat(Punct::Comma)? {
             exprs.push(self.parse_assignment_expression()?);
         }
-        Ok(Expression::Sequence(Box::new(SequenceExpression { expressions: exprs, span: self.span_from(start) })))
+        Ok(Expression::Sequence(Box::new(SequenceExpression {
+            expressions: exprs,
+            span: self.span_from(start),
+        })))
     }
 
-    pub(crate) fn with_in<T>(&mut self, allow_in: bool, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+    pub(crate) fn with_in<T>(
+        &mut self,
+        allow_in: bool,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
         let old = std::mem::replace(&mut self.allow_in, allow_in);
         let r = f(self);
         self.allow_in = old;
@@ -50,7 +57,11 @@ impl<'s> Parser<'s> {
 
     /// Report a pending cover-grammar error if the expression just parsed
     /// cannot become a pattern any more.
-    fn settle_cover(&mut self, expr: &Expression, saved: Option<(Span, &'static str)>) -> Result<()> {
+    fn settle_cover(
+        &mut self,
+        expr: &Expression,
+        saved: Option<(Span, &'static str)>,
+    ) -> Result<()> {
         if let Some((span, msg)) = self.pending_cover {
             let still_pattern = matches!(expr, Expression::Object(_) | Expression::Array(_));
             if !still_pattern {
@@ -82,11 +93,23 @@ impl<'s> Parser<'s> {
                 self.check_identifier(&name, self.tok.span, escaped)?;
                 let span = self.tok.span;
                 self.advance()?;
-                let param = Ident { name: self.intern(&name), span };
-                return self.parse_arrow_from_params(start, vec![Pattern::Ident(param)], false, true);
+                let param = Ident {
+                    name: self.intern(&name),
+                    span,
+                };
+                return self.parse_arrow_from_params(
+                    start,
+                    vec![Pattern::Ident(param)],
+                    false,
+                    true,
+                );
             }
             if &*name == "async" && !escaped && !next.newline_before {
-                if let TokenKind::Ident { name: pname, escaped: pescaped } = &next.kind {
+                if let TokenKind::Ident {
+                    name: pname,
+                    escaped: pescaped,
+                } = &next.kind
+                {
                     // `async x =>`
                     let snap = self.snapshot();
                     self.advance()?;
@@ -99,8 +122,16 @@ impl<'s> Parser<'s> {
                         self.ctx = saved_ctx;
                         r?;
                         self.check_binding_identifier(pname, ptok.span)?;
-                        let param = Ident { name: self.intern(pname), span: ptok.span };
-                        return self.parse_arrow_from_params(start, vec![Pattern::Ident(param)], true, true);
+                        let param = Ident {
+                            name: self.intern(pname),
+                            span: ptok.span,
+                        };
+                        return self.parse_arrow_from_params(
+                            start,
+                            vec![Pattern::Ident(param)],
+                            true,
+                            true,
+                        );
                     }
                     self.rewind(snap);
                 }
@@ -117,18 +148,26 @@ impl<'s> Parser<'s> {
                 return self.unexpected();
             }
             if let Expression::Call(call) = &lhs {
-                if matches!(&call.callee, Expression::Ident(i) if &*i.name == "async") && self.async_arrow_ok(call) {
-                    let Expression::Call(call) = lhs else { unreachable!() };
+                if matches!(&call.callee, Expression::Ident(i) if &*i.name == "async")
+                    && self.async_arrow_ok(call)
+                {
+                    let Expression::Call(call) = lhs else {
+                        unreachable!()
+                    };
                     let call = *call;
                     if let Some(pos) = self.last_await {
                         if pos >= call.span.start && pos < call.span.end {
-                            return self.err("'await' is not allowed in async arrow parameters", Span::new(pos, pos + 5));
+                            return self.err(
+                                "'await' is not allowed in async arrow parameters",
+                                Span::new(pos, pos + 5),
+                            );
                         }
                     }
                     if let Some(Expression::Spread(s)) = call.arguments.last() {
                         let after = &self.source()[s.span.end as usize..call.span.end as usize];
                         if after.contains(',') {
-                            return self.err("rest parameter may not have a trailing comma", s.span);
+                            return self
+                                .err("rest parameter may not have a trailing comma", s.span);
                         }
                     }
                     let params = self.arguments_to_params(call.arguments)?;
@@ -177,7 +216,12 @@ impl<'s> Parser<'s> {
         };
         self.advance()?;
         let right = self.parse_assignment_expression()?;
-        Ok(Expression::Assignment(Box::new(AssignmentExpression { op, left, right, span: self.span_from(start) })))
+        Ok(Expression::Assignment(Box::new(AssignmentExpression {
+            op,
+            left,
+            right,
+            span: self.span_from(start),
+        })))
     }
 
     /// `async (...)` parsed as a call can be an arrow head only when there
@@ -186,7 +230,9 @@ impl<'s> Parser<'s> {
         if call.optional {
             return false;
         }
-        let Expression::Ident(id) = &call.callee else { return false };
+        let Expression::Ident(id) = &call.callee else {
+            return false;
+        };
         // An escaped `\u0061sync` is an ordinary identifier, not the keyword.
         if &self.source()[id.span.start as usize..id.span.end as usize] != "async" {
             return false;
@@ -194,7 +240,9 @@ impl<'s> Parser<'s> {
         let between = &self.source()[id.span.end as usize..];
         // Arguments start at the first `(`; anything before it is trivia.
         let paren = between.find('(').unwrap_or(0);
-        !between[..paren].chars().any(crate::lexer::is_line_terminator)
+        !between[..paren]
+            .chars()
+            .any(crate::lexer::is_line_terminator)
     }
 
     fn parse_yield(&mut self) -> Result<Expression> {
@@ -217,7 +265,11 @@ impl<'s> Parser<'s> {
                 argument = Some(self.parse_assignment_expression()?);
             }
         }
-        Ok(Expression::Yield(Box::new(YieldExpression { argument, delegate, span: self.span_from(start) })))
+        Ok(Expression::Yield(Box::new(YieldExpression {
+            argument,
+            delegate,
+            span: self.span_from(start),
+        })))
     }
 
     fn can_start_expression(&self) -> bool {
@@ -239,7 +291,9 @@ impl<'s> Parser<'s> {
                     | Punct::Hash
                     | Punct::At
             ),
-            TokenKind::Ident { name, .. } => !(&**name == "in" || &**name == "of" || &**name == "instanceof"),
+            TokenKind::Ident { name, .. } => {
+                !(&**name == "in" || &**name == "of" || &**name == "instanceof")
+            }
             TokenKind::PrivateName(_) => true,
             _ => true,
         }
@@ -295,7 +349,10 @@ impl<'s> Parser<'s> {
                 Punct::StarStar => (Binary(BinaryOp::Exp), PREC_EXP),
                 _ => return None,
             },
-            TokenKind::Ident { name, escaped: false } => match &**name {
+            TokenKind::Ident {
+                name,
+                escaped: false,
+            } => match &**name {
                 "in" if self.allow_in => (Binary(BinaryOp::In), PREC_RELATIONAL),
                 "instanceof" => (Binary(BinaryOp::Instanceof), PREC_RELATIONAL),
                 _ => return None,
@@ -322,12 +379,18 @@ impl<'s> Parser<'s> {
             let left = self.intern_private(&name, span)?;
             let right = self.parse_binary_expression(PREC_RELATIONAL + 1)?;
             self.no_arrow(&right)?;
-            Expression::PrivateIn(Box::new(PrivateInExpression { left, right, span: self.span_from(start) }))
+            Expression::PrivateIn(Box::new(PrivateInExpression {
+                left,
+                right,
+                span: self.span_from(start),
+            }))
         } else {
             self.parse_unary_expression()?
         };
         loop {
-            let Some((op, prec)) = self.binary_op() else { break };
+            let Some((op, prec)) = self.binary_op() else {
+                break;
+            };
             if prec < min_prec || (prec == min_prec && prec != PREC_EXP) {
                 break;
             }
@@ -347,19 +410,29 @@ impl<'s> Parser<'s> {
             self.no_arrow(&right)?;
             let span = self.span_from(start);
             left = match op {
-                BinOrLogical::Binary(op) => {
-                    Expression::Binary(Box::new(BinaryExpression { op, left, right, span }))
-                }
+                BinOrLogical::Binary(op) => Expression::Binary(Box::new(BinaryExpression {
+                    op,
+                    left,
+                    right,
+                    span,
+                })),
                 BinOrLogical::Logical(op) => {
                     // `??` cannot mix with `||`/`&&` without parentheses.
                     let is_mixed = |e: &Expression| match e {
-                        Expression::Logical(l) => (l.op == LogicalOp::Nullish) != (op == LogicalOp::Nullish),
+                        Expression::Logical(l) => {
+                            (l.op == LogicalOp::Nullish) != (op == LogicalOp::Nullish)
+                        }
                         _ => false,
                     };
                     if is_mixed(&left) || is_mixed(&right) {
                         return self.err("cannot mix ?? with || or && without parentheses", span);
                     }
-                    Expression::Logical(Box::new(LogicalExpression { op, left, right, span }))
+                    Expression::Logical(Box::new(LogicalExpression {
+                        op,
+                        left,
+                        right,
+                        span,
+                    }))
                 }
             };
         }
@@ -373,7 +446,10 @@ impl<'s> Parser<'s> {
             TokenKind::Punct(Punct::Plus) => Some(UnaryOp::Plus),
             TokenKind::Punct(Punct::Bang) => Some(UnaryOp::Not),
             TokenKind::Punct(Punct::Tilde) => Some(UnaryOp::BitNot),
-            TokenKind::Ident { name, escaped: false } => match &**name {
+            TokenKind::Ident {
+                name,
+                escaped: false,
+            } => match &**name {
                 "typeof" => Some(UnaryOp::Typeof),
                 "void" => Some(UnaryOp::Void),
                 "delete" => Some(UnaryOp::Delete),
@@ -388,7 +464,10 @@ impl<'s> Parser<'s> {
             if op == UnaryOp::Delete {
                 let inner = argument.unparen();
                 if self.ctx.strict && matches!(inner, Expression::Ident(_)) {
-                    return self.err("delete of an unqualified identifier in strict mode", argument.span());
+                    return self.err(
+                        "delete of an unqualified identifier in strict mode",
+                        argument.span(),
+                    );
                 }
                 if let Expression::Member(m) = inner {
                     if matches!(m.property, MemberProperty::Private(_)) {
@@ -403,7 +482,11 @@ impl<'s> Parser<'s> {
                     }
                 }
             }
-            return Ok(Expression::Unary(Box::new(UnaryExpression { op, argument, span: self.span_from(start) })));
+            return Ok(Expression::Unary(Box::new(UnaryExpression {
+                op,
+                argument,
+                span: self.span_from(start),
+            })));
         }
         if self.at(Punct::PlusPlus) || self.at(Punct::MinusMinus) {
             let increment = self.at(Punct::PlusPlus);
@@ -441,7 +524,10 @@ impl<'s> Parser<'s> {
             self.pending_yield_await = Some(span);
         }
         let argument = self.parse_unary_expression()?;
-        Ok(Expression::Await(Box::new(AwaitExpression { argument, span: self.span_from(start) })))
+        Ok(Expression::Await(Box::new(AwaitExpression {
+            argument,
+            span: self.span_from(start),
+        })))
     }
 
     fn check_update_target(&mut self, e: Expression) -> Result<Expression> {
@@ -470,13 +556,19 @@ impl<'s> Parser<'s> {
         if self.tok.newline_before {
             return Ok(true);
         }
-        self.err("arrow function must be parenthesised to be used as an operand", self.tok.span)
+        self.err(
+            "arrow function must be parenthesised to be used as an operand",
+            self.tok.span,
+        )
     }
 
     /// Rejects an unparenthesised arrow function used as an operand.
     pub(crate) fn no_arrow(&self, e: &Expression) -> Result<()> {
         if matches!(e, Expression::Arrow(_)) {
-            return self.err("arrow function must be parenthesised to be used as an operand", e.span());
+            return self.err(
+                "arrow function must be parenthesised to be used as an operand",
+                e.span(),
+            );
         }
         Ok(())
     }
@@ -517,7 +609,9 @@ impl<'s> Parser<'s> {
             if matches!(expr, Expression::Arrow(_))
                 && matches!(
                     self.tok.kind,
-                    TokenKind::Punct(Punct::Dot | Punct::LParen | Punct::LBracket | Punct::QuestionDot) | TokenKind::Template { .. }
+                    TokenKind::Punct(
+                        Punct::Dot | Punct::LParen | Punct::LBracket | Punct::QuestionDot
+                    ) | TokenKind::Template { .. }
                 )
                 && self.arrow_stops(&expr)?
             {
@@ -556,7 +650,10 @@ impl<'s> Parser<'s> {
                             span: self.span_from(start),
                         }));
                     } else if matches!(self.tok.kind, TokenKind::Template { .. }) {
-                        return self.err("tagged template cannot be used in an optional chain", self.tok.span);
+                        return self.err(
+                            "tagged template cannot be used in an optional chain",
+                            self.tok.span,
+                        );
                     } else {
                         let property = self.parse_member_name()?;
                         expr = Expression::Member(Box::new(MemberExpression {
@@ -594,7 +691,10 @@ impl<'s> Parser<'s> {
                 }
                 TokenKind::Template { .. } => {
                     if in_chain {
-                        return self.err("tagged template cannot be used in an optional chain", self.tok.span);
+                        return self.err(
+                            "tagged template cannot be used in an optional chain",
+                            self.tok.span,
+                        );
                     }
                     let quasi = self.parse_template_literal(true)?;
                     expr = Expression::TaggedTemplate(Box::new(TaggedTemplate {
@@ -630,7 +730,11 @@ impl<'s> Parser<'s> {
             return self.err(format!("private name #{name} used outside a class"), span);
         }
         let name = self.intern(name);
-        self.private_envs.last_mut().unwrap().referenced.push((name.clone(), span));
+        self.private_envs
+            .last_mut()
+            .unwrap()
+            .referenced
+            .push((name.clone(), span));
         Ok(PrivateName { name, span })
     }
 
@@ -644,7 +748,10 @@ impl<'s> Parser<'s> {
                 return self.unexpected();
             }
             if !self.ctx.new_target {
-                return self.err("new.target is not allowed here", Span::new(start, self.tok.span.end));
+                return self.err(
+                    "new.target is not allowed here",
+                    Span::new(start, self.tok.span.end),
+                );
             }
             self.advance()?;
             return Ok(Expression::MetaProperty(MetaProperty {
@@ -704,8 +811,16 @@ impl<'s> Parser<'s> {
                 _ => break,
             }
         }
-        let arguments = if self.at(Punct::LParen) { self.parse_arguments()? } else { Vec::new() };
-        Ok(Expression::New(Box::new(NewExpression { callee, arguments, span: self.span_from(start) })))
+        let arguments = if self.at(Punct::LParen) {
+            self.parse_arguments()?
+        } else {
+            Vec::new()
+        };
+        Ok(Expression::New(Box::new(NewExpression {
+            callee,
+            arguments,
+            span: self.span_from(start),
+        })))
     }
 
     fn parse_super(&mut self) -> Result<Expression> {
@@ -713,7 +828,10 @@ impl<'s> Parser<'s> {
         self.advance()?;
         if self.at(Punct::LParen) {
             if !self.ctx.super_call {
-                return self.err("'super' call is only allowed in derived class constructors", span);
+                return self.err(
+                    "'super' call is only allowed in derived class constructors",
+                    span,
+                );
             }
         } else if self.at(Punct::Dot) || self.at(Punct::LBracket) {
             if !self.ctx.super_property {
@@ -726,7 +844,10 @@ impl<'s> Parser<'s> {
                 }
             }
         } else {
-            return self.err("'super' must be followed by an argument list or property access", span);
+            return self.err(
+                "'super' must be followed by an argument list or property access",
+                span,
+            );
         }
         Ok(Expression::Super(span))
     }
@@ -741,7 +862,10 @@ impl<'s> Parser<'s> {
                 return self.unexpected();
             }
             if !self.lexer.module {
-                return self.err("import.meta is only valid in module code", Span::new(start, self.tok.span.end));
+                return self.err(
+                    "import.meta is only valid in module code",
+                    Span::new(start, self.tok.span.end),
+                );
             }
             self.advance()?;
             return Ok(Expression::MetaProperty(MetaProperty {
@@ -760,7 +884,11 @@ impl<'s> Parser<'s> {
             self.eat(Punct::Comma)?;
         }
         self.expect(Punct::RParen)?;
-        Ok(Expression::Import(Box::new(ImportCall { source, options, span: self.span_from(start) })))
+        Ok(Expression::Import(Box::new(ImportCall {
+            source,
+            options,
+            span: self.span_from(start),
+        })))
     }
 
     pub(crate) fn parse_arguments(&mut self) -> Result<Vec<Expression>> {
@@ -772,7 +900,10 @@ impl<'s> Parser<'s> {
                     let start = p.tok.span.start;
                     p.advance()?;
                     let argument = p.parse_assignment_expression()?;
-                    args.push(Expression::Spread(Box::new(SpreadElement { argument, span: p.span_from(start) })));
+                    args.push(Expression::Spread(Box::new(SpreadElement {
+                        argument,
+                        span: p.span_from(start),
+                    })));
                 } else {
                     args.push(p.parse_assignment_expression()?);
                 }
@@ -829,7 +960,10 @@ impl<'s> Parser<'s> {
                 }
                 self.check_identifier(&name, span, escaped)?;
                 if self.ctx.no_arguments && &*name == "arguments" {
-                    return self.err("'arguments' is not allowed in class field initializers or static blocks", span);
+                    return self.err(
+                        "'arguments' is not allowed in class field initializers or static blocks",
+                        span,
+                    );
                 }
                 self.advance()?;
                 let name = self.intern(&name);
@@ -837,7 +971,13 @@ impl<'s> Parser<'s> {
             }
             TokenKind::Number { value, kind } => {
                 let value = *value;
-                if self.ctx.strict && matches!(kind, crate::lexer::NumberKind::LegacyOctal | crate::lexer::NumberKind::LegacyDecimal) {
+                if self.ctx.strict
+                    && matches!(
+                        kind,
+                        crate::lexer::NumberKind::LegacyOctal
+                            | crate::lexer::NumberKind::LegacyDecimal
+                    )
+                {
                     return self.err("legacy octal literals are not allowed in strict mode", span);
                 }
                 self.advance()?;
@@ -848,27 +988,41 @@ impl<'s> Parser<'s> {
                 self.advance()?;
                 Ok(Expression::BigInt(digits, span))
             }
-            TokenKind::String { value, legacy_octal } => {
+            TokenKind::String {
+                value,
+                legacy_octal,
+            } => {
                 let value: Rc<[u16]> = Rc::from(&**value);
                 if self.ctx.strict && *legacy_octal {
-                    return self.err("octal escape sequences are not allowed in strict mode", span);
+                    return self.err(
+                        "octal escape sequences are not allowed in strict mode",
+                        span,
+                    );
                 }
                 self.advance()?;
                 Ok(Expression::String(StringLiteral { value, span }))
             }
-            TokenKind::Template { .. } => Ok(Expression::Template(Box::new(self.parse_template_literal(false)?))),
+            TokenKind::Template { .. } => Ok(Expression::Template(Box::new(
+                self.parse_template_literal(false)?,
+            ))),
             TokenKind::RegExp { .. } => unreachable!("regexp tokens are produced by rescan only"),
             TokenKind::Punct(Punct::Slash) | TokenKind::Punct(Punct::SlashEq) => {
                 let tok = self.lexer.rescan_regexp(&self.tok)?;
                 self.tok = tok;
-                let TokenKind::RegExp { pattern, flags } = &self.tok.kind else { unreachable!() };
+                let TokenKind::RegExp { pattern, flags } = &self.tok.kind else {
+                    unreachable!()
+                };
                 let (pattern, flags) = (pattern.clone(), flags.clone());
                 let span = self.tok.span;
                 if let Err(msg) = gable_js_regex::syntax::validate(&pattern, &flags) {
                     return self.err(format!("invalid regular expression: {msg}"), span);
                 }
                 self.advance()?;
-                Ok(Expression::RegExp(Box::new(RegExpLiteral { pattern, flags, span })))
+                Ok(Expression::RegExp(Box::new(RegExpLiteral {
+                    pattern,
+                    flags,
+                    span,
+                })))
             }
             TokenKind::Punct(Punct::LBracket) => self.parse_array_literal(),
             TokenKind::Punct(Punct::LBrace) => self.parse_object_literal(),
@@ -907,7 +1061,11 @@ impl<'s> Parser<'s> {
             // Re-lex from the `}` as a template continuation.
             self.tok = self.lexer.rescan_template_continuation(&self.tok)?;
         }
-        Ok(TemplateLiteral { quasis, expressions, span: self.span_from(start) })
+        Ok(TemplateLiteral {
+            quasis,
+            expressions,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expression> {
@@ -927,7 +1085,10 @@ impl<'s> Parser<'s> {
                     let s = p.tok.span.start;
                     p.advance()?;
                     let argument = p.parse_assignment_expression()?;
-                    Expression::Spread(Box::new(SpreadElement { argument, span: p.span_from(s) }))
+                    Expression::Spread(Box::new(SpreadElement {
+                        argument,
+                        span: p.span_from(s),
+                    }))
                 } else {
                     p.parse_assignment_expression()?
                 };
@@ -955,16 +1116,28 @@ impl<'s> Parser<'s> {
         let span = self.tok.span;
         match &self.tok.kind {
             TokenKind::Ident { .. } => Ok(PropertyKey::Ident(self.parse_identifier_name()?)),
-            TokenKind::String { value, legacy_octal } => {
+            TokenKind::String {
+                value,
+                legacy_octal,
+            } => {
                 if self.ctx.strict && *legacy_octal {
-                    return self.err("octal escape sequences are not allowed in strict mode", span);
+                    return self.err(
+                        "octal escape sequences are not allowed in strict mode",
+                        span,
+                    );
                 }
                 let value: Rc<[u16]> = Rc::from(&**value);
                 self.advance()?;
                 Ok(PropertyKey::String(StringLiteral { value, span }))
             }
             TokenKind::Number { value, kind } => {
-                if self.ctx.strict && matches!(kind, crate::lexer::NumberKind::LegacyOctal | crate::lexer::NumberKind::LegacyDecimal) {
+                if self.ctx.strict
+                    && matches!(
+                        kind,
+                        crate::lexer::NumberKind::LegacyOctal
+                            | crate::lexer::NumberKind::LegacyDecimal
+                    )
+                {
                     return self.err("legacy octal literals are not allowed in strict mode", span);
                 }
                 let v = *value;
@@ -986,9 +1159,15 @@ impl<'s> Parser<'s> {
                 let name = name.clone();
                 self.advance()?;
                 if &*name == "constructor" {
-                    return self.err("classes cannot have a private member named #constructor", span);
+                    return self.err(
+                        "classes cannot have a private member named #constructor",
+                        span,
+                    );
                 }
-                Ok(PropertyKey::Private(PrivateName { name: self.intern(&name), span }))
+                Ok(PropertyKey::Private(PrivateName {
+                    name: self.intern(&name),
+                    span,
+                }))
             }
             _ => self.unexpected(),
         }
@@ -1006,7 +1185,10 @@ impl<'s> Parser<'s> {
                     let s = p.tok.span.start;
                     p.advance()?;
                     let argument = p.parse_assignment_expression()?;
-                    properties.push(ObjectProperty::Spread(SpreadElement { argument, span: p.span_from(s) }));
+                    properties.push(ObjectProperty::Spread(SpreadElement {
+                        argument,
+                        span: p.span_from(s),
+                    }));
                     trailing_comma_after_spread = p.at(Punct::Comma);
                 } else {
                     trailing_comma_after_spread = false;
@@ -1016,7 +1198,10 @@ impl<'s> Parser<'s> {
                             // Deferred: a duplicate __proto__ is fine in a
                             // destructuring pattern.
                             if p.pending_cover.is_none() {
-                                p.pending_cover = Some((prop.span, "duplicate __proto__ fields are not allowed in object literals"));
+                                p.pending_cover = Some((
+                                    prop.span,
+                                    "duplicate __proto__ fields are not allowed in object literals",
+                                ));
                             }
                         }
                         seen_proto = Some(prop.span);
@@ -1030,7 +1215,11 @@ impl<'s> Parser<'s> {
             Ok(())
         })?;
         self.expect(Punct::RBrace)?;
-        Ok(Expression::Object(Box::new(ObjectExpression { properties, trailing_comma_after_spread, span: self.span_from(start) })))
+        Ok(Expression::Object(Box::new(ObjectExpression {
+            properties,
+            trailing_comma_after_spread,
+            span: self.span_from(start),
+        })))
     }
 
     fn parse_object_property(&mut self) -> Result<Property> {
@@ -1040,7 +1229,11 @@ impl<'s> Parser<'s> {
         let mut is_generator = false;
         let mut accessor: Option<PropertyKind> = None;
 
-        if let TokenKind::Ident { name, escaped: false } = &self.tok.kind {
+        if let TokenKind::Ident {
+            name,
+            escaped: false,
+        } = &self.tok.kind
+        {
             let name = name.clone();
             let next = self.peek()?;
             let next_is_key_start = !matches!(
@@ -1081,8 +1274,21 @@ impl<'s> Parser<'s> {
         let is_ident_key = matches!(key_tok.kind, TokenKind::Ident { .. });
 
         if let Some(kind) = accessor {
-            let func = self.parse_method(FunctionKind::Normal, true, false, kind == PropertyKind::Get, kind == PropertyKind::Set)?;
-            return Ok(Property { key, value: Expression::Function(Box::new(func)), kind, shorthand: false, is_proto_setter: false, span: self.span_from(start) });
+            let func = self.parse_method(
+                FunctionKind::Normal,
+                true,
+                false,
+                kind == PropertyKind::Get,
+                kind == PropertyKind::Set,
+            )?;
+            return Ok(Property {
+                key,
+                value: Expression::Function(Box::new(func)),
+                kind,
+                shorthand: false,
+                is_proto_setter: false,
+                span: self.span_from(start),
+            });
         }
         if is_async || is_generator || self.at(Punct::LParen) {
             let kind = match (is_async, is_generator) {
@@ -1092,28 +1298,54 @@ impl<'s> Parser<'s> {
                 _ => FunctionKind::Normal,
             };
             let func = self.parse_method(kind, true, false, false, false)?;
-            return Ok(Property { key, value: Expression::Function(Box::new(func)), kind: PropertyKind::Method, shorthand: false, is_proto_setter: false, span: self.span_from(start) });
+            return Ok(Property {
+                key,
+                value: Expression::Function(Box::new(func)),
+                kind: PropertyKind::Method,
+                shorthand: false,
+                is_proto_setter: false,
+                span: self.span_from(start),
+            });
         }
         if self.eat(Punct::Colon)? {
             let value = self.parse_assignment_expression()?;
             let is_proto_setter = match &key {
                 PropertyKey::Ident(i) => &*i.name == "__proto__",
-                PropertyKey::String(s) => &*s.value == "__proto__".encode_utf16().collect::<Vec<_>>().as_slice(),
+                PropertyKey::String(s) => {
+                    &*s.value == "__proto__".encode_utf16().collect::<Vec<_>>().as_slice()
+                }
                 _ => false,
             };
-            return Ok(Property { key, value, kind: PropertyKind::Init, shorthand: false, is_proto_setter, span: self.span_from(start) });
+            return Ok(Property {
+                key,
+                value,
+                kind: PropertyKind::Init,
+                shorthand: false,
+                is_proto_setter,
+                span: self.span_from(start),
+            });
         }
         // Shorthand `a` or cover `a = 1`.
         if !is_ident_key {
             return self.unexpected();
         }
-        let PropertyKey::Ident(id) = &key else { unreachable!() };
-        let TokenKind::Ident { escaped, .. } = key_tok.kind else { unreachable!() };
+        let PropertyKey::Ident(id) = &key else {
+            unreachable!()
+        };
+        let TokenKind::Ident { escaped, .. } = key_tok.kind else {
+            unreachable!()
+        };
         self.check_identifier(&id.name, id.span, escaped)?;
         if self.ctx.no_arguments && &*id.name == "arguments" {
-            return self.err("'arguments' is not allowed in class field initializers or static blocks", id.span);
+            return self.err(
+                "'arguments' is not allowed in class field initializers or static blocks",
+                id.span,
+            );
         }
-        let ident = Ident { name: id.name.clone(), span: id.span };
+        let ident = Ident {
+            name: id.name.clone(),
+            span: id.span,
+        };
         if self.at(Punct::Eq) {
             // CoverInitializedName: only valid as a destructuring pattern.
             let eq_span = self.tok.span;
@@ -1129,9 +1361,23 @@ impl<'s> Parser<'s> {
                 right,
                 span,
             }));
-            return Ok(Property { key, value, kind: PropertyKind::Init, shorthand: true, is_proto_setter: false, span });
+            return Ok(Property {
+                key,
+                value,
+                kind: PropertyKind::Init,
+                shorthand: true,
+                is_proto_setter: false,
+                span,
+            });
         }
-        Ok(Property { key, value: Expression::Ident(ident), kind: PropertyKind::Init, shorthand: true, is_proto_setter: false, span: self.span_from(start) })
+        Ok(Property {
+            key,
+            value: Expression::Ident(ident),
+            kind: PropertyKind::Init,
+            shorthand: true,
+            is_proto_setter: false,
+            span: self.span_from(start),
+        })
     }
 
     /// `(` ... `)`: a parenthesised expression or an arrow head.
@@ -1149,7 +1395,10 @@ impl<'s> Parser<'s> {
                     let s = p.tok.span.start;
                     p.advance()?;
                     let target = p.parse_binding_target()?;
-                    rest = Some(Pattern::Rest(Box::new(RestElement { argument: target, span: p.span_from(s) })));
+                    rest = Some(Pattern::Rest(Box::new(RestElement {
+                        argument: target,
+                        span: p.span_from(s),
+                    })));
                     if !p.at(Punct::RParen) {
                         return p.err("rest parameter must be last", p.tok.span);
                     }
@@ -1169,7 +1418,10 @@ impl<'s> Parser<'s> {
 
         if self.at(Punct::Arrow) && !self.tok.newline_before {
             if let Some(span) = self.pending_yield_await {
-                return self.err("yield/await expressions are not allowed in arrow parameters", span);
+                return self.err(
+                    "yield/await expressions are not allowed in arrow parameters",
+                    span,
+                );
             }
             self.pending_yield_await = saved_ya;
             let mut params = Vec::new();
@@ -1201,7 +1453,10 @@ impl<'s> Parser<'s> {
             items.pop().unwrap()
         } else {
             let s = Span::new(items[0].span().start, items.last().unwrap().span().end);
-            Expression::Sequence(Box::new(SequenceExpression { expressions: items, span: s }))
+            Expression::Sequence(Box::new(SequenceExpression {
+                expressions: items,
+                span: s,
+            }))
         };
         Ok(Expression::Paren(Box::new(inner), span))
     }
@@ -1220,7 +1475,10 @@ impl<'s> Parser<'s> {
                     if matches!(argument, Pattern::Assignment(_)) {
                         return self.err("rest parameter may not have an initializer", s.span);
                     }
-                    params.push(Pattern::Rest(Box::new(RestElement { argument, span: s.span })));
+                    params.push(Pattern::Rest(Box::new(RestElement {
+                        argument,
+                        span: s.span,
+                    })));
                 }
                 e => params.push(self.expr_to_pattern(e, true)?),
             }

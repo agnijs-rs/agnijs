@@ -11,6 +11,7 @@ description = "gable-js-test262"
 gable-engine-api.workspace = true
 gable-engine-quickjs.workspace = true
 gable-js-parser.workspace = true
+gable-js-compiler.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true

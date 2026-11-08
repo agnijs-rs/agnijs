@@ -101,6 +101,9 @@ pub struct Parser<'s> {
     /// Start offset of the last `await` identifier seen, so that
     /// `async (x = await) =>` can be rejected after the fact.
     last_await: Option<u32>,
+    /// The outermost private environment was seeded by `parse_eval`:
+    /// unresolved names in it are errors (they cannot bubble further).
+    eval_private_env: bool,
 }
 
 pub(crate) struct Saved {
@@ -131,6 +134,7 @@ impl<'s> Parser<'s> {
             names: HashMap::new(),
             has_direct_eval: false,
             last_await: None,
+            eval_private_env: false,
         })
     }
 
@@ -217,7 +221,10 @@ impl<'s> Parser<'s> {
         if self.at_kw(name) {
             Ok(self.advance()?.span)
         } else if self.at_name(name) {
-            self.err(format!("keyword '{name}' must not contain escape sequences"), self.tok.span)
+            self.err(
+                format!("keyword '{name}' must not contain escape sequences"),
+                self.tok.span,
+            )
         } else {
             self.unexpected()
         }
@@ -307,7 +314,15 @@ impl<'s> Parser<'s> {
     pub(crate) fn is_strict_reserved(name: &str) -> bool {
         matches!(
             name,
-            "implements" | "interface" | "let" | "package" | "private" | "protected" | "public" | "static" | "yield"
+            "implements"
+                | "interface"
+                | "let"
+                | "package"
+                | "private"
+                | "protected"
+                | "public"
+                | "static"
+                | "yield"
         )
     }
 
@@ -327,7 +342,10 @@ impl<'s> Parser<'s> {
         }
         if self.is_reserved_word(name) {
             if escaped {
-                return self.err(format!("keyword '{name}' must not contain escape sequences"), span);
+                return self.err(
+                    format!("keyword '{name}' must not contain escape sequences"),
+                    span,
+                );
             }
             return self.err(format!("unexpected reserved word '{name}'"), span);
         }
@@ -342,7 +360,10 @@ impl<'s> Parser<'s> {
             }
         }
         if self.ctx.strict && Self::is_strict_reserved(name) {
-            return self.err(format!("unexpected strict mode reserved word '{name}'"), span);
+            return self.err(
+                format!("unexpected strict mode reserved word '{name}'"),
+                span,
+            );
         }
         Ok(())
     }
@@ -422,9 +443,21 @@ impl<'s> Parser<'s> {
         if module {
             self.check_module_exports(&body)?;
         }
+        if self.eval_private_env {
+            let env = self.private_envs.pop().unwrap();
+            for (name, span) in env.referenced.iter() {
+                if !env.is_declared(name) {
+                    return self.err(format!("private name #{name} is not defined"), *span);
+                }
+            }
+        }
         self.scopes.pop();
         Ok(Program {
-            source_type: if module { SourceType::Module } else { SourceType::Script },
+            source_type: if module {
+                SourceType::Module
+            } else {
+                SourceType::Script
+            },
             body,
             strict: self.ctx.strict,
             span: Span::new(start, self.lexer.source().len() as u32),
@@ -433,7 +466,11 @@ impl<'s> Parser<'s> {
 
     /// Parse statements with a directive prologue; sets strict mode when
     /// `"use strict"` appears. Stops at `}` or EOF.
-    pub(crate) fn parse_body_with_prologue(&mut self, top_level: bool, module: bool) -> Result<Vec<Statement>> {
+    pub(crate) fn parse_body_with_prologue(
+        &mut self,
+        top_level: bool,
+        module: bool,
+    ) -> Result<Vec<Statement>> {
         let mut body = Vec::new();
         let mut in_prologue = true;
         // Legacy octal escapes in directives before "use strict" become
@@ -444,27 +481,38 @@ impl<'s> Parser<'s> {
                 break;
             }
             if in_prologue {
-                if let TokenKind::String { value, legacy_octal } = &self.tok.kind {
-                    let is_use_strict = &**value == "use strict".encode_utf16().collect::<Vec<_>>().as_slice();
+                if let TokenKind::String {
+                    value,
+                    legacy_octal,
+                } = &self.tok.kind
+                {
+                    let is_use_strict =
+                        &**value == "use strict".encode_utf16().collect::<Vec<_>>().as_slice();
                     let legacy_octal = *legacy_octal;
                     let span = self.tok.span;
                     // A directive is a string literal statement on its own.
                     let next = self.peek()?;
-                    let ends = matches!(next.kind, TokenKind::Punct(Punct::Semicolon) | TokenKind::Punct(Punct::RBrace))
-                        || next.kind == TokenKind::Eof
+                    let ends = matches!(
+                        next.kind,
+                        TokenKind::Punct(Punct::Semicolon) | TokenKind::Punct(Punct::RBrace)
+                    ) || next.kind == TokenKind::Eof
                         || next.newline_before;
                     if ends {
                         if legacy_octal && octal_directive.is_none() {
                             octal_directive = Some(span);
                         }
-                        let raw = &self.lexer.source()[span.start as usize + 1..span.end as usize - 1];
+                        let raw =
+                            &self.lexer.source()[span.start as usize + 1..span.end as usize - 1];
                         let raw_is_use_strict = raw == "use strict";
                         if is_use_strict && raw_is_use_strict {
                             if !self.ctx.strict {
                                 self.ctx.strict = true;
                             }
                             if let Some(o) = octal_directive {
-                                return self.err("octal escape sequences are not allowed in strict mode", o);
+                                return self.err(
+                                    "octal escape sequences are not allowed in strict mode",
+                                    o,
+                                );
                             }
                         }
                         let stmt = self.parse_statement_list_item(top_level, module)?;
@@ -500,4 +548,50 @@ pub fn parse_script(source: &str) -> Result<Program> {
 /// Parse a module.
 pub fn parse_module(source: &str) -> Result<Program> {
     Parser::new(source, true)?.parse_program()
+}
+
+/// The syntactic context of a direct `eval` call (PerformEval's
+/// in-function, in-method, in-derived-constructor and in-class-field
+/// initializer flags, plus strictness and the visible private names).
+#[derive(Clone, Debug, Default)]
+pub struct EvalOptions {
+    pub strict: bool,
+    /// Inside a non-arrow function: `new.target` allowed.
+    pub in_function: bool,
+    /// Inside a method: `super.x` allowed.
+    pub in_method: bool,
+    /// Inside a derived constructor: `super()` allowed.
+    pub in_derived_constructor: bool,
+    /// Inside a class field initializer or static block: `arguments`
+    /// forbidden.
+    pub in_class_field_initializer: bool,
+    /// Private names visible at the call site.
+    pub private_names: Vec<Rc<str>>,
+}
+
+/// Parse eval code. The result is a script whose `strict` flag reflects
+/// both the options and a "use strict" directive.
+pub fn parse_eval(source: &str, options: &EvalOptions) -> Result<Program> {
+    let mut p = Parser::new(source, false)?;
+    p.ctx.strict = options.strict;
+    p.ctx.new_target = options.in_function;
+    p.ctx.super_property = options.in_method;
+    p.ctx.super_call = options.in_derived_constructor;
+    p.ctx.no_arguments = options.in_class_field_initializer;
+    if !options.private_names.is_empty() {
+        let mut env = PrivateEnv::default();
+        for name in &options.private_names {
+            // Visible names are declared with a private kind that cannot
+            // clash; eval code cannot declare into this environment.
+            env.declare(
+                name.clone(),
+                Span::empty(0),
+                scope::PrivateKind::Other,
+                false,
+            )?;
+        }
+        p.private_envs.push(env);
+        p.eval_private_env = true;
+    }
+    p.parse_program()
 }

@@ -24,7 +24,9 @@ pub(crate) enum LexKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScopeKind {
     /// Script, function body, class static block or module top level.
-    FunctionTop { module: bool },
+    FunctionTop {
+        module: bool,
+    },
     Block,
     Catch,
 }
@@ -44,7 +46,13 @@ pub(crate) struct Scope {
 
 impl Scope {
     fn new(kind: ScopeKind) -> Scope {
-        Scope { kind, lexical: HashMap::new(), vars: HashSet::new(), params: HashSet::new(), top_functions: HashSet::new() }
+        Scope {
+            kind,
+            lexical: HashMap::new(),
+            vars: HashSet::new(),
+            params: HashSet::new(),
+            top_functions: HashSet::new(),
+        }
     }
 }
 
@@ -59,7 +67,8 @@ impl ScopeStack {
     }
 
     pub fn push_function_top(&mut self, module: bool) {
-        self.scopes.push(Scope::new(ScopeKind::FunctionTop { module }));
+        self.scopes
+            .push(Scope::new(ScopeKind::FunctionTop { module }));
     }
 
     pub fn push_block(&mut self) {
@@ -75,7 +84,9 @@ impl ScopeStack {
     }
 
     fn current(&mut self) -> &mut Scope {
-        self.scopes.last_mut().expect("scope stack is never empty while parsing")
+        self.scopes
+            .last_mut()
+            .expect("scope stack is never empty while parsing")
     }
 
     /// Record a parameter name in the enclosing function-top scope.
@@ -85,28 +96,54 @@ impl ScopeStack {
 
     pub fn declare_catch_param(&mut self, name: Rc<str>, span: Span, simple: bool) -> Result<()> {
         let scope = self.current();
-        let kind = if simple { LexKind::CatchParamSimple } else { LexKind::CatchParamPattern };
+        let kind = if simple {
+            LexKind::CatchParamSimple
+        } else {
+            LexKind::CatchParamPattern
+        };
         if scope.lexical.insert(name.clone(), kind).is_some() {
-            return Err(SyntaxError::new(format!("duplicate catch parameter '{name}'"), span));
+            return Err(SyntaxError::new(
+                format!("duplicate catch parameter '{name}'"),
+                span,
+            ));
         }
         Ok(())
     }
 
     /// Declare a `let`/`const`/`class`/import binding (or a block-level
     /// function declaration) in the current scope.
-    pub fn declare_lexical(&mut self, name: Rc<str>, span: Span, kind: LexKind, strict: bool) -> Result<()> {
+    pub fn declare_lexical(
+        &mut self,
+        name: Rc<str>,
+        span: Span,
+        kind: LexKind,
+        strict: bool,
+    ) -> Result<()> {
         if &*name == "let" && kind != LexKind::BlockFunction {
-            return Err(SyntaxError::new("'let' cannot be a lexically bound name", span));
+            return Err(SyntaxError::new(
+                "'let' cannot be a lexically bound name",
+                span,
+            ));
         }
         let scope = self.current();
         if let Some(existing) = scope.lexical.get(&name) {
-            let both_functions = *existing == LexKind::BlockFunction && kind == LexKind::BlockFunction;
+            let both_functions =
+                *existing == LexKind::BlockFunction && kind == LexKind::BlockFunction;
             if !(both_functions && !strict && scope.kind == ScopeKind::Block) {
-                return Err(SyntaxError::new(format!("identifier '{name}' has already been declared"), span));
+                return Err(SyntaxError::new(
+                    format!("identifier '{name}' has already been declared"),
+                    span,
+                ));
             }
         }
-        if scope.vars.contains(&name) || scope.top_functions.contains(&name) || scope.params.contains(&name) {
-            return Err(SyntaxError::new(format!("identifier '{name}' has already been declared"), span));
+        if scope.vars.contains(&name)
+            || scope.top_functions.contains(&name)
+            || scope.params.contains(&name)
+        {
+            return Err(SyntaxError::new(
+                format!("identifier '{name}' has already been declared"),
+                span,
+            ));
         }
         scope.lexical.insert(name, kind);
         Ok(())
@@ -119,7 +156,10 @@ impl ScopeStack {
             if let Some(kind) = scope.lexical.get(&name) {
                 let allowed = *kind == LexKind::CatchParamSimple;
                 if !allowed {
-                    return Err(SyntaxError::new(format!("identifier '{name}' has already been declared"), span));
+                    return Err(SyntaxError::new(
+                        format!("identifier '{name}' has already been declared"),
+                        span,
+                    ));
                 }
             }
             scope.vars.insert(name.clone());
@@ -135,19 +175,34 @@ impl ScopeStack {
     /// top level and in blocks, function declarations are lexical.
     /// `plain` is false for generators and async functions, which never
     /// get the Annex B duplicate allowance in blocks.
-    pub fn declare_function(&mut self, name: Rc<str>, span: Span, strict: bool, plain: bool) -> Result<()> {
+    pub fn declare_function(
+        &mut self,
+        name: Rc<str>,
+        span: Span,
+        strict: bool,
+        plain: bool,
+    ) -> Result<()> {
         let scope = self.current();
         match scope.kind {
             ScopeKind::FunctionTop { module: false } => {
                 if scope.lexical.contains_key(&name) {
-                    return Err(SyntaxError::new(format!("identifier '{name}' has already been declared"), span));
+                    return Err(SyntaxError::new(
+                        format!("identifier '{name}' has already been declared"),
+                        span,
+                    ));
                 }
                 scope.top_functions.insert(name);
                 Ok(())
             }
-            ScopeKind::FunctionTop { module: true } => self.declare_lexical(name, span, LexKind::Lexical, strict),
+            ScopeKind::FunctionTop { module: true } => {
+                self.declare_lexical(name, span, LexKind::Lexical, strict)
+            }
             ScopeKind::Block | ScopeKind::Catch => {
-                let kind = if plain { LexKind::BlockFunction } else { LexKind::Lexical };
+                let kind = if plain {
+                    LexKind::BlockFunction
+                } else {
+                    LexKind::Lexical
+                };
                 self.declare_lexical(name, span, kind, strict)
             }
         }
@@ -177,8 +232,19 @@ pub(crate) enum PrivateKind {
 }
 
 impl PrivateEnv {
-    pub fn declare(&mut self, name: Rc<str>, span: Span, kind: PrivateKind, is_static: bool) -> Result<()> {
-        let dup = || Err(SyntaxError::new(format!("duplicate private name #{name}"), span));
+    pub fn declare(
+        &mut self,
+        name: Rc<str>,
+        span: Span,
+        kind: PrivateKind,
+        is_static: bool,
+    ) -> Result<()> {
+        let dup = || {
+            Err(SyntaxError::new(
+                format!("duplicate private name #{name}"),
+                span,
+            ))
+        };
         let entry = self.declared.entry(name.clone()).or_default();
         let fresh = !entry.getter && !entry.setter && !entry.other;
         if fresh {

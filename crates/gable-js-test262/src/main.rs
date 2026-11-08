@@ -163,9 +163,12 @@ struct RunArgs {
 
 fn factory_for(engine: &str) -> Result<Mode> {
     match engine {
-        "quickjs" => Ok(Mode::Engine(Arc::new(|host| gable_engine_quickjs::make_engine(host)))),
+        "quickjs" => Ok(Mode::Engine(Arc::new(|host| {
+            gable_engine_quickjs::make_engine(host)
+        }))),
         "parse" => Ok(Mode::ParseOnly),
-        other => bail!("unknown engine {other:?}; available: quickjs, parse"),
+        "compile" => Ok(Mode::CompileOnly),
+        other => bail!("unknown engine {other:?}; available: quickjs, parse, compile"),
     }
 }
 

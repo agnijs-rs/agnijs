@@ -188,6 +188,9 @@ version = "0.1.0"
 [[package]]
 name = "gable-js-compiler"
 version = "0.1.0"
+dependencies = [
+ "gable-js-parser",
+]
 
 [[package]]
 name = "gable-js-debugger"
@@ -221,6 +224,7 @@ dependencies = [
  "clap",
  "gable-engine-api",
  "gable-engine-quickjs",
+ "gable-js-compiler",
  "gable-js-parser",
  "rayon",
  "serde",

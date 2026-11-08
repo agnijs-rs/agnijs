@@ -53,7 +53,11 @@ impl<'s> Parser<'s> {
             }
             self.expect(Punct::Colon)?;
             let value = self.parse_module_source()?;
-            attrs.push(ImportAttribute { key, value, span: self.span_from(start) });
+            attrs.push(ImportAttribute {
+                key,
+                value,
+                span: self.span_from(start),
+            });
             if !self.at(Punct::RBrace) {
                 self.expect(Punct::Comma)?;
             }
@@ -63,7 +67,8 @@ impl<'s> Parser<'s> {
     }
 
     fn declare_import(&mut self, id: &Ident) -> Result<()> {
-        self.scopes.declare_lexical(id.name.clone(), id.span, LexKind::Lexical, true)
+        self.scopes
+            .declare_lexical(id.name.clone(), id.span, LexKind::Lexical, true)
     }
 
     pub(crate) fn parse_import_declaration(&mut self) -> Result<Statement> {
@@ -74,7 +79,12 @@ impl<'s> Parser<'s> {
             let source = self.parse_module_source()?;
             let attributes = self.parse_import_attributes()?;
             self.consume_semicolon()?;
-            return Ok(Statement::Import(Box::new(ImportDeclaration { specifiers, source, attributes, span: self.span_from(start) })));
+            return Ok(Statement::Import(Box::new(ImportDeclaration {
+                specifiers,
+                source,
+                attributes,
+                span: self.span_from(start),
+            })));
         }
         // Default binding.
         if let TokenKind::Ident { .. } = &self.tok.kind {
@@ -100,10 +110,15 @@ impl<'s> Parser<'s> {
                 } else {
                     match &imported {
                         ModuleExportName::Ident(i) => {
-                            let TokenKind::Ident { escaped, .. } = imported_tok.kind else { unreachable!() };
+                            let TokenKind::Ident { escaped, .. } = imported_tok.kind else {
+                                unreachable!()
+                            };
                             self.check_identifier(&i.name, i.span, escaped)?;
                             self.check_binding_identifier(&i.name, i.span)?;
-                            Ident { name: i.name.clone(), span: i.span }
+                            Ident {
+                                name: i.name.clone(),
+                                span: i.span,
+                            }
                         }
                         ModuleExportName::String(s) => {
                             return self.err("string import names require 'as'", s.span);
@@ -111,7 +126,11 @@ impl<'s> Parser<'s> {
                     }
                 };
                 self.declare_import(&local)?;
-                specifiers.push(ImportSpecifier::Named { imported, local, span: self.span_from(sstart) });
+                specifiers.push(ImportSpecifier::Named {
+                    imported,
+                    local,
+                    span: self.span_from(sstart),
+                });
                 if !self.at(Punct::RBrace) {
                     self.expect(Punct::Comma)?;
                 }
@@ -128,7 +147,12 @@ impl<'s> Parser<'s> {
         let source = self.parse_module_source()?;
         let attributes = self.parse_import_attributes()?;
         self.consume_semicolon()?;
-        Ok(Statement::Import(Box::new(ImportDeclaration { specifiers, source, attributes, span: self.span_from(start) })))
+        Ok(Statement::Import(Box::new(ImportDeclaration {
+            specifiers,
+            source,
+            attributes,
+            span: self.span_from(start),
+        })))
     }
 
     pub(crate) fn parse_export_declaration(&mut self) -> Result<Statement> {
@@ -157,17 +181,31 @@ impl<'s> Parser<'s> {
                 self.declare_default_binding(e.span())?;
                 ExportDefaultKind::Expression(e)
             };
-            return Ok(Statement::ExportDefault(Box::new(ExportDefaultDeclaration { declaration, span: self.span_from(start) })));
+            return Ok(Statement::ExportDefault(Box::new(
+                ExportDefaultDeclaration {
+                    declaration,
+                    span: self.span_from(start),
+                },
+            )));
         }
 
         // export * from / export * as x from
         if self.eat(Punct::Star)? {
-            let exported = if self.eat_kw("as")? { Some(self.parse_module_export_name()?) } else { None };
+            let exported = if self.eat_kw("as")? {
+                Some(self.parse_module_export_name()?)
+            } else {
+                None
+            };
             self.expect_kw("from")?;
             let source = self.parse_module_source()?;
             let attributes = self.parse_import_attributes()?;
             self.consume_semicolon()?;
-            return Ok(Statement::ExportAll(Box::new(ExportAllDeclaration { exported, source, attributes, span: self.span_from(start) })));
+            return Ok(Statement::ExportAll(Box::new(ExportAllDeclaration {
+                exported,
+                source,
+                attributes,
+                span: self.span_from(start),
+            })));
         }
 
         // export { a, b as c } [from "x"]
@@ -178,8 +216,16 @@ impl<'s> Parser<'s> {
                 let sstart = self.tok.span.start;
                 let tok_escaped = matches!(self.tok.kind, TokenKind::Ident { escaped: true, .. });
                 let local = self.parse_module_export_name()?;
-                let exported = if self.eat_kw("as")? { self.parse_module_export_name()? } else { local.clone() };
-                specifiers.push(ExportSpecifier { local, exported, span: self.span_from(sstart) });
+                let exported = if self.eat_kw("as")? {
+                    self.parse_module_export_name()?
+                } else {
+                    local.clone()
+                };
+                specifiers.push(ExportSpecifier {
+                    local,
+                    exported,
+                    span: self.span_from(sstart),
+                });
                 local_idents_unescaped.push(!tok_escaped);
                 if !self.at(Punct::RBrace) {
                     self.expect(Punct::Comma)?;
@@ -201,7 +247,8 @@ impl<'s> Parser<'s> {
                         }
                         ModuleExportName::Ident(i) => {
                             if self.is_reserved_word(&i.name) || Self::is_strict_reserved(&i.name) {
-                                return self.err(format!("unexpected reserved word '{}'", i.name), i.span);
+                                return self
+                                    .err(format!("unexpected reserved word '{}'", i.name), i.span);
                             }
                         }
                     }
@@ -219,7 +266,10 @@ impl<'s> Parser<'s> {
 
         // export var/let/const/function/class
         let name = match &self.tok.kind {
-            TokenKind::Ident { name, escaped: false } => Some(name.clone()),
+            TokenKind::Ident {
+                name,
+                escaped: false,
+            } => Some(name.clone()),
             _ => None,
         };
         let declaration = match name {
@@ -234,11 +284,15 @@ impl<'s> Parser<'s> {
                     self.consume_semicolon()?;
                     Statement::VariableDeclaration(d)
                 }
-                "function" => Statement::FunctionDeclaration(Box::new(self.parse_function_declaration(false, false)?)),
-                "async" if self.at_async_function()? => {
-                    Statement::FunctionDeclaration(Box::new(self.parse_function_declaration(true, false)?))
+                "function" => Statement::FunctionDeclaration(Box::new(
+                    self.parse_function_declaration(false, false)?,
+                )),
+                "async" if self.at_async_function()? => Statement::FunctionDeclaration(Box::new(
+                    self.parse_function_declaration(true, false)?,
+                )),
+                "class" => {
+                    Statement::ClassDeclaration(Box::new(self.parse_class_declaration(false)?))
                 }
-                "class" => Statement::ClassDeclaration(Box::new(self.parse_class_declaration(false)?)),
                 _ => return self.unexpected(),
             },
             _ => return self.unexpected(),
@@ -255,7 +309,8 @@ impl<'s> Parser<'s> {
     /// `export default <anonymous>` binds the hidden `*default*` name.
     fn declare_default_binding(&mut self, span: crate::span::Span) -> Result<()> {
         let name = self.intern("*default*");
-        self.scopes.declare_lexical(name, span, LexKind::Lexical, true)
+        self.scopes
+            .declare_lexical(name, span, LexKind::Lexical, true)
     }
 
     /// Module-level checks after the whole body is parsed: exported names

@@ -10,7 +10,11 @@ pub fn to_js_string(x: f64) -> String {
         return "0".into();
     }
     if x.is_infinite() {
-        return if x > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if x > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     if x < 0.0 {
         return format!("-{}", to_js_string(-x));
@@ -66,6 +70,9 @@ mod tests {
         assert_eq!(to_js_string(1.5e-7), "1.5e-7");
         assert_eq!(to_js_string(-0.0), "0");
         assert_eq!(to_js_string(0.1 + 0.2), "0.30000000000000004");
-        assert_eq!(to_js_string(123456789012345680000.0), "123456789012345680000");
+        assert_eq!(
+            to_js_string(123456789012345680000.0),
+            "123456789012345680000"
+        );
     }
 }

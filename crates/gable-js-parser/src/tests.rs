@@ -105,7 +105,9 @@ fn declarations() {
     bad_script("class C { static prototype() {} }");
     bad_script("class C { constructor = 1 }");
     bad_script("class C extends B { x = arguments }");
-    script("class C { x = () => this; ['computed'] = 1; 'str' = 2; 3 = 4; static async *gen() {} }");
+    script(
+        "class C { x = () => this; ['computed'] = 1; 'str' = 2; 3 = 4; static async *gen() {} }",
+    );
     bad_script("function f() { super.x }");
     script("({ m() { super.x } })");
     bad_script("({ m() { super() } })");

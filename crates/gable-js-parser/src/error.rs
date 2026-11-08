@@ -12,13 +12,20 @@ pub struct SyntaxError {
 
 impl SyntaxError {
     pub fn new(message: impl Into<String>, span: Span) -> SyntaxError {
-        SyntaxError { message: message.into(), span }
+        SyntaxError {
+            message: message.into(),
+            span,
+        }
     }
 }
 
 impl fmt::Display for SyntaxError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SyntaxError: {} (at {}..{})", self.message, self.span.start, self.span.end)
+        write!(
+            f,
+            "SyntaxError: {} (at {}..{})",
+            self.message, self.span.start, self.span.end
+        )
     }
 }
 

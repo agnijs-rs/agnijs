@@ -13,19 +13,35 @@ pub enum TokenKind {
     Eof,
     /// IdentifierName, including reserved words. `escaped` is set when the
     /// name contained a Unicode escape (such a name can never be a keyword).
-    Ident { name: Box<str>, escaped: bool },
+    Ident {
+        name: Box<str>,
+        escaped: bool,
+    },
     PrivateName(Box<str>),
-    Number { value: f64, kind: NumberKind },
+    Number {
+        value: f64,
+        kind: NumberKind,
+    },
     BigInt(Box<str>),
     /// A string literal. `legacy_octal` records a `\0`-prefixed octal or
     /// `\8`/`\9` escape (an error in strict code), checked once the parser
     /// knows the directive prologue's outcome.
-    String { value: Box<[u16]>, legacy_octal: bool },
+    String {
+        value: Box<[u16]>,
+        legacy_octal: bool,
+    },
     /// `...${` or a whole template without substitutions. `cooked` is None
     /// when the template contains an invalid escape (allowed only in tagged
     /// templates).
-    Template { cooked: Option<Box<[u16]>>, raw: Box<str>, tail: bool },
-    RegExp { pattern: Box<str>, flags: Box<str> },
+    Template {
+        cooked: Option<Box<[u16]>>,
+        raw: Box<str>,
+        tail: bool,
+    },
+    RegExp {
+        pattern: Box<str>,
+        flags: Box<str>,
+    },
     Punct(Punct),
 }
 
@@ -136,16 +152,8 @@ pub fn is_line_terminator(c: char) -> bool {
 pub fn is_whitespace(c: char) -> bool {
     matches!(
         c,
-        '\t' | '\u{000B}'
-            | '\u{000C}'
-            | ' '
-            | '\u{00A0}'
-            | '\u{FEFF}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
+        '\t' | '\u{000B}' | '\u{000C}' | ' ' | '\u{00A0}' | '\u{FEFF}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}'
     )
 }
 
@@ -159,7 +167,13 @@ pub fn is_id_continue(c: char) -> bool {
 
 impl<'s> Lexer<'s> {
     pub fn new(src: &'s str, module: bool) -> Lexer<'s> {
-        let mut lx = Lexer { src, bytes: src.as_bytes(), pos: 0, at_line_start: true, module };
+        let mut lx = Lexer {
+            src,
+            bytes: src.as_bytes(),
+            pos: 0,
+            at_line_start: true,
+            module,
+        };
         // Hashbang comment: only at the very start.
         if lx.bytes.starts_with(b"#!") {
             lx.skip_to_line_end();
@@ -172,7 +186,10 @@ impl<'s> Lexer<'s> {
     }
 
     pub fn state(&self) -> LexerState {
-        LexerState { pos: self.pos, line_start_seen: self.at_line_start }
+        LexerState {
+            pos: self.pos,
+            line_start_seen: self.at_line_start,
+        }
     }
 
     pub fn restore(&mut self, s: LexerState) {
@@ -212,7 +229,10 @@ impl<'s> Lexer<'s> {
     }
 
     fn err<T>(&self, message: impl Into<String>, start: usize) -> Result<T> {
-        Err(SyntaxError::new(message, Span::new(start as u32, self.pos.max(start) as u32)))
+        Err(SyntaxError::new(
+            message,
+            Span::new(start as u32, self.pos.max(start) as u32),
+        ))
     }
 
     fn skip_to_line_end(&mut self) {
@@ -258,7 +278,11 @@ impl<'s> Lexer<'s> {
             } else if !self.module && c == '<' && self.src[self.pos..].starts_with("<!--") {
                 // Annex B SingleLineHTMLOpenComment.
                 self.skip_to_line_end();
-            } else if !self.module && c == '-' && self.at_line_start && self.src[self.pos..].starts_with("-->") {
+            } else if !self.module
+                && c == '-'
+                && self.at_line_start
+                && self.src[self.pos..].starts_with("-->")
+            {
                 // Annex B SingleLineHTMLCloseComment: only after a line
                 // terminator (or at the start of the script), with only
                 // whitespace and comments before it on the line.
@@ -276,7 +300,11 @@ impl<'s> Lexer<'s> {
         let newline_before = self.skip_trivia()?;
         let start = self.pos;
         let Some(c) = self.peek() else {
-            return Ok(Token { kind: TokenKind::Eof, span: Span::empty(start as u32), newline_before });
+            return Ok(Token {
+                kind: TokenKind::Eof,
+                span: Span::empty(start as u32),
+                newline_before,
+            });
         };
         let kind = match c {
             '"' | '\'' => self.lex_string(c)?,
@@ -306,7 +334,11 @@ impl<'s> Lexer<'s> {
             _ => TokenKind::Punct(self.lex_punct(start)?),
         };
         self.at_line_start = false;
-        Ok(Token { kind, span: Span::new(start as u32, self.pos as u32), newline_before })
+        Ok(Token {
+            kind,
+            span: Span::new(start as u32, self.pos as u32),
+            newline_before,
+        })
     }
 
     fn lex_punct(&mut self, start: usize) -> Result<Punct> {
@@ -434,13 +466,21 @@ impl<'s> Lexer<'s> {
                 let Some(ch) = char::from_u32(cp) else {
                     return self.err("invalid Unicode escape sequence", esc_start);
                 };
-                let ok = if first { is_id_start(ch) } else { is_id_continue(ch) };
+                let ok = if first {
+                    is_id_start(ch)
+                } else {
+                    is_id_continue(ch)
+                };
                 if !ok {
                     return self.err("invalid identifier escape", esc_start);
                 }
                 ch
             } else {
-                let ok = if first { is_id_start(c) } else { is_id_continue(c) };
+                let ok = if first {
+                    is_id_start(c)
+                } else {
+                    is_id_continue(c)
+                };
                 if !ok {
                     break;
                 }
@@ -498,7 +538,12 @@ impl<'s> Lexer<'s> {
         let mut is_bigint = false;
         let value: f64;
 
-        if self.peek_byte() == Some(b'0') && matches!(self.byte_at(1), Some(b'x' | b'X' | b'o' | b'O' | b'b' | b'B')) {
+        if self.peek_byte() == Some(b'0')
+            && matches!(
+                self.byte_at(1),
+                Some(b'x' | b'X' | b'o' | b'O' | b'b' | b'B')
+            )
+        {
             let radix = match self.byte_at(1).unwrap().to_ascii_lowercase() {
                 b'x' => 16,
                 b'o' => 8,
@@ -536,7 +581,10 @@ impl<'s> Lexer<'s> {
                     digits.push(c);
                     self.pos += 1;
                 } else if c == '_' {
-                    return self.err("numeric separators are not allowed in legacy literals", self.pos);
+                    return self.err(
+                        "numeric separators are not allowed in legacy literals",
+                        self.pos,
+                    );
                 } else {
                     break;
                 }
@@ -565,7 +613,10 @@ impl<'s> Lexer<'s> {
             let mut saw_exp = false;
             if self.peek_byte() != Some(b'.') {
                 if self.peek_byte() == Some(b'0') && self.byte_at(1) == Some(b'_') {
-                    return self.err("numeric separator not allowed after a leading zero", self.pos + 1);
+                    return self.err(
+                        "numeric separator not allowed after a leading zero",
+                        self.pos + 1,
+                    );
                 }
                 text.push_str(&self.lex_digits(10, start)?);
             }
@@ -589,13 +640,21 @@ impl<'s> Lexer<'s> {
                 self.pos += 1;
                 self.check_after_number(start)?;
                 let trimmed = text.trim_start_matches('0');
-                let dec = if trimmed.is_empty() { "0".to_string() } else { trimmed.to_string() };
+                let dec = if trimmed.is_empty() {
+                    "0".to_string()
+                } else {
+                    trimmed.to_string()
+                };
                 return Ok(TokenKind::BigInt(dec.into_boxed_str()));
             }
             if text == "." {
                 return self.err("invalid number literal", start);
             }
-            let t = if text.starts_with('.') { format!("0{text}") } else { text };
+            let t = if text.starts_with('.') {
+                format!("0{text}")
+            } else {
+                text
+            };
             value = t.parse::<f64>().unwrap_or(f64::NAN);
         }
         self.check_after_number(start)?;
@@ -691,7 +750,10 @@ impl<'s> Lexer<'s> {
                 }
             }
         }
-        Ok(TokenKind::String { value: value.into_boxed_slice(), legacy_octal })
+        Ok(TokenKind::String {
+            value: value.into_boxed_slice(),
+            legacy_octal,
+        })
     }
 
     /// After the backslash of an escape. `in_template` makes octal-ish
@@ -848,7 +910,11 @@ impl<'s> Lexer<'s> {
         let start = rbrace.span.start as usize;
         self.pos = start + 1;
         let kind = self.lex_template_part(start)?;
-        Ok(Token { kind, span: Span::new(start as u32, self.pos as u32), newline_before: rbrace.newline_before })
+        Ok(Token {
+            kind,
+            span: Span::new(start as u32, self.pos as u32),
+            newline_before: rbrace.newline_before,
+        })
     }
 
     /// The parser saw `/` or `/=` where an expression is expected: rescan
@@ -865,12 +931,10 @@ impl<'s> Lexer<'s> {
                 return self.err("unterminated regular expression literal", start);
             }
             match c {
-                '\\' => {
-                    match self.bump() {
-                        Some(c) if !is_line_terminator(c) => {}
-                        _ => return self.err("unterminated regular expression literal", start),
-                    }
-                }
+                '\\' => match self.bump() {
+                    Some(c) if !is_line_terminator(c) => {}
+                    _ => return self.err("unterminated regular expression literal", start),
+                },
                 '[' => in_class = true,
                 ']' => in_class = false,
                 '/' if !in_class => break,
@@ -891,7 +955,10 @@ impl<'s> Lexer<'s> {
         }
         let flags = &self.src[flags_start..self.pos];
         Ok(Token {
-            kind: TokenKind::RegExp { pattern: pattern.into(), flags: flags.into() },
+            kind: TokenKind::RegExp {
+                pattern: pattern.into(),
+                flags: flags.into(),
+            },
             span: Span::new(start as u32, self.pos as u32),
             newline_before: slash.newline_before,
         })
@@ -972,11 +1039,19 @@ mod tests {
     #[test]
     fn numbers() {
         let toks = lex_all("0x1F 0b1_0 1_000.5e3 017 089 .5 123n 0o7n");
-        assert!(matches!(toks[0], TokenKind::Number { value, kind: NumberKind::Hex } if value == 31.0));
-        assert!(matches!(toks[1], TokenKind::Number { value, kind: NumberKind::Binary } if value == 2.0));
+        assert!(
+            matches!(toks[0], TokenKind::Number { value, kind: NumberKind::Hex } if value == 31.0)
+        );
+        assert!(
+            matches!(toks[1], TokenKind::Number { value, kind: NumberKind::Binary } if value == 2.0)
+        );
         assert!(matches!(toks[2], TokenKind::Number { value, .. } if value == 1000500.0));
-        assert!(matches!(toks[3], TokenKind::Number { value, kind: NumberKind::LegacyOctal } if value == 15.0));
-        assert!(matches!(toks[4], TokenKind::Number { value, kind: NumberKind::LegacyDecimal } if value == 89.0));
+        assert!(
+            matches!(toks[3], TokenKind::Number { value, kind: NumberKind::LegacyOctal } if value == 15.0)
+        );
+        assert!(
+            matches!(toks[4], TokenKind::Number { value, kind: NumberKind::LegacyDecimal } if value == 89.0)
+        );
         assert!(matches!(toks[5], TokenKind::Number { value, .. } if value == 0.5));
         assert!(matches!(&toks[6], TokenKind::BigInt(d) if &**d == "123"));
         assert!(matches!(&toks[7], TokenKind::BigInt(d) if &**d == "7"));
@@ -985,17 +1060,28 @@ mod tests {
         assert!(Lexer::new("3in", false).next_token().is_err());
         assert!(Lexer::new("1.5n", false).next_token().is_err());
         assert_eq!(radix_to_decimal("ff", 16), "255");
-        assert_eq!(radix_to_decimal("10000000000000000000000", 16), "309485009821345068724781056");
+        assert_eq!(
+            radix_to_decimal("10000000000000000000000", 16),
+            "309485009821345068724781056"
+        );
     }
 
     #[test]
     fn strings_and_templates() {
         let toks = lex_all(r#"'a\u{1F600}b' "\x41\n" `x` "\07""#);
-        assert!(matches!(&toks[0], TokenKind::String { value, legacy_octal: false } if value.len() == 4));
+        assert!(
+            matches!(&toks[0], TokenKind::String { value, legacy_octal: false } if value.len() == 4)
+        );
         assert!(matches!(&toks[1], TokenKind::String { value, .. } if **value == [0x41, 0x0A]));
         assert!(matches!(&toks[2], TokenKind::Template { tail: true, raw, .. } if &**raw == "x"));
         // after `${`, the parser lexes `1` then sees `}`; rescanning is the parser's job.
-        assert!(matches!(&toks[3], TokenKind::String { legacy_octal: true, .. }));
+        assert!(matches!(
+            &toks[3],
+            TokenKind::String {
+                legacy_octal: true,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1012,7 +1098,9 @@ mod tests {
         let mut lx = Lexer::new("/[/]a\\/b/gi", false);
         let slash = lx.next_token().unwrap();
         let re = lx.rescan_regexp(&slash).unwrap();
-        assert!(matches!(re.kind, TokenKind::RegExp { pattern, flags } if &*pattern == "[/]a\\/b" && &*flags == "gi"));
+        assert!(
+            matches!(re.kind, TokenKind::RegExp { pattern, flags } if &*pattern == "[/]a\\/b" && &*flags == "gi")
+        );
     }
 
     #[test]

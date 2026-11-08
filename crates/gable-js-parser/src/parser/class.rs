@@ -42,7 +42,10 @@ impl<'s> Parser<'s> {
             Some(r?)
         };
         if let Some(id) = &id {
-            if let Err(e) = self.scopes.declare_lexical(id.name.clone(), id.span, LexKind::Lexical, true) {
+            if let Err(e) =
+                self.scopes
+                    .declare_lexical(id.name.clone(), id.span, LexKind::Lexical, true)
+            {
                 self.ctx.strict = saved_strict;
                 return Err(e);
             }
@@ -74,11 +77,21 @@ impl<'s> Parser<'s> {
             }
             match self.private_envs.last_mut() {
                 Some(outer) => outer.referenced.push((name, span)),
-                None => return self.err(format!("reference to undeclared private name #{name}"), span),
+                None => {
+                    return self.err(
+                        format!("reference to undeclared private name #{name}"),
+                        span,
+                    )
+                }
             }
         }
         self.expect(Punct::RBrace)?;
-        Ok(Class { id, super_class, body, span: self.span_from(start) })
+        Ok(Class {
+            id,
+            super_class,
+            body,
+            span: self.span_from(start),
+        })
     }
 
     fn parse_class_body(&mut self, has_super: bool) -> Result<Vec<ClassMember>> {
@@ -114,8 +127,13 @@ impl<'s> Parser<'s> {
             let next = self.peek()?;
             let is_name = matches!(
                 next.kind,
-                TokenKind::Punct(Punct::LParen) | TokenKind::Punct(Punct::Eq) | TokenKind::Punct(Punct::Semicolon) | TokenKind::Punct(Punct::RBrace)
-            ) || (next.newline_before && !matches!(next.kind, TokenKind::Punct(Punct::LBrace)) && !can_follow_static_as_modifier(&next.kind));
+                TokenKind::Punct(Punct::LParen)
+                    | TokenKind::Punct(Punct::Eq)
+                    | TokenKind::Punct(Punct::Semicolon)
+                    | TokenKind::Punct(Punct::RBrace)
+            ) || (next.newline_before
+                && !matches!(next.kind, TokenKind::Punct(Punct::LBrace))
+                && !can_follow_static_as_modifier(&next.kind));
             if !is_name {
                 self.advance()?;
                 is_static = true;
@@ -125,7 +143,11 @@ impl<'s> Parser<'s> {
             }
         }
 
-        if let TokenKind::Ident { name, escaped: false } = &self.tok.kind {
+        if let TokenKind::Ident {
+            name,
+            escaped: false,
+        } = &self.tok.kind
+        {
             let name = name.clone();
             let next = self.peek()?;
             let next_is_key_start = !matches!(
@@ -144,17 +166,24 @@ impl<'s> Parser<'s> {
                             is_generator = true;
                         }
                     }
-                    "get" if !next.newline_before || !matches!(next.kind, TokenKind::Punct(Punct::Star)) => {
+                    "get"
+                        if !next.newline_before
+                            || !matches!(next.kind, TokenKind::Punct(Punct::Star)) =>
+                    {
                         // `get` followed by a newline and then a name is
                         // still a getter (no restriction), but a field
                         // named `get` followed by `*gen(){}` is two members.
-                        if !(next.newline_before && matches!(next.kind, TokenKind::Punct(Punct::Star))) {
+                        if !(next.newline_before
+                            && matches!(next.kind, TokenKind::Punct(Punct::Star)))
+                        {
                             accessor = Some(MethodKind::Get);
                             self.advance()?;
                         }
                     }
                     "set" => {
-                        if !(next.newline_before && matches!(next.kind, TokenKind::Punct(Punct::Star))) {
+                        if !(next.newline_before
+                            && matches!(next.kind, TokenKind::Punct(Punct::Star)))
+                        {
                             accessor = Some(MethodKind::Set);
                             self.advance()?;
                         }
@@ -170,17 +199,27 @@ impl<'s> Parser<'s> {
         let key_span = self.tok.span;
         let key = self.parse_property_key(true)?;
         let key_name = key.static_name();
-        let is_name = |s: &str| key_name.as_deref() == Some(s.encode_utf16().collect::<Vec<_>>().as_slice());
+        let is_name =
+            |s: &str| key_name.as_deref() == Some(s.encode_utf16().collect::<Vec<_>>().as_slice());
         let is_private = matches!(key, PropertyKey::Private(_));
 
         let is_method = self.at(Punct::LParen);
         if is_method {
-            let is_constructor = !is_static && !is_private && is_name("constructor") && !matches!(key, PropertyKey::Computed(_));
+            let is_constructor = !is_static
+                && !is_private
+                && is_name("constructor")
+                && !matches!(key, PropertyKey::Computed(_));
             if is_constructor && (is_async || is_generator || accessor.is_some()) {
-                return self.err("class constructor may not be an accessor, generator or async", key_span);
+                return self.err(
+                    "class constructor may not be an accessor, generator or async",
+                    key_span,
+                );
             }
             if is_static && is_name("prototype") && !matches!(key, PropertyKey::Computed(_)) {
-                return self.err("classes may not have a static property named 'prototype'", key_span);
+                return self.err(
+                    "classes may not have a static property named 'prototype'",
+                    key_span,
+                );
             }
             let kind = match (is_async, is_generator) {
                 (true, true) => FunctionKind::AsyncGenerator,
@@ -199,7 +238,12 @@ impl<'s> Parser<'s> {
                     MethodKind::Set => PrivateKind::Setter,
                     _ => PrivateKind::Other,
                 };
-                self.private_envs.last_mut().unwrap().declare(p.name.clone(), p.span, pk, is_static)?;
+                self.private_envs.last_mut().unwrap().declare(
+                    p.name.clone(),
+                    p.span,
+                    pk,
+                    is_static,
+                )?;
             }
             let flags = FunctionFlags {
                 kind,
@@ -210,7 +254,13 @@ impl<'s> Parser<'s> {
                 is_class_constructor: is_constructor,
             };
             let value = self.parse_class_method_body(kind, flags)?;
-            return Ok(ClassMember::Method(ClassMethod { key, value, kind: method_kind, is_static, span: self.span_from(start) }));
+            return Ok(ClassMember::Method(ClassMethod {
+                key,
+                value,
+                kind: method_kind,
+                is_static,
+                span: self.span_from(start),
+            }));
         }
 
         // Field.
@@ -222,11 +272,19 @@ impl<'s> Parser<'s> {
                 return self.err("classes may not have a field named 'constructor'", key_span);
             }
             if is_static && is_name("prototype") {
-                return self.err("classes may not have a static field named 'prototype'", key_span);
+                return self.err(
+                    "classes may not have a static field named 'prototype'",
+                    key_span,
+                );
             }
         }
         if let PropertyKey::Private(p) = &key {
-            self.private_envs.last_mut().unwrap().declare(p.name.clone(), p.span, PrivateKind::Other, is_static)?;
+            self.private_envs.last_mut().unwrap().declare(
+                p.name.clone(),
+                p.span,
+                PrivateKind::Other,
+                is_static,
+            )?;
         }
         let mut value = None;
         if self.eat(Punct::Eq)? {
@@ -253,7 +311,12 @@ impl<'s> Parser<'s> {
             value = Some(r?);
         }
         self.consume_semicolon()?;
-        Ok(ClassMember::Field(ClassField { key, value, is_static, span: self.span_from(start) }))
+        Ok(ClassMember::Field(ClassField {
+            key,
+            value,
+            is_static,
+            span: self.span_from(start),
+        }))
     }
 
     fn parse_static_block(&mut self, start: u32) -> Result<ClassMember> {
@@ -287,7 +350,10 @@ impl<'s> Parser<'s> {
         self.restore_fn_ctx(saved);
         let body = body?;
         self.expect(Punct::RBrace)?;
-        Ok(ClassMember::StaticBlock(StaticBlock { body, span: self.span_from(start) }))
+        Ok(ClassMember::StaticBlock(StaticBlock {
+            body,
+            span: self.span_from(start),
+        }))
     }
 }
 

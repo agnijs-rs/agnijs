@@ -20,7 +20,10 @@ impl Span {
         Span { start: at, end: at }
     }
     pub fn to(self, other: Span) -> Span {
-        Span { start: self.start, end: other.end }
+        Span {
+            start: self.start,
+            end: other.end,
+        }
     }
     pub fn len(self) -> u32 {
         self.end - self.start
@@ -59,7 +62,9 @@ impl LineTable {
                     line_starts.push(i as u32 + 1);
                 }
                 // U+2028 and U+2029 are E2 80 A8 / E2 80 A9.
-                0xE2 if bytes.get(i + 1) == Some(&0x80) && matches!(bytes.get(i + 2), Some(0xA8) | Some(0xA9)) => {
+                0xE2 if bytes.get(i + 1) == Some(&0x80)
+                    && matches!(bytes.get(i + 2), Some(0xA8) | Some(0xA9)) =>
+                {
                     i += 2;
                     line_starts.push(i as u32 + 1);
                 }
@@ -67,7 +72,10 @@ impl LineTable {
             }
             i += 1;
         }
-        LineTable { line_starts, source_len: bytes.len() as u32 }
+        LineTable {
+            line_starts,
+            source_len: bytes.len() as u32,
+        }
     }
 
     pub fn line_count(&self) -> usize {
@@ -84,7 +92,10 @@ impl LineTable {
         };
         let start = self.line_starts[line] as usize;
         let column = source[start..offset as usize].encode_utf16().count() as u32;
-        LineCol { line: line as u32, column }
+        LineCol {
+            line: line as u32,
+            column,
+        }
     }
 }
 
@@ -102,6 +113,9 @@ mod tests {
         assert_eq!(t.line_col(src, 7), LineCol { line: 2, column: 0 });
         // "€" is 3 bytes, 1 UTF-16 unit.
         assert_eq!(t.line_col(src, 10), LineCol { line: 2, column: 1 });
-        assert_eq!(t.line_col(src, src.len() as u32), LineCol { line: 3, column: 1 });
+        assert_eq!(
+            t.line_col(src, src.len() as u32),
+            LineCol { line: 3, column: 1 }
+        );
     }
 }

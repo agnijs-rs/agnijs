@@ -26,7 +26,14 @@ pub(crate) struct FunctionFlags {
 
 impl FunctionFlags {
     pub fn plain(kind: FunctionKind) -> FunctionFlags {
-        FunctionFlags { kind, is_method: false, super_call: false, is_getter: false, is_setter: false, is_class_constructor: false }
+        FunctionFlags {
+            kind,
+            is_method: false,
+            super_call: false,
+            is_getter: false,
+            is_setter: false,
+            is_class_constructor: false,
+        }
     }
 }
 
@@ -69,7 +76,11 @@ impl<'s> Parser<'s> {
 
     /// `function` (or `async function`) declaration. The current token is
     /// `async` or `function`. `default_export` allows an anonymous function.
-    pub(crate) fn parse_function_declaration(&mut self, is_async: bool, default_export: bool) -> Result<Function> {
+    pub(crate) fn parse_function_declaration(
+        &mut self,
+        is_async: bool,
+        default_export: bool,
+    ) -> Result<Function> {
         let start = self.tok.span.start;
         if is_async {
             self.advance()?;
@@ -85,7 +96,12 @@ impl<'s> Parser<'s> {
             Some(self.parse_binding_identifier()?)
         };
         if let Some(id) = &id {
-            self.scopes.declare_function(id.name.clone(), id.span, self.ctx.strict, kind == FunctionKind::Normal)?;
+            self.scopes.declare_function(
+                id.name.clone(),
+                id.span,
+                self.ctx.strict,
+                kind == FunctionKind::Normal,
+            )?;
         }
         let func = self.parse_function_tail(start, id, FunctionFlags::plain(kind), false)?;
         Ok(func)
@@ -102,11 +118,22 @@ impl<'s> Parser<'s> {
     ) -> Result<Function> {
         let _ = super_property;
         let start = self.tok.span.start;
-        let flags = FunctionFlags { kind, is_method: true, super_call, is_getter, is_setter, is_class_constructor: false };
+        let flags = FunctionFlags {
+            kind,
+            is_method: true,
+            super_call,
+            is_getter,
+            is_setter,
+            is_class_constructor: false,
+        };
         self.parse_function_tail(start, None, flags, true)
     }
 
-    pub(crate) fn parse_class_method_body(&mut self, kind: FunctionKind, flags: FunctionFlags) -> Result<Function> {
+    pub(crate) fn parse_class_method_body(
+        &mut self,
+        kind: FunctionKind,
+        flags: FunctionFlags,
+    ) -> Result<Function> {
         let _ = kind;
         let start = self.tok.span.start;
         self.parse_function_tail(start, None, flags, true)
@@ -158,7 +185,10 @@ impl<'s> Parser<'s> {
                 |s| matches!(s, Statement::Expression(e) if e.directive.as_deref() == Some("use strict")),
             );
             if has_use_strict && !simple_params {
-                return self.err("'use strict' not allowed in function with non-simple parameters", body_span);
+                return self.err(
+                    "'use strict' not allowed in function with non-simple parameters",
+                    body_span,
+                );
             }
             let strict = self.ctx.strict;
             self.validate_params(&params, strict, simple_params, flags.is_method, kind)?;
@@ -166,14 +196,20 @@ impl<'s> Parser<'s> {
                 if let Some(id) = &id {
                     self.check_binding_identifier(&id.name, id.span)?;
                     if Self::is_strict_reserved(&id.name) {
-                        return self.err(format!("unexpected strict mode reserved word '{}'", id.name), id.span);
+                        return self.err(
+                            format!("unexpected strict mode reserved word '{}'", id.name),
+                            id.span,
+                        );
                     }
                 }
             }
             Ok(Function {
                 id,
                 params,
-                body: FunctionBody { body, span: body_span },
+                body: FunctionBody {
+                    body,
+                    span: body_span,
+                },
                 kind,
                 strict,
                 simple_params,
@@ -204,12 +240,21 @@ impl<'s> Parser<'s> {
                 self.advance()?;
                 let argument = self.parse_binding_target()?;
                 if self.at(Punct::Eq) {
-                    return self.err("rest parameter may not have a default initializer", self.tok.span);
+                    return self.err(
+                        "rest parameter may not have a default initializer",
+                        self.tok.span,
+                    );
                 }
-                params.push(Pattern::Rest(Box::new(RestElement { argument, span: self.span_from(s) })));
+                params.push(Pattern::Rest(Box::new(RestElement {
+                    argument,
+                    span: self.span_from(s),
+                })));
                 simple = false;
                 if !self.at(Punct::RParen) {
-                    return self.err("rest parameter must be last formal parameter", self.tok.span);
+                    return self.err(
+                        "rest parameter must be last formal parameter",
+                        self.tok.span,
+                    );
                 }
                 break;
             }
@@ -252,17 +297,26 @@ impl<'s> Parser<'s> {
             let name = &*id.name;
             if strict {
                 if name == "eval" || name == "arguments" {
-                    return self.err(format!("'{name}' cannot be a parameter name in strict mode"), id.span);
+                    return self.err(
+                        format!("'{name}' cannot be a parameter name in strict mode"),
+                        id.span,
+                    );
                 }
                 if Self::is_strict_reserved(name) {
-                    return self.err(format!("unexpected strict mode reserved word '{name}'"), id.span);
+                    return self.err(
+                        format!("unexpected strict mode reserved word '{name}'"),
+                        id.span,
+                    );
                 }
             }
             if kind.is_generator() && name == "yield" {
                 return self.err("'yield' cannot be a parameter name in a generator", id.span);
             }
             if kind.is_async() && name == "await" {
-                return self.err("'await' cannot be a parameter name in an async function", id.span);
+                return self.err(
+                    "'await' cannot be a parameter name in an async function",
+                    id.span,
+                );
             }
             if !seen.insert(name) && dups_forbidden {
                 return self.err(format!("duplicate parameter name '{name}'"), id.span);
@@ -320,15 +374,25 @@ impl<'s> Parser<'s> {
                     |s| matches!(s, Statement::Expression(e) if e.directive.as_deref() == Some("use strict")),
                 );
                 if has_use_strict && !simple_params {
-                    return self.err("'use strict' not allowed in function with non-simple parameters", body_span);
+                    return self.err(
+                        "'use strict' not allowed in function with non-simple parameters",
+                        body_span,
+                    );
                 }
-                body = ArrowBody::Block(FunctionBody { body: stmts, span: body_span });
+                body = ArrowBody::Block(FunctionBody {
+                    body: stmts,
+                    span: body_span,
+                });
             } else {
                 let e = self.parse_assignment_expression()?;
                 body = ArrowBody::Expression(e);
             }
             let strict = self.ctx.strict;
-            let kind = if is_async { FunctionKind::Async } else { FunctionKind::Normal };
+            let kind = if is_async {
+                FunctionKind::Async
+            } else {
+                FunctionKind::Normal
+            };
             self.validate_params(&params, strict, simple_params, true, kind)?;
             Ok(Expression::Arrow(Box::new(ArrowFunction {
                 params,
@@ -355,6 +419,9 @@ impl<'s> Parser<'s> {
             return Ok(false);
         }
         let next = self.peek()?;
-        Ok(matches!(&next.kind, TokenKind::Ident { name, escaped: false } if &**name == "function") && !next.newline_before)
+        Ok(
+            matches!(&next.kind, TokenKind::Ident { name, escaped: false } if &**name == "function")
+                && !next.newline_before,
+        )
     }
 }
