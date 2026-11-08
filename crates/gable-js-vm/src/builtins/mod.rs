@@ -5,6 +5,9 @@ pub mod array;
 pub mod bigint;
 pub mod boolean;
 pub mod collections;
+pub mod arraybuffer;
+pub mod atomics;
+pub mod date;
 pub mod error;
 pub mod function;
 pub mod generator;
@@ -22,6 +25,7 @@ pub mod regexp;
 pub mod string;
 pub mod symbol;
 pub mod typedarray;
+pub mod typedarray_ctor;
 
 use crate::object::NativeFn;
 use crate::realm::Intrinsic;
@@ -54,6 +58,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     regexp::install(vm, realm);
     proxy::install(vm, realm);
     collections::install(vm, realm);
+    date::install(vm, realm);
     typedarray::install(vm, realm);
     global::install(vm, realm);
 }

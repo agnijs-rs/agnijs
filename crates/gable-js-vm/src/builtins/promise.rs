@@ -475,6 +475,9 @@ impl Vm {
             }
         }
         flush_rejections(self);
+        // ClearKeptObjects: WeakRef targets are kept only until the job
+        // queue the host drains has run dry.
+        self.keep_alive.clear();
         Ok(n)
     }
 }

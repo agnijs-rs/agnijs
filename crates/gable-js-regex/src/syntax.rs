@@ -36,13 +36,36 @@ pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
     if unicode && sets {
         return Err("regular expression flags 'u' and 'v' are mutually exclusive".into());
     }
+    let units: Vec<u16> = pattern.encode_utf16().collect();
+    validate_units(&units, unicode, sets)
+}
+
+/// [`validate`] for a pattern given as UTF-16 code units (so lone
+/// surrogates, which no `str` can hold, are checked too). `unicode` and
+/// `sets` are the already-validated `u` and `v` flags.
+pub fn validate_units(pattern: &[u16], unicode: bool, sets: bool) -> Result<(), String> {
     let unicode_mode = unicode || sets;
     // In unicode mode the pattern is a sequence of code points; otherwise
     // a sequence of UTF-16 code units.
     let units: Vec<u32> = if unicode_mode {
-        pattern.chars().map(|c| c as u32).collect()
+        let mut out = Vec::with_capacity(pattern.len());
+        let mut i = 0;
+        while i < pattern.len() {
+            let c = pattern[i] as u32;
+            if (0xD800..0xDC00).contains(&c) && i + 1 < pattern.len() {
+                let l = pattern[i + 1] as u32;
+                if (0xDC00..0xE000).contains(&l) {
+                    out.push(0x10000 + ((c - 0xD800) << 10) + (l - 0xDC00));
+                    i += 2;
+                    continue;
+                }
+            }
+            out.push(c);
+            i += 1;
+        }
+        out
     } else {
-        pattern.encode_utf16().map(u32::from).collect()
+        pattern.iter().map(|&u| u as u32).collect()
     };
     let (ngroups, names) = prescan(&units, sets);
     let mut p = P {

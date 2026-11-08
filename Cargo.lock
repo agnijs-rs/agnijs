@@ -276,6 +276,7 @@ dependencies = [
  "gable-engine-api",
  "gable-js-compiler",
  "gable-js-parser",
+ "gable-js-regex",
  "hashbrown 0.14.5",
  "icu_normalizer",
  "indexmap",

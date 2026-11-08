@@ -329,6 +329,12 @@ pub struct Vm {
     pub throw_stack_value: Option<Value>,
     /// Host classes by id (`register_host_class`).
     pub host_classes: Vec<gable_engine_api::HostClassDef>,
+    /// Compiled regular expressions by (pattern, flags); see builtins::regexp.
+    pub regex_cache: HashMap<(Vec<u16>, String), Rc<gable_js_regex::Regex>>,
+    /// The UTF-16 form of the string the last RegExp exec ran against, so a
+    /// global match/replace/split over a long string stays linear. String
+    /// ids are reused only after a collection, which clears this.
+    pub regex_input_cache: Option<(StrId, Rc<Vec<u16>>)>,
     /// Host objects whose wrapper died, awaiting their class finaliser.
     pub pending_finalizers: Vec<(
         gable_engine_api::HostClassId,
@@ -361,6 +367,8 @@ impl Vm {
             well_known,
             symbol_registry: HashMap::new(),
             jobs: VecDeque::new(),
+            regex_cache: HashMap::new(),
+            regex_input_cache: None,
             engine_id,
             scripts: HashMap::new(),
             modules: HashMap::new(),
@@ -624,6 +632,15 @@ impl Vm {
         let obj = self.new_native(name, length, f);
         self.heap.obj_mut(obj).native_mut().unwrap().slots = slots;
         obj
+    }
+
+    /// Set captured slot `i` of a native function (growing the slot list).
+    pub fn set_native_slot(&mut self, func: ObjId, i: usize, v: Value) {
+        let n = self.heap.obj_mut(func).native_mut().unwrap();
+        if n.slots.len() <= i {
+            n.slots.resize(i + 1, Value::Undefined);
+        }
+        n.slots[i] = v;
     }
 
     /// Captured slot `i` of the running native closure.

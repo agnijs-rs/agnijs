@@ -101,6 +101,33 @@ pub trait Host {
     fn interrupt(&self) -> bool {
         false
     }
+
+    /// The clock behind `Date.now()` and `new Date()`: milliseconds since
+    /// the Unix epoch. The default reads the system clock; a host may
+    /// supply a frozen or scaled clock for tests and replay.
+    fn now_ms(&self) -> f64 {
+        match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => (d.as_millis() as f64).floor(),
+            Err(e) => -((e.duration().as_millis() as f64).floor()),
+        }
+    }
+
+    /// The local time zone offset from UTC in milliseconds (positive east
+    /// of Greenwich) in effect at `epoch_ms`. When `is_utc` is false the
+    /// instant is given in local time (the spec's `UTC(t)` direction). The
+    /// engine has no time zone database of its own; the default is UTC
+    /// and the host that knows the platform supplies the real zone.
+    fn time_zone_offset_ms(&self, epoch_ms: f64, is_utc: bool) -> f64 {
+        let _ = (epoch_ms, is_utc);
+        0.0
+    }
+
+    /// The name `Date.prototype.toString` shows in parentheses for the zone
+    /// in effect at `epoch_ms`.
+    fn time_zone_name(&self, epoch_ms: f64) -> String {
+        let _ = epoch_ms;
+        "Coordinated Universal Time".to_string()
+    }
 }
 
 /// The arguments of a host function call.

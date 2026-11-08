@@ -511,6 +511,9 @@ impl Vm {
                     if let Some(r) = typedarray::ta_has_property(self, cur, key)? {
                         return Ok(r);
                     }
+                    if self.heap.has_own_property(cur, key) {
+                        return Ok(true);
+                    }
                 }
                 Exotic::None => {
                     if self.heap.has_own_property(cur, key) {
@@ -659,7 +662,9 @@ impl Vm {
                     if let Some(r) = typedarray::ta_set(self, cur, key, v, receiver)? {
                         return Ok(r);
                     }
-                    if let Some(p) = self.heap.get_own_property(cur, key) {
+                    // A valid element index seen through another receiver is
+                    // an own writable data property.
+                    if let Some(p) = self.own_property(cur, key)? {
                         break p;
                     }
                 }

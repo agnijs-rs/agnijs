@@ -296,6 +296,7 @@ impl Vm {
     pub fn collect(&mut self) {
         self.gc_requested = false;
         self.gc_count += 1;
+        self.regex_input_cache = None;
         let mut work: Vec<Work> = Vec::with_capacity(1024);
         let mut buf = Tracer::default();
 
@@ -356,12 +357,20 @@ impl Vm {
         self.mark_from(&mut roots, &mut work);
 
         // ---- mark ----
+        self.drain_mark(&mut buf, &mut work);
+
+        // ---- ephemerons and weak processing need the mark state ----
+        self.finish_collection(work, buf);
+    }
+
+    /// Mark everything reachable from the work list.
+    fn drain_mark(&mut self, buf: &mut Tracer, work: &mut Vec<Work>) {
         while let Some(item) = work.pop() {
             buf.values.clear();
             buf.envs.clear();
             match item {
-                Work::Obj(o) => self.heap.obj(o).trace(&mut buf),
-                Work::Env(e) => self.heap.env(e).trace(&mut buf),
+                Work::Obj(o) => self.heap.obj(o).trace(buf),
+                Work::Env(e) => self.heap.env(e).trace(buf),
                 Work::Sym(s) => {
                     let d = self.heap.sym(s);
                     buf.opt_str(d.description);
@@ -381,7 +390,24 @@ impl Vm {
                     }
                 }
             }
-            self.mark_from(&mut buf, &mut work);
+            self.mark_from(buf, work);
+        }
+    }
+
+    /// Ephemeron marking, weak clearing, host finalisers and the sweep.
+    fn finish_collection(&mut self, mut work: Vec<Work>, mut buf: Tracer) {
+        // ---- ephemerons: WeakMap values live while their keys do ----
+        loop {
+            let mut t = Tracer::default();
+            crate::builtins::collections::ephemeron_values(self, &mut t);
+            if t.values.is_empty() {
+                break;
+            }
+            self.mark_from(&mut t, &mut work);
+            if work.is_empty() {
+                break;
+            }
+            self.drain_mark(&mut buf, &mut work);
         }
 
         // ---- weak processing ----

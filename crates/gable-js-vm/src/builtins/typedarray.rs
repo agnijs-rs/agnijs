@@ -1,5 +1,6 @@
 //! ArrayBuffer, SharedArrayBuffer, typed arrays and DataView: the data model
-//! and the integer-indexed exotic hooks. The constructors land in M3.
+//! and the integer-indexed exotic hooks. The constructors live in
+//! `arraybuffer.rs`, `typedarray_ctor.rs` and `atomics.rs`.
 
 use crate::gc::Tracer;
 use crate::object::Class;
@@ -64,9 +65,14 @@ pub struct DataViewData {
     pub byte_length: Option<usize>,
 }
 
+/// IsTypedArrayFixedLength: not length-tracking and not over a resizable
+/// (or growable) buffer.
 pub fn is_fixed_length(vm: &Vm, o: ObjId) -> bool {
     match &vm.heap.obj(o).class {
-        Class::TypedArray(t) => t.length.is_some(),
+        Class::TypedArray(t) => {
+            t.length.is_some()
+                && !matches!(&vm.heap.obj(t.buffer).class, Class::ArrayBuffer(b) if b.max_byte_length.is_some())
+        }
         _ => true,
     }
 }
@@ -273,7 +279,7 @@ pub fn ta_set_element(vm: &mut Vm, o: ObjId, i: usize, v: Value) -> JsResult<()>
     Ok(())
 }
 
-fn ta_store(vm: &mut Vm, o: ObjId, i: usize, c: Converted) {
+pub fn ta_store(vm: &mut Vm, o: ObjId, i: usize, c: Converted) {
     let (buffer, kind, offset) = match &vm.heap.obj(o).class {
         Class::TypedArray(t) => (t.buffer, t.kind, t.byte_offset),
         _ => unreachable!(),
@@ -456,7 +462,8 @@ pub fn f16_bits_to_f64(h: u16) -> f64 {
     sign * (1.0 + mant / 1024.0) * 2f64.powi(exp - 15)
 }
 
-pub fn install(_vm: &mut Vm, _realm: gable_engine_api::RealmId) {
-    // M3: ArrayBuffer, SharedArrayBuffer, DataView, %TypedArray% and the
-    // concrete constructors.
+pub fn install(vm: &mut Vm, realm: gable_engine_api::RealmId) {
+    super::arraybuffer::install(vm, realm);
+    super::typedarray_ctor::install(vm, realm);
+    super::atomics::install(vm, realm);
 }
