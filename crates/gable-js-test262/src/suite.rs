@@ -250,6 +250,7 @@ pub fn run_all(
 ) -> Result<Report> {
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(opts.threads)
+        .stack_size(64 * 1024 * 1024)
         .build()?;
     let total = cases.len();
     let done = std::sync::atomic::AtomicUsize::new(0);

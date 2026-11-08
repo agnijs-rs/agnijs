@@ -5,9 +5,11 @@ use super::*;
 use crate::analysis::Uses;
 
 /// Extra context for compiling a function body.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 pub(crate) struct FuncCtx {
     pub kind: Option<CodeKind>,
+    /// A named function expression binds its own name.
+    pub self_name: Option<Rc<str>>,
     pub is_derived_ctor: bool,
     /// A base class constructor runs instance element initialisation on
     /// entry.
@@ -160,6 +162,7 @@ impl<'a> Compiler<'a> {
         let nparams = params.len() as u16;
         let param_base = self.alloc_n(nparams);
         self.fs().param_base = param_base;
+        self.fs().param_regs = nparams;
         let mut length = 0u16;
         for p in params {
             match p {
@@ -176,14 +179,24 @@ impl<'a> Compiler<'a> {
 
         let lex = lexical_decls(body);
         let top_lexical: Vec<Rc<str>> = lex.lexical.iter().map(|(n, _)| n.clone()).collect();
-        let vars = var_decls(body, strict, &top_lexical, &param_names);
+        // "arguments" joins parameterNames when an arguments object exists
+        // (FunctionDeclarationInstantiation step 22.f), which blocks Annex B
+        // hoisting of a block function of that name.
+        let mut annex_blocked = param_names.clone();
+        if !annex_blocked.iter().any(|n| &**n == "arguments") {
+            annex_blocked.push(Rc::from("arguments"));
+        }
+        let vars = var_decls(body, strict, &top_lexical, &annex_blocked);
 
         // Does the function need an arguments object?
         let needs_arguments = !is_arrow
             && (analysis.uses.arguments || poisoned)
             && !param_names.iter().any(|n| &**n == ARGUMENTS)
-            && !lex.functions.iter().any(|n| &**n == ARGUMENTS)
-            && !top_lexical.iter().any(|n| &**n == ARGUMENTS)
+            // With parameter expressions the body's declarations live in a
+            // separate scope and do not suppress the arguments object.
+            && (!simple
+                || (!lex.functions.iter().any(|n| &**n == ARGUMENTS)
+                    && !top_lexical.iter().any(|n| &**n == ARGUMENTS)))
             && kind != CodeKind::ClassInitializer;
         let mapped = needs_arguments && !strict && simple;
         self.fs().keeps_arguments = needs_arguments || has_rest;
@@ -253,6 +266,15 @@ impl<'a> Compiler<'a> {
                 self.declare(n, *k, false);
             }
         }
+        // The function expression's own name, unless a parameter or (in
+        // the shared scope) a body declaration shadows it.
+        let self_name: Option<Rc<str>> = match &ctx.self_name {
+            Some(n) if !self.scope_has(n) => {
+                self.declare(n, BindingKind::FuncName, false);
+                Some(n.clone())
+            }
+            _ => None,
+        };
         self.finish_scope();
         self.fs().param_names = param_names.clone();
         self.fs().declarations = Some(Declarations {
@@ -289,6 +311,10 @@ impl<'a> Compiler<'a> {
             if self.scope_has(FUNC) {
                 self.emit(Instr::LdaCallee);
                 self.emit_store_name(FUNC, self.fs_ref().span, true);
+            }
+            if let Some(n) = &self_name {
+                self.emit(Instr::LdaCallee);
+                self.emit_store_name(n, self.fs_ref().span, true);
             }
         }
         if simple {

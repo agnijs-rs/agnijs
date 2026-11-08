@@ -90,7 +90,7 @@ fn compiles_eval_code() {
     assert!(cb
         .instrs
         .iter()
-        .any(|i| matches!(i, Instr::StaDynamic { .. })));
+        .any(|i| matches!(i, Instr::StaDynamic { .. } | Instr::StaDynamicRef { .. })));
 }
 
 #[test]

@@ -122,10 +122,35 @@ pub enum Instr {
         name: NameIdx,
         strict: bool,
     },
+    /// Annex B.3.3.3 in sloppy eval code: store acc into the variable
+    /// environment of the eval (the caller's var scope or the global),
+    /// bypassing the block scopes in between.
+    StaEvalVar(NameIdx),
     /// Initialise a binding found by name (eval-declared lexicals).
     InitDynamic(NameIdx),
     /// `delete name`: acc = result.
     DeleteDynamic(NameIdx),
+    /// Resolve `name` through the environment chain now and keep the
+    /// reference in `dst` (assignment under `with`/eval evaluates the
+    /// reference before the right-hand side).
+    /// acc = the `this` value for calling a binding found through the
+    /// reference in `reg` (the `with` object, else undefined).
+    LdaRefThis(Reg),
+    ResolveDynamic {
+        name: NameIdx,
+        dst: Reg,
+    },
+    /// acc = GetValue of a reference made by `ResolveDynamic`.
+    LdaDynamicRef {
+        name: NameIdx,
+        reference: Reg,
+    },
+    /// PutValue(acc) through a reference made by `ResolveDynamic`.
+    StaDynamicRef {
+        name: NameIdx,
+        reference: Reg,
+        strict: bool,
+    },
     /// For calls `f()` where `f` is resolved dynamically: acc = the `this`
     /// value (`with` object or undefined).
     ThisForDynamicCall(NameIdx),
@@ -566,6 +591,9 @@ pub enum BindingKind {
     This,
     /// Internal bindings (`new.target`, the callee, private names).
     Internal,
+    /// The name of a named function expression, bound in its own scope:
+    /// assignment is ignored in sloppy mode and a TypeError in strict mode.
+    FuncName,
 }
 
 impl BindingKind {
@@ -678,6 +706,9 @@ pub struct CodeBlock {
     pub register_count: u16,
     /// Parameter i is passed in register `param_base + i`.
     pub param_base: Reg,
+    /// Number of positional parameter registers (one per formal parameter,
+    /// including patterns and a rest parameter).
+    pub param_regs: u16,
     /// Bound names of the parameters, in order (mapped arguments).
     pub param_names: Vec<Rc<str>>,
     /// The frame must keep the actual arguments (rest / `arguments`).

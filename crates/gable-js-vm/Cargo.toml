@@ -5,6 +5,15 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "gable-js-vm"
+description = "The Gable JavaScript virtual machine: interpreter, object model, heap and GC, built-ins"
 
 [dependencies]
+gable-engine-api.workspace = true
+gable-js-parser.workspace = true
+gable-js-compiler.workspace = true
+hashbrown = "0.14"
+indexmap = "2"
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }

@@ -391,7 +391,7 @@ impl<'s> Parser<'s> {
             let Some((op, prec)) = self.binary_op() else {
                 break;
             };
-            if prec < min_prec || (prec == min_prec && prec != PREC_EXP) {
+            if prec < min_prec {
                 break;
             }
             if self.arrow_stops(&left)? {

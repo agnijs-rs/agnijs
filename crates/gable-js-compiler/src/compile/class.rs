@@ -80,6 +80,7 @@ impl<'a> Compiler<'a> {
                     kind: Some(CodeKind::ClassConstructor),
                     is_derived_ctor: derived,
                     is_base_ctor: !derived,
+                    self_name: None,
                 },
             )?,
             None => self.default_constructor(&static_name, derived, c.span),
@@ -103,7 +104,7 @@ impl<'a> Compiler<'a> {
             is_block: bool,
         }
         let mut statics: Vec<StaticElem> = Vec::new();
-        let mut static_private_methods: Vec<Reg> = Vec::new();
+        let mut static_private_methods: Vec<(Rc<str>, Reg)> = Vec::new();
         let mut instance_private_methods: Vec<Rc<str>> = Vec::new();
         for m in &c.body {
             match m {
@@ -129,8 +130,8 @@ impl<'a> Compiler<'a> {
                         self.emit(Instr::SetPrivateMethod { name, kind });
                         let bn = private_binding_name(&p.name);
                         if m.is_static {
-                            if !static_private_methods.contains(&name) {
-                                static_private_methods.push(name);
+                            if !static_private_methods.iter().any(|(n, _)| *n == bn) {
+                                static_private_methods.push((bn.clone(), name));
                             }
                             // Keep the register alive until the brands are
                             // added below.
@@ -233,7 +234,7 @@ impl<'a> Compiler<'a> {
             self.emit_store_name(&id.name, id.span, true);
         }
         // Static private methods.
-        for name in static_private_methods {
+        for (_, name) in static_private_methods {
             self.emit(Instr::AddPrivateBrand {
                 obj: ctor_reg,
                 name,

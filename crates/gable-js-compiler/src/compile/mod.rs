@@ -147,6 +147,12 @@ pub(crate) enum Ctl {
     Switch {
         breaks: Vec<usize>,
     },
+    /// An array destructuring in progress: its iterator is closed when a
+    /// generator `return` resumption unwinds through it.
+    DestructureIter {
+        iter: Reg,
+        done: Reg,
+    },
     Finally {
         kind_reg: Reg,
         value_reg: Reg,
@@ -188,6 +194,7 @@ pub(crate) struct FnState {
     pub optional_exits: Vec<Vec<usize>>,
     pub param_count: u16,
     pub param_base: Reg,
+    pub param_regs: u16,
     pub param_names: Vec<Rc<str>>,
     pub keeps_arguments: bool,
     pub declarations: Option<Declarations>,
@@ -550,15 +557,18 @@ impl<'a> Compiler<'a> {
         let mut dynamic = false;
         let mut iter_fn = cur_fn;
         for frame in self.scopes.iter().rev() {
+            let shadowable = !name.starts_with('*') && !name.starts_with('#');
             if frame.fn_index != iter_fn {
                 // Leaving function `iter_fn` for its parent.
-                if self.fns[iter_fn].analysis.own_eval {
+                if self.fns[iter_fn].analysis.own_eval && shadowable {
                     dynamic = true;
                 }
                 iter_fn = frame.fn_index;
             }
             if frame.is_with {
-                dynamic = true;
+                if shadowable {
+                    dynamic = true;
+                }
                 depth += 1;
                 continue;
             }
@@ -697,6 +707,13 @@ impl<'a> Compiler<'a> {
                     self.mark_initialized(name);
                     return;
                 }
+                if kind == BindingKind::FuncName {
+                    if strict {
+                        let n = self.name(name);
+                        self.emit(Instr::ThrowConstAssign(n));
+                    }
+                    return;
+                }
                 if kind.is_const() {
                     if check_tdz {
                         let tmp = self.alloc();
@@ -733,6 +750,13 @@ impl<'a> Compiler<'a> {
                 if init {
                     self.emit(Instr::StaEnv { depth, slot });
                     self.mark_initialized(name);
+                    return;
+                }
+                if kind == BindingKind::FuncName {
+                    if strict {
+                        let n = self.name(name);
+                        self.emit(Instr::ThrowConstAssign(n));
+                    }
                     return;
                 }
                 if kind.is_const() || kind == BindingKind::Internal {
@@ -804,8 +828,10 @@ impl<'a> Compiler<'a> {
     /// true when the jump was diverted into a finally block (the caller
     /// must not emit its own jump).
     pub(crate) fn emit_unwind_to(&mut self, kind: JumpKind, target: usize, from: usize) -> bool {
+        // Entries strictly above the target: the target itself is handled
+        // by the caller (or the break case below).
         let mut i = from;
-        while i > target {
+        while i > target + 1 {
             i -= 1;
             match &self.fs_ref().ctl[i] {
                 Ctl::Env => {
@@ -820,6 +846,10 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 Ctl::Block { .. } | Ctl::Switch { .. } => {}
+                Ctl::DestructureIter { iter, done } => {
+                    let (iter, done) = (*iter, *done);
+                    self.emit_destructure_iterator_close(iter, done);
+                }
                 Ctl::Finally { .. } => {
                     let (id, kind_reg) = match &mut self.fs().ctl[i] {
                         Ctl::Finally {
@@ -893,7 +923,7 @@ impl<'a> Compiler<'a> {
                 Ctl::Loop {
                     iterator: Some(_),
                     ..
-                }
+                } | Ctl::DestructureIter { .. }
             )
         });
         let tmp = if needs_tmp {
@@ -903,11 +933,18 @@ impl<'a> Compiler<'a> {
         } else {
             None
         };
+        // Environments only need popping when the return is diverted into
+        // a finally block (which runs at its own depth); a real return
+        // discards the frame, and the derived-constructor check below
+        // resolves `this` at the current compile-time depth.
+        let has_finally = (0..from).any(|k| matches!(self.fs_ref().ctl[k], Ctl::Finally { .. }));
         while i > 0 {
             i -= 1;
             match &self.fs_ref().ctl[i] {
                 Ctl::Env => {
-                    self.emit(Instr::PopEnv);
+                    if has_finally {
+                        self.emit(Instr::PopEnv);
+                    }
                 }
                 Ctl::Loop {
                     iterator: Some(li), ..
@@ -916,6 +953,10 @@ impl<'a> Compiler<'a> {
                     self.emit_loop_iterator_close(li);
                 }
                 Ctl::Loop { .. } | Ctl::Block { .. } | Ctl::Switch { .. } => {}
+                Ctl::DestructureIter { iter, done } => {
+                    let (iter, done) = (*iter, *done);
+                    self.emit_destructure_iterator_close(iter, done);
+                }
                 Ctl::Finally {
                     kind_reg,
                     value_reg,
@@ -975,6 +1016,22 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::Ldar(saved));
         self.free_to(saved);
         self.emit_iterator_close(li.iter, li.is_async);
+    }
+
+    /// Close a destructuring iterator that is not yet done. Preserves acc.
+    pub(crate) fn emit_destructure_iterator_close(&mut self, iter: Reg, done: Reg) {
+        let saved = self.alloc();
+        self.emit(Instr::Star(saved));
+        self.emit(Instr::Ldar(done));
+        let skip = self.emit_jump(Instr::JumpIfTrue(0));
+        // Mark done first: if return() throws, the pattern's handler must
+        // not close the iterator a second time.
+        self.emit(Instr::LdaTrue);
+        self.emit(Instr::Star(done));
+        self.emit(Instr::IteratorClose { iter });
+        self.patch(skip);
+        self.emit(Instr::Ldar(saved));
+        self.free_to(saved);
     }
 
     /// Close an iterator on a normal (break/return) exit. Preserves acc.
@@ -1055,6 +1112,7 @@ impl<'a> Compiler<'a> {
             optional_exits: Vec::new(),
             param_count: 0,
             param_base: 0,
+            param_regs: 0,
             param_names: Vec::new(),
             keeps_arguments: false,
             declarations: None,
@@ -1076,6 +1134,7 @@ impl<'a> Compiler<'a> {
             param_count: fs.param_count,
             register_count: fs.max_reg,
             param_base: fs.param_base,
+            param_regs: fs.param_regs,
             param_names: fs.param_names,
             keeps_arguments: fs.keeps_arguments,
             instrs: fs.instrs,

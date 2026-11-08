@@ -57,7 +57,11 @@ pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
     let visible = HashSet::new();
     p.disjunction(&visible)?;
     if p.i < p.s.len() {
-        return Err(if p.s[p.i] == ')' as u32 { "unmatched ')'".into() } else { "unexpected character in regular expression".into() });
+        return Err(if p.s[p.i] == ')' as u32 {
+            "unmatched ')'".into()
+        } else {
+            "unexpected character in regular expression".into()
+        });
     }
     Ok(())
 }
@@ -141,7 +145,9 @@ impl P {
         self.peek() == Some(u(c))
     }
     fn at_str(&self, t: &str) -> bool {
-        t.chars().enumerate().all(|(k, c)| self.peek_at(k) == Some(u(c)))
+        t.chars()
+            .enumerate()
+            .all(|(k, c)| self.peek_at(k) == Some(u(c)))
     }
     fn eat(&mut self, c: char) -> bool {
         if self.at(c) {
@@ -182,7 +188,11 @@ impl P {
         Ok(declared)
     }
 
-    fn term(&mut self, visible: &mut HashSet<String>, declared: &mut HashSet<String>) -> Result<(), String> {
+    fn term(
+        &mut self,
+        visible: &mut HashSet<String>,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
         let c = self.peek().unwrap();
         // Assertions.
         if c == u('^') || c == u('$') {
@@ -216,7 +226,12 @@ impl P {
         self.quantifier_opt()
     }
 
-    fn declare_all(&mut self, names: HashSet<String>, visible: &mut HashSet<String>, declared: &mut HashSet<String>) {
+    fn declare_all(
+        &mut self,
+        names: HashSet<String>,
+        visible: &mut HashSet<String>,
+        declared: &mut HashSet<String>,
+    ) {
         for n in names {
             visible.insert(n.clone());
             declared.insert(n);
@@ -246,7 +261,11 @@ impl P {
                     break;
                 }
             }
-            if *j == start { None } else { Some(v) }
+            if *j == start {
+                None
+            } else {
+                Some(v)
+            }
         };
         let min = digits(&mut j)?;
         let mut max = Some(min);
@@ -299,7 +318,11 @@ impl P {
 
     // ---- atoms -------------------------------------------------------------
 
-    fn atom(&mut self, visible: &mut HashSet<String>, declared: &mut HashSet<String>) -> Result<(), String> {
+    fn atom(
+        &mut self,
+        visible: &mut HashSet<String>,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
         let c = self.peek().unwrap();
         match char::from_u32(c) {
             Some('.') => {
@@ -337,7 +360,11 @@ impl P {
         }
     }
 
-    fn group(&mut self, visible: &mut HashSet<String>, declared: &mut HashSet<String>) -> Result<(), String> {
+    fn group(
+        &mut self,
+        visible: &mut HashSet<String>,
+        declared: &mut HashSet<String>,
+    ) -> Result<(), String> {
         self.i += 1; // (
         if self.eat('?') {
             if self.eat(':') {
@@ -365,7 +392,11 @@ impl P {
                             if add.contains(ch) || remove.contains(ch) {
                                 return self.err("repeated regular expression modifier");
                             }
-                            if seen_dash { remove.push(ch) } else { add.push(ch) }
+                            if seen_dash {
+                                remove.push(ch)
+                            } else {
+                                add.push(ch)
+                            }
                             self.i += 1;
                         }
                         Some('-') if !seen_dash => {
@@ -400,7 +431,9 @@ impl P {
         let mut name = String::new();
         let mut first = true;
         loop {
-            let Some(c) = self.peek() else { return self.err("invalid capture group name") };
+            let Some(c) = self.peek() else {
+                return self.err("invalid capture group name");
+            };
             if c == u('>') {
                 self.i += 1;
                 break;
@@ -429,7 +462,10 @@ impl P {
             let ok = if first {
                 ch == '$' || ch == '_' || unicode_id_start::is_id_start(ch)
             } else {
-                ch == '$' || ch == '\u{200C}' || ch == '\u{200D}' || unicode_id_start::is_id_continue(ch)
+                ch == '$'
+                    || ch == '\u{200C}'
+                    || ch == '\u{200D}'
+                    || unicode_id_start::is_id_continue(ch)
             };
             if !ok {
                 return self.err("invalid capture group name");
@@ -449,7 +485,11 @@ impl P {
         if unicode && self.eat('{') {
             let mut v: u32 = 0;
             let mut any = false;
-            while let Some(d) = self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(16)) {
+            while let Some(d) = self
+                .peek()
+                .and_then(char::from_u32)
+                .and_then(|c| c.to_digit(16))
+            {
                 v = v.saturating_mul(16).saturating_add(d);
                 if v > 0x10FFFF {
                     return self.err("invalid unicode escape");
@@ -462,7 +502,9 @@ impl P {
             }
             return Ok(v);
         }
-        let lead = self.hex4().ok_or_else(|| "invalid unicode escape".to_string())?;
+        let lead = self
+            .hex4()
+            .ok_or_else(|| "invalid unicode escape".to_string())?;
         if unicode && (0xD800..0xDC00).contains(&lead) && self.at_str("\\u") {
             let save = self.i;
             self.i += 2;
@@ -479,7 +521,10 @@ impl P {
     fn hex4(&mut self) -> Option<u32> {
         let mut v = 0;
         for k in 0..4 {
-            let d = self.peek_at(k).and_then(char::from_u32).and_then(|c| c.to_digit(16))?;
+            let d = self
+                .peek_at(k)
+                .and_then(char::from_u32)
+                .and_then(|c| c.to_digit(16))?;
             v = v * 16 + d;
         }
         self.i += 4;
@@ -489,7 +534,10 @@ impl P {
     fn hex2(&mut self) -> Option<u32> {
         let mut v = 0;
         for k in 0..2 {
-            let d = self.peek_at(k).and_then(char::from_u32).and_then(|c| c.to_digit(16))?;
+            let d = self
+                .peek_at(k)
+                .and_then(char::from_u32)
+                .and_then(|c| c.to_digit(16))?;
             v = v * 16 + d;
         }
         self.i += 2;
@@ -500,14 +548,20 @@ impl P {
 
     fn atom_escape(&mut self) -> Result<(), String> {
         self.i += 1; // backslash
-        let Some(c) = self.peek() else { return self.err("\\ at end of pattern") };
+        let Some(c) = self.peek() else {
+            return self.err("\\ at end of pattern");
+        };
         let ch = char::from_u32(c);
         match ch {
             // Backreference or legacy octal.
             Some('1'..='9') => {
                 let start = self.i;
                 let mut n: usize = 0;
-                while let Some(d) = self.peek().and_then(char::from_u32).and_then(|c| c.to_digit(10)) {
+                while let Some(d) = self
+                    .peek()
+                    .and_then(char::from_u32)
+                    .and_then(|c| c.to_digit(10))
+                {
                     n = n.saturating_mul(10).saturating_add(d as usize);
                     self.i += 1;
                 }
@@ -627,7 +681,11 @@ impl P {
             }
             return Ok(true);
         }
-        if body.is_empty() || body.starts_with('=') || body.ends_with('=') || body.matches('=').count() > 1 {
+        if body.is_empty()
+            || body.starts_with('=')
+            || body.ends_with('=')
+            || body.matches('=').count() > 1
+        {
             return self.err("invalid property name");
         }
         if regress::Regex::with_flags(&format!("\\p{{{body}}}"), "u").is_err() {
@@ -799,7 +857,9 @@ impl P {
             return Ok(ClassAtom::Char(c));
         }
         self.i += 1;
-        let Some(e) = self.peek() else { return self.err("\\ at end of pattern") };
+        let Some(e) = self.peek() else {
+            return self.err("\\ at end of pattern");
+        };
         match char::from_u32(e) {
             Some('b') => {
                 self.i += 1;
@@ -894,7 +954,9 @@ impl P {
 
     /// Returns (MayContainStrings, Some(code point) when a single character).
     fn class_set_operand(&mut self) -> Result<(bool, Option<u32>), String> {
-        let Some(c) = self.peek() else { return self.err("unterminated character class") };
+        let Some(c) = self.peek() else {
+            return self.err("unterminated character class");
+        };
         if c == u('[') {
             self.i += 1;
             let negated = self.eat('^');
@@ -954,10 +1016,14 @@ impl P {
     }
 
     fn class_set_character(&mut self) -> Result<u32, String> {
-        let Some(c) = self.peek() else { return self.err("unterminated character class") };
+        let Some(c) = self.peek() else {
+            return self.err("unterminated character class");
+        };
         let ch = char::from_u32(c);
         if c == u('\\') {
-            let Some(e) = self.peek_at(1).and_then(char::from_u32) else { return self.err("\\ at end of pattern") };
+            let Some(e) = self.peek_at(1).and_then(char::from_u32) else {
+                return self.err("\\ at end of pattern");
+            };
             if "&-!#%,:;<=>@`~".contains(e) {
                 self.i += 2;
                 return Ok(e as u32);

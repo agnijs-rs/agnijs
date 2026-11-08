@@ -67,6 +67,23 @@ enum Cmd {
         #[arg(long)]
         verbose: bool,
     },
+    /// Run one JS file against an engine with the test262 harness loaded
+    /// (for debugging; not part of the conformance run).
+    Eval {
+        #[arg(long, default_value = "gable")]
+        engine: String,
+        #[arg(long)]
+        test262: Option<PathBuf>,
+        /// Treat the file as a module.
+        #[arg(long)]
+        module: bool,
+        #[arg(long, default_value_t = 10_000)]
+        timeout_ms: u64,
+        /// Print the compiled bytecode instead of running.
+        #[arg(long)]
+        dump: bool,
+        file: PathBuf,
+    },
 }
 
 fn crate_dir() -> PathBuf {
@@ -79,6 +96,61 @@ fn default_test262_dir() -> PathBuf {
 
 fn main() -> Result<()> {
     match Cli::parse().cmd {
+        Cmd::Eval {
+            engine,
+            test262,
+            module,
+            timeout_ms,
+            dump,
+            file,
+        } => {
+            if dump {
+                let source = std::fs::read_to_string(&file)?;
+                let code = if module {
+                    gable_js_compiler::compile_module(&source, "dump")
+                } else {
+                    gable_js_compiler::compile_script(&source, "dump")
+                };
+                match code {
+                    Ok(c) => dump_code(&c, 0),
+                    Err(e) => println!("SyntaxError: {e}"),
+                }
+                return Ok(());
+            }
+            let root = test262.unwrap_or_else(default_test262_dir);
+            let harness = suite::load_harness(&root)?;
+            let Mode::Engine(factory) = factory_for(&engine)? else {
+                bail!("eval needs a real engine");
+            };
+            let source = std::fs::read_to_string(&file)?;
+            let path = if file.is_absolute() {
+                file.clone()
+            } else {
+                std::env::current_dir()?.join(&file)
+            };
+            match gable_js_test262::runner::eval_file(
+                &factory,
+                &path,
+                &source,
+                &harness,
+                module,
+                Duration::from_millis(timeout_ms),
+            ) {
+                Ok(prints) => {
+                    for p in prints {
+                        println!("{p}");
+                    }
+                    Ok(())
+                }
+                Err((name, msg, prints)) => {
+                    for p in prints {
+                        println!("{p}");
+                    }
+                    println!("Uncaught {name}: {msg}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Cmd::Fetch { remote, dir } => fetch(&remote, &dir.unwrap_or_else(default_test262_dir)),
         Cmd::Run {
             engine,
@@ -166,9 +238,12 @@ fn factory_for(engine: &str) -> Result<Mode> {
         "quickjs" => Ok(Mode::Engine(Arc::new(|host| {
             gable_engine_quickjs::make_engine(host)
         }))),
+        "gable" => Ok(Mode::Engine(Arc::new(|host| {
+            gable_js_vm::make_engine(host)
+        }))),
         "parse" => Ok(Mode::ParseOnly),
         "compile" => Ok(Mode::CompileOnly),
-        other => bail!("unknown engine {other:?}; available: quickjs, parse, compile"),
+        other => bail!("unknown engine {other:?}; available: quickjs, gable, parse, compile"),
     }
 }
 
@@ -333,4 +408,26 @@ fn run(args: RunArgs) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+fn dump_code(code: &gable_js_compiler::bytecode::CodeBlock, depth: usize) {
+    let pad = "  ".repeat(depth);
+    println!(
+        "{pad}== {} ({:?}/{:?}) strict={} regs={} params={} ",
+        code.name,
+        code.kind,
+        code.function_kind,
+        code.strict,
+        code.register_count,
+        code.param_count
+    );
+    for (i, ins) in code.instrs.iter().enumerate() {
+        println!("{pad}{i:5}  {ins:?}");
+    }
+    for h in &code.handlers {
+        println!("{pad}  handler {h:?}");
+    }
+    for f in &code.functions {
+        dump_code(f, depth + 1);
+    }
 }

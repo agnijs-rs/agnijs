@@ -82,22 +82,31 @@ impl<'a> Compiler<'a> {
         let mut key_regs: Vec<Reg> = Vec::new();
         for prop in &o.properties {
             self.set_pos(prop.span);
-            // For assignment patterns with member targets, the target
-            // reference is evaluated before the property is read.
+            // A computed key is evaluated (and converted) first; then, for
+            // assignment patterns with member targets, the target reference
+            // is evaluated before the property is read.
+            let computed = match &prop.key {
+                PropertyKey::Computed(_) => Some(self.property_key_reg(&prop.key)?),
+                _ => None,
+            };
             let target_ref = self.pre_evaluate_target(&prop.value, mode)?;
-            match (&prop.key, keep_keys) {
-                (PropertyKey::Computed(_), _) | (_, true) => {
+            match (computed, keep_keys) {
+                (Some(key), _) => {
+                    key_regs.push(key);
+                    self.emit(Instr::GetKeyed { obj: src, key });
+                }
+                (None, true) => {
                     let key = self.property_key_reg(&prop.key)?;
                     key_regs.push(key);
                     self.emit(Instr::GetKeyed { obj: src, key });
                 }
-                (key, false) => {
-                    let name = static_key_name(key).unwrap();
+                (None, false) => {
+                    let name = static_key_name(&prop.key).unwrap();
                     if Self::utf16_is_str(&name) {
                         let n = self.name(&utf16_to_string(&name));
                         self.emit(Instr::GetNamed { obj: src, name: n });
                     } else {
-                        let key = self.property_key_reg(key)?;
+                        let key = self.property_key_reg(&prop.key)?;
                         self.emit(Instr::GetKeyed { obj: src, key });
                     }
                 }
@@ -142,22 +151,25 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::LdaFalse);
         self.emit(Instr::Star(done));
         let body_start = self.pc();
+        self.fs().ctl.push(Ctl::DestructureIter { iter, done });
         for el in &a.elements {
             match el {
                 None => {
-                    // Hole: step the iterator, ignore the value.
+                    // Hole: step the iterator, ignore the value. The done flag is
+                    // set before the step so that a throwing next() does
+                    // not get the iterator closed.
                     self.emit(Instr::Ldar(done));
                     let skip = self.emit_jump(Instr::JumpIfTrue(0));
+                    self.emit(Instr::LdaTrue);
+                    self.emit(Instr::Star(done));
                     let d = self.emit_jump(Instr::IteratorStep {
                         iter,
                         next,
                         done: 0,
                     });
-                    let cont = self.emit_jump(Instr::Jump(0));
-                    self.patch(d);
-                    self.emit(Instr::LdaTrue);
+                    self.emit(Instr::LdaFalse);
                     self.emit(Instr::Star(done));
-                    self.patch(cont);
+                    self.patch(d);
                     self.patch(skip);
                 }
                 Some(Pattern::Rest(r)) => {
@@ -168,16 +180,18 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Ldar(done));
                     let skip = self.emit_jump(Instr::JumpIfTrue(0));
                     let top = self.pc();
+                    self.emit(Instr::LdaTrue);
+                    self.emit(Instr::Star(done));
                     let d = self.emit_jump(Instr::IteratorStep {
                         iter,
                         next,
                         done: 0,
                     });
                     self.emit(Instr::ArrayPush { arr });
+                    self.emit(Instr::LdaFalse);
+                    self.emit(Instr::Star(done));
                     self.emit_jump_to(top);
                     self.patch(d);
-                    self.emit(Instr::LdaTrue);
-                    self.emit(Instr::Star(done));
                     self.patch(skip);
                     self.emit(Instr::Ldar(arr));
                     self.finish_element(&r.argument, mode, target_ref)?;
@@ -186,21 +200,30 @@ impl<'a> Compiler<'a> {
                     let target_ref = self.pre_evaluate_target(p, mode)?;
                     self.emit(Instr::Ldar(done));
                     let already = self.emit_jump(Instr::JumpIfTrue(0));
+                    self.emit(Instr::LdaTrue);
+                    self.emit(Instr::Star(done));
                     let d = self.emit_jump(Instr::IteratorStep {
                         iter,
                         next,
                         done: 0,
                     });
+                    let value = self.alloc();
+                    self.emit(Instr::Star(value));
+                    self.emit(Instr::LdaFalse);
+                    self.emit(Instr::Star(done));
+                    self.emit(Instr::Ldar(value));
                     let got = self.emit_jump(Instr::Jump(0));
                     self.patch(d);
-                    self.emit(Instr::LdaTrue);
-                    self.emit(Instr::Star(done));
                     self.patch(already);
                     self.emit(Instr::LdaUndefined);
                     self.patch(got);
                     self.finish_element(p, mode, target_ref)?;
                 }
             }
+        }
+        match self.fs().ctl.pop() {
+            Some(Ctl::DestructureIter { .. }) => {}
+            _ => unreachable!("destructuring control entry out of balance"),
         }
         let body_end = self.pc();
         // Normal completion: close the iterator if not done.
@@ -227,17 +250,33 @@ impl<'a> Compiler<'a> {
 
     /// In assignment patterns, member targets are evaluated before the
     /// value is produced. Returns the evaluated reference, if any.
-    fn pre_evaluate_target(&mut self, p: &Pattern, mode: Mode) -> CResult<Option<MemberRef>> {
-        if mode != Mode::Assign {
-            return Ok(None);
-        }
+    fn pre_evaluate_target(&mut self, p: &Pattern, mode: Mode) -> CResult<Option<TargetRef>> {
         let target = match p {
             Pattern::Assignment(a) => &a.left,
             other => other,
         };
+        // Identifier references in with/eval scopes are resolved before the
+        // value is fetched (ResolveBinding precedes GetV in the spec).
+        let ident = match target {
+            Pattern::Ident(id) => Some(id),
+            Pattern::Expression(e) => match e.unparen() {
+                Expression::Ident(id) => Some(id),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some(id) = ident {
+            if let Some(r) = self.dynamic_ref(&id.name) {
+                return Ok(Some(TargetRef::Dynamic(id.name.clone(), id.span, r)));
+            }
+            return Ok(None);
+        }
+        if mode != Mode::Assign {
+            return Ok(None);
+        }
         if let Pattern::Expression(e) = target {
             if let Expression::Member(m) = e.unparen() {
-                return Ok(Some(self.member_ref(m)?));
+                return Ok(Some(TargetRef::Member(self.member_ref(m)?)));
             }
         }
         Ok(None)
@@ -249,11 +288,11 @@ impl<'a> Compiler<'a> {
         &mut self,
         p: &Pattern,
         mode: Mode,
-        target_ref: Option<MemberRef>,
+        target_ref: Option<TargetRef>,
     ) -> CResult<()> {
         match target_ref {
             None => self.pattern(p, mode),
-            Some(r) => {
+            Some(TargetRef::Member(r)) => {
                 if let Pattern::Assignment(a) = p {
                     let skip = self.emit_jump(Instr::JumpIfNotUndefined(0));
                     self.expr(&a.right)?;
@@ -262,8 +301,24 @@ impl<'a> Compiler<'a> {
                 self.emit_member_set(&r);
                 Ok(())
             }
+            Some(TargetRef::Dynamic(name, span, r)) => {
+                if let Pattern::Assignment(a) = p {
+                    let skip = self.emit_jump(Instr::JumpIfNotUndefined(0));
+                    self.expr_named(&a.right, NameHint::Static(&name))?;
+                    self.patch(skip);
+                }
+                self.emit_store_ref(&name, span, Some(r));
+                Ok(())
+            }
         }
     }
+}
+
+/// A destructuring target evaluated before its value.
+enum TargetRef {
+    Member(MemberRef),
+    /// A dynamically resolved identifier: name, span, resolved reference.
+    Dynamic(Rc<str>, Span, (NameIdx, Reg)),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

@@ -1,0 +1,439 @@
+//! String storage: one-byte (Latin-1) or two-byte (UTF-16) flat strings and
+//! ropes that flatten on first access. JS strings are sequences of UTF-16
+//! code units and may contain lone surrogates, so no representation here
+//! is UTF-8.
+
+use crate::value::StrId;
+use std::cell::Cell;
+
+pub enum Repr {
+    One(Box<[u8]>),
+    Two(Box<[u16]>),
+    Rope {
+        left: StrId,
+        right: StrId,
+        len: u32,
+        one_byte: bool,
+    },
+}
+
+pub struct StringData {
+    pub repr: Repr,
+    /// Cached content hash; 0 means not computed (a real hash of 0 is
+    /// remapped to 1).
+    hash: Cell<u64>,
+    /// Interned: content-unique, usable as a property key by identity.
+    pub atom: bool,
+}
+
+impl StringData {
+    pub fn new(repr: Repr) -> StringData {
+        StringData {
+            repr,
+            hash: Cell::new(0),
+            atom: false,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match &self.repr {
+            Repr::One(b) => b.len(),
+            Repr::Two(u) => u.len(),
+            Repr::Rope { len, .. } => *len as usize,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn is_one_byte(&self) -> bool {
+        match &self.repr {
+            Repr::One(_) => true,
+            Repr::Two(_) => false,
+            Repr::Rope { one_byte, .. } => *one_byte,
+        }
+    }
+
+    pub fn is_rope(&self) -> bool {
+        matches!(self.repr, Repr::Rope { .. })
+    }
+
+    pub fn byte_len(&self) -> usize {
+        match &self.repr {
+            Repr::One(b) => b.len(),
+            Repr::Two(u) => u.len() * 2,
+            Repr::Rope { .. } => 16,
+        }
+    }
+
+    /// The code units of a flat string. Panics on a rope: callers flatten
+    /// through the heap first.
+    #[inline]
+    pub fn units(&self) -> Units<'_> {
+        match &self.repr {
+            Repr::One(b) => Units::One(b),
+            Repr::Two(u) => Units::Two(u),
+            Repr::Rope { .. } => panic!("units() on an unflattened rope"),
+        }
+    }
+
+    pub fn cached_hash(&self) -> Option<u64> {
+        let h = self.hash.get();
+        if h == 0 {
+            None
+        } else {
+            Some(h)
+        }
+    }
+
+    pub fn set_hash(&self, h: u64) {
+        self.hash.set(if h == 0 { 1 } else { h });
+    }
+}
+
+/// A view of a flat string's code units.
+#[derive(Clone, Copy)]
+pub enum Units<'a> {
+    One(&'a [u8]),
+    Two(&'a [u16]),
+}
+
+impl<'a> Units<'a> {
+    #[inline]
+    pub fn len(&self) -> usize {
+        match self {
+            Units::One(b) => b.len(),
+            Units::Two(u) => u.len(),
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline]
+    pub fn is_one_byte(&self) -> bool {
+        matches!(self, Units::One(_))
+    }
+
+    pub fn as_one_byte(&self) -> Option<&'a [u8]> {
+        match self {
+            Units::One(b) => Some(b),
+            _ => None,
+        }
+    }
+
+    /// Code unit at `i` (panics when out of range).
+    #[inline]
+    pub fn at(&self, i: usize) -> u16 {
+        match self {
+            Units::One(b) => b[i] as u16,
+            Units::Two(u) => u[i],
+        }
+    }
+
+    #[inline]
+    pub fn get(&self, i: usize) -> Option<u16> {
+        if i < self.len() {
+            Some(self.at(i))
+        } else {
+            None
+        }
+    }
+
+    pub fn iter(&self) -> UnitsIter<'a> {
+        UnitsIter {
+            units: *self,
+            pos: 0,
+            end: self.len(),
+        }
+    }
+
+    pub fn slice(&self, start: usize, end: usize) -> Units<'a> {
+        match self {
+            Units::One(b) => Units::One(&b[start..end]),
+            Units::Two(u) => Units::Two(&u[start..end]),
+        }
+    }
+
+    pub fn to_vec(&self) -> Vec<u16> {
+        self.iter().collect()
+    }
+
+    pub fn eq(&self, other: &Units<'_>) -> bool {
+        match (self, other) {
+            (Units::One(a), Units::One(b)) => a == b,
+            (Units::Two(a), Units::Two(b)) => a == b,
+            _ => self.len() == other.len() && self.iter().eq(other.iter()),
+        }
+    }
+
+    pub fn eq_str(&self, s: &str) -> bool {
+        match self {
+            Units::One(b) if s.is_ascii() => *b == s.as_bytes(),
+            _ => self.iter().eq(s.encode_utf16()),
+        }
+    }
+
+    pub fn eq_units(&self, s: &[u16]) -> bool {
+        self.iter().eq(s.iter().copied())
+    }
+
+    pub fn starts_with_str(&self, s: &str) -> bool {
+        let mut it = self.iter();
+        for c in s.encode_utf16() {
+            if it.next() != Some(c) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Lexicographic comparison by code unit.
+    pub fn cmp(&self, other: &Units<'_>) -> std::cmp::Ordering {
+        self.iter().cmp(other.iter())
+    }
+
+    pub fn to_string_lossy(&self) -> String {
+        match self {
+            Units::One(b) => b.iter().map(|&c| c as char).collect(),
+            Units::Two(u) => String::from_utf16_lossy(u),
+        }
+    }
+
+    /// Exact conversion; `None` when the string has a lone surrogate.
+    pub fn to_rust_string(&self) -> Option<String> {
+        match self {
+            Units::One(b) => Some(b.iter().map(|&c| c as char).collect()),
+            Units::Two(u) => String::from_utf16(u).ok(),
+        }
+    }
+
+    /// Content hash (FNV-1a over code units, widened).
+    pub fn hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for u in self.iter() {
+            h ^= u as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h ^= self.len() as u64;
+        h.wrapping_mul(0x100000001b3)
+    }
+
+    pub fn hash_str(s: &str) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        let mut n = 0;
+        for u in s.encode_utf16() {
+            h ^= u as u64;
+            h = h.wrapping_mul(0x100000001b3);
+            n += 1;
+        }
+        h ^= n as u64;
+        h.wrapping_mul(0x100000001b3)
+    }
+
+    /// Find `needle` starting at `from`.
+    pub fn index_of(&self, needle: &Units<'_>, from: usize) -> Option<usize> {
+        let n = needle.len();
+        let len = self.len();
+        if n == 0 {
+            return if from <= len { Some(from) } else { None };
+        }
+        if n > len {
+            return None;
+        }
+        let mut i = from;
+        while i + n <= len {
+            let mut ok = true;
+            for j in 0..n {
+                if self.at(i + j) != needle.at(j) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(i);
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// Find the last occurrence of `needle` starting at or before `from`.
+    pub fn last_index_of(&self, needle: &Units<'_>, from: usize) -> Option<usize> {
+        let n = needle.len();
+        let len = self.len();
+        if n > len {
+            return None;
+        }
+        let mut i = from.min(len - n);
+        loop {
+            let mut ok = true;
+            for j in 0..n {
+                if self.at(i + j) != needle.at(j) {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                return Some(i);
+            }
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+        }
+    }
+
+    /// The code point at `i` and its length in units (1 or 2).
+    pub fn code_point_at(&self, i: usize) -> (u32, usize) {
+        let first = self.at(i);
+        if (0xD800..0xDC00).contains(&first) && i + 1 < self.len() {
+            let second = self.at(i + 1);
+            if (0xDC00..0xE000).contains(&second) {
+                let cp = 0x10000 + (((first as u32) - 0xD800) << 10) + ((second as u32) - 0xDC00);
+                return (cp, 2);
+            }
+        }
+        (first as u32, 1)
+    }
+
+    /// Whether the string is well formed (no lone surrogates).
+    pub fn is_well_formed(&self) -> bool {
+        let mut i = 0;
+        let len = self.len();
+        while i < len {
+            let u = self.at(i);
+            if (0xD800..0xDC00).contains(&u) {
+                if i + 1 < len && (0xDC00..0xE000).contains(&self.at(i + 1)) {
+                    i += 2;
+                    continue;
+                }
+                return false;
+            }
+            if (0xDC00..0xE000).contains(&u) {
+                return false;
+            }
+            i += 1;
+        }
+        true
+    }
+}
+
+pub struct UnitsIter<'a> {
+    units: Units<'a>,
+    pos: usize,
+    end: usize,
+}
+
+impl<'a> Iterator for UnitsIter<'a> {
+    type Item = u16;
+    #[inline]
+    fn next(&mut self) -> Option<u16> {
+        if self.pos < self.end {
+            let u = self.units.at(self.pos);
+            self.pos += 1;
+            Some(u)
+        } else {
+            None
+        }
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.end - self.pos;
+        (n, Some(n))
+    }
+}
+
+impl<'a> DoubleEndedIterator for UnitsIter<'a> {
+    fn next_back(&mut self) -> Option<u16> {
+        if self.pos < self.end {
+            self.end -= 1;
+            Some(self.units.at(self.end))
+        } else {
+            None
+        }
+    }
+}
+
+impl<'a> ExactSizeIterator for UnitsIter<'a> {}
+
+/// Builds a UTF-16 string incrementally, tracking whether it is one-byte.
+#[derive(Default)]
+pub struct StrBuilder {
+    units: Vec<u16>,
+}
+
+impl StrBuilder {
+    pub fn new() -> StrBuilder {
+        StrBuilder { units: Vec::new() }
+    }
+    pub fn with_capacity(n: usize) -> StrBuilder {
+        StrBuilder {
+            units: Vec::with_capacity(n),
+        }
+    }
+    pub fn push(&mut self, u: u16) {
+        self.units.push(u);
+    }
+    pub fn push_str(&mut self, s: &str) {
+        self.units.extend(s.encode_utf16());
+    }
+    pub fn push_units(&mut self, u: &Units<'_>) {
+        match u {
+            Units::One(b) => self.units.extend(b.iter().map(|&c| c as u16)),
+            Units::Two(w) => self.units.extend_from_slice(w),
+        }
+    }
+    pub fn push_slice(&mut self, u: &[u16]) {
+        self.units.extend_from_slice(u);
+    }
+    pub fn push_code_point(&mut self, cp: u32) {
+        if cp < 0x10000 {
+            self.units.push(cp as u16);
+        } else {
+            let c = cp - 0x10000;
+            self.units.push(0xD800 + (c >> 10) as u16);
+            self.units.push(0xDC00 + (c & 0x3FF) as u16);
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.units.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.units.is_empty()
+    }
+    pub fn finish(self) -> Vec<u16> {
+        self.units
+    }
+    pub fn as_units(&self) -> Units<'_> {
+        Units::Two(&self.units)
+    }
+}
+
+/// Is this code unit a JS `WhiteSpace` or `LineTerminator`?
+pub fn is_js_whitespace(u: u16) -> bool {
+    matches!(
+        u,
+        0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x20 | 0xA0 | 0x1680 | 0x2000
+            ..=0x200A | 0x2028 | 0x2029 | 0x202F | 0x205F | 0x3000 | 0xFEFF
+    )
+}
+
+/// Trim JS whitespace from both ends; returns the unit range kept.
+pub fn trim_range(u: &Units<'_>, start: bool, end: bool) -> (usize, usize) {
+    let mut s = 0;
+    let mut e = u.len();
+    if start {
+        while s < e && is_js_whitespace(u.at(s)) {
+            s += 1;
+        }
+    }
+    if end {
+        while e > s && is_js_whitespace(u.at(e - 1)) {
+            e -= 1;
+        }
+    }
+    (s, e)
+}

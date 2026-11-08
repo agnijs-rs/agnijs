@@ -26,6 +26,36 @@ impl<'a> Compiler<'a> {
         })
     }
 
+    /// The names collect_top_function would declare, without compiling.
+    fn top_function_names(body: &[Statement]) -> Vec<Rc<str>> {
+        fn walk(s: &Statement, out: &mut Vec<Rc<str>>) {
+            match s {
+                Statement::FunctionDeclaration(f) => out.push(f.id.as_ref().unwrap().name.clone()),
+                Statement::Labeled(l) => walk(&l.body, out),
+                Statement::ExportNamed(e) => {
+                    if let Some(d) = &e.declaration {
+                        walk(d, out);
+                    }
+                }
+                Statement::ExportDefault(e) => {
+                    if let ExportDefaultKind::Function(f) = &e.declaration {
+                        out.push(
+                            f.id.as_ref()
+                                .map(|i| i.name.clone())
+                                .unwrap_or_else(|| Rc::from(DEFAULT_EXPORT)),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for s in body {
+            walk(s, &mut out);
+        }
+        out
+    }
+
     fn collect_top_function(
         &mut self,
         s: &Statement,
@@ -101,33 +131,38 @@ impl<'a> Compiler<'a> {
         self.fs().completion = Some(cv);
         self.emit(Instr::LdaUndefined);
         self.emit(Instr::Star(cv));
-        let decls = self.top_level_declarations(&program.body, strict)?;
+        let lex = lexical_decls(&program.body);
+        let top_lexical: Vec<Rc<str>> = lex.lexical.iter().map(|(n, _)| n.clone()).collect();
+        let vars = var_decls(&program.body, strict, &top_lexical, &[]);
+        let fn_names = Self::top_function_names(&program.body);
         // The eval scope: lexical declarations always; vars and functions
         // too in strict code (they are local to the eval).
         self.open_scope(ScopeKind::Eval);
         self.scopes.last_mut().unwrap().is_var_scope = strict;
         if strict {
-            for (n, _) in &decls.functions {
+            for n in &fn_names {
                 self.declare(n, BindingKind::Function, true);
             }
-            for n in &decls.var_names {
+            for n in &vars.vars {
                 self.declare(n, BindingKind::Var, true);
             }
         } else {
-            for (n, _) in &decls.functions {
+            for n in &fn_names {
                 self.declare_named(n, BindingKind::Function);
             }
-            for n in &decls.var_names {
+            for n in &vars.vars {
                 self.declare_named(n, BindingKind::Var);
             }
-            for n in &decls.annex_b_functions {
+            for n in &vars.annex_b {
                 self.declare_named(n, BindingKind::Var);
             }
         }
-        for (n, k) in &decls.lexical {
+        for (n, k) in &lex.lexical {
             self.declare(n, *k, true);
         }
         self.finish_scope();
+        // Functions are compiled now so that they see the eval scope.
+        let decls = self.top_level_declarations(&program.body, strict)?;
         self.fs().declarations = Some(decls);
         self.emit(Instr::DeclareGlobals);
         self.stmts(&program.body)?;
@@ -153,7 +188,10 @@ impl<'a> Compiler<'a> {
             analysis,
             program.span,
         );
-        let decls = self.top_level_declarations(&program.body, true)?;
+        let lex = lexical_decls(&program.body);
+        let top_lexical: Vec<Rc<str>> = lex.lexical.iter().map(|(n, _)| n.clone()).collect();
+        let vars = var_decls(&program.body, true, &top_lexical, &[]);
+        let fn_names = Self::top_function_names(&program.body);
         let info = self.module_info(program)?;
 
         self.open_scope(ScopeKind::Module);
@@ -161,6 +199,7 @@ impl<'a> Compiler<'a> {
             let frame = self.scopes.last_mut().unwrap();
             frame.is_var_scope = true;
             frame.env_by_host = true;
+            frame.has_env = true;
         }
         // Imports first (they are indirections, not slots).
         for (i, imp) in info.imports.iter().enumerate() {
@@ -174,16 +213,18 @@ impl<'a> Compiler<'a> {
         if uses_this {
             self.declare(&Rc::from(THIS), BindingKind::This, true);
         }
-        for (n, _) in &decls.functions {
+        for n in &fn_names {
             self.declare(n, BindingKind::Function, true);
         }
-        for n in &decls.var_names {
+        for n in &vars.vars {
             self.declare(n, BindingKind::Var, true);
         }
-        for (n, k) in &decls.lexical {
+        for (n, k) in &lex.lexical {
             self.declare(n, *k, true);
         }
         self.finish_scope();
+        // Functions are compiled now so that they see the module scope.
+        let decls = self.top_level_declarations(&program.body, true)?;
         // Namespace import slots count as initialised.
         for imp in &info.imports {
             if imp.import_name.is_none() {

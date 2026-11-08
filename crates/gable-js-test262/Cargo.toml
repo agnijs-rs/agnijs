@@ -10,6 +10,7 @@ description = "gable-js-test262"
 [dependencies]
 gable-engine-api.workspace = true
 gable-engine-quickjs.workspace = true
+gable-js-vm.workspace = true
 gable-js-parser.workspace = true
 gable-js-compiler.workspace = true
 serde.workspace = true

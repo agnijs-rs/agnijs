@@ -1,5 +1,6 @@
 //! Expressions. Every `expr*` leaves its result in acc.
 
+use super::func::FuncCtx;
 use super::*;
 use gable_js_parser::number::to_js_string;
 
@@ -61,7 +62,13 @@ impl<'a> Compiler<'a> {
                     (None, NameHint::Static(s)) => Some(Rc::from(s)),
                     _ => None,
                 };
-                self.function_closure(f, name.as_deref())?;
+                let ctx = FuncCtx {
+                    self_name: f.id.as_ref().map(|i| i.name.clone()),
+                    ..Default::default()
+                };
+                let idx = self.compile_function_decl(f, name.as_deref(), ctx)?;
+                self.set_pos(f.span);
+                self.emit(Instr::CreateClosure(idx));
                 if f.id.is_none() {
                     if let NameHint::Dynamic(r) = hint {
                         self.emit(Instr::SetFunctionName {
@@ -110,7 +117,9 @@ impl<'a> Compiler<'a> {
                 let n = s.expressions.len();
                 for (i, x) in s.expressions.iter().enumerate() {
                     if i + 1 == n {
-                        self.expr_named(x, hint)?;
+                        // A comma expression is not an anonymous function
+                        // definition: `(0, function(){})` stays nameless.
+                        self.expr(x)?;
                     } else {
                         self.expr(x)?;
                     }
@@ -367,7 +376,7 @@ impl<'a> Compiler<'a> {
     fn unary(&mut self, u: &UnaryExpression) -> CResult<()> {
         match u.op {
             UnaryOp::Typeof => {
-                if let Expression::Ident(id) = &u.argument {
+                if let Expression::Ident(id) = u.argument.unparen() {
                     self.emit_load_name(&id.name, id.span, true);
                 } else {
                     self.expr(&u.argument)?;
@@ -477,7 +486,8 @@ impl<'a> Compiler<'a> {
         let op = if u.increment { Instr::Inc } else { Instr::Dec };
         match u.argument.unparen() {
             Expression::Ident(id) => {
-                self.emit_load_name(&id.name, id.span, false);
+                let r = self.dynamic_ref(&id.name);
+                self.emit_load_ref(&id.name, id.span, r);
                 self.set_pos(u.span);
                 self.emit(Instr::ToNumeric);
                 let old = self.alloc();
@@ -485,13 +495,14 @@ impl<'a> Compiler<'a> {
                     self.emit(Instr::Star(old));
                 }
                 self.emit(op);
-                self.emit_store_name(&id.name, id.span, false);
+                self.emit_store_ref(&id.name, id.span, r);
                 if !u.prefix {
                     self.emit(Instr::Ldar(old));
                 }
             }
             Expression::Member(m) => {
                 let r = self.member_ref(m)?;
+                self.emit_member_key_once(&r);
                 self.emit_member_get(&r);
                 self.set_pos(u.span);
                 self.emit(Instr::ToNumeric);
@@ -558,8 +569,9 @@ impl<'a> Compiler<'a> {
                     self.emit_load_str(&s);
                 }
                 MemberProperty::Computed(c) => {
+                    // ToPropertyKey happens in GetSuper/SetSuper, after the
+                    // right-hand side of an assignment.
                     self.expr(c)?;
-                    self.emit(Instr::ToPropertyKey);
                 }
                 MemberProperty::Private(p) => return self.error("unexpected private name", p.span),
             }
@@ -585,6 +597,80 @@ impl<'a> Compiler<'a> {
                 MemberRef::Private { obj, name }
             }
         })
+    }
+
+    /// For compound and logical assignment: convert a computed key once so
+    /// the get and the set see the same property key.
+    pub(crate) fn emit_member_key_once(&mut self, r: &MemberRef) {
+        match *r {
+            MemberRef::Keyed { obj, key } => {
+                self.emit(Instr::Ldar(obj));
+                self.emit(Instr::RequireObjectCoercible);
+                self.emit(Instr::Ldar(key));
+                self.emit(Instr::ToPropertyKey);
+                self.emit(Instr::Star(key));
+            }
+            // GetSuper/SetSuper capture the base before converting the key.
+            _ => {}
+        }
+    }
+
+    /// A name resolved through the runtime environment chain: the
+    /// reference is taken before the right-hand side is evaluated.
+    pub(crate) fn dynamic_ref(&mut self, name: &str) -> Option<(NameIdx, Reg)> {
+        match self.resolve(name) {
+            Resolved::Dynamic(n) => {
+                let n = self.name_rc(&n);
+                let dst = self.alloc();
+                self.emit(Instr::ResolveDynamic { name: n, dst });
+                Some((n, dst))
+            }
+            _ => None,
+        }
+    }
+
+    /// The reference for a plain assignment target. Besides dynamic names,
+    /// strict code resolves a global name before the right-hand side runs,
+    /// so a binding the right-hand side creates does not rescue an
+    /// unresolvable reference (PutValue throws a ReferenceError).
+    pub(crate) fn assign_ref(&mut self, name: &str) -> Option<(NameIdx, Reg)> {
+        if let Some(r) = self.dynamic_ref(name) {
+            return Some(r);
+        }
+        if self.fs_ref().strict {
+            if let Resolved::Global(n) = self.resolve(name) {
+                let n = self.name_rc(&n);
+                let dst = self.alloc();
+                self.emit(Instr::ResolveDynamic { name: n, dst });
+                return Some((n, dst));
+            }
+        }
+        None
+    }
+
+    fn emit_load_ref(&mut self, name: &str, span: Span, r: Option<(NameIdx, Reg)>) {
+        match r {
+            Some((n, reference)) => {
+                self.set_pos(span);
+                self.emit(Instr::LdaDynamicRef { name: n, reference });
+            }
+            None => self.emit_load_name(name, span, false),
+        }
+    }
+
+    pub(crate) fn emit_store_ref(&mut self, name: &str, span: Span, r: Option<(NameIdx, Reg)>) {
+        match r {
+            Some((n, reference)) => {
+                let strict = self.fs_ref().strict;
+                self.set_pos(span);
+                self.emit(Instr::StaDynamicRef {
+                    name: n,
+                    reference,
+                    strict,
+                });
+            }
+            None => self.emit_store_name(name, span, false),
+        }
     }
 
     pub(crate) fn emit_member_get(&mut self, r: &MemberRef) {
@@ -677,15 +763,49 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Star(f));
                 Ok((f, this))
             }
+            Expression::OptionalChain(inner, _)
+                if matches!(inner.unparen(), Expression::Member(_)) =>
+            {
+                // `(a?.b)()`: the chain short-circuits to undefined (and
+                // the call then throws), otherwise `this` is the base.
+                let Expression::Member(m) = inner.unparen() else {
+                    unreachable!()
+                };
+                self.fs().optional_exits.push(Vec::new());
+                let r = self.member_ref(m)?;
+                let this = match &r {
+                    MemberRef::Named { obj, .. }
+                    | MemberRef::Keyed { obj, .. }
+                    | MemberRef::Private { obj, .. } => *obj,
+                    MemberRef::Super { this, .. } => *this,
+                };
+                self.set_pos(m.span);
+                self.emit_member_get(&r);
+                let exits = self.fs().optional_exits.pop().unwrap();
+                if !exits.is_empty() {
+                    let jend = self.emit_jump(Instr::Jump(0));
+                    self.patch_all(exits);
+                    self.emit(Instr::LdaUndefined);
+                    self.patch(jend);
+                }
+                let f = self.alloc();
+                self.emit(Instr::Star(f));
+                Ok((f, this))
+            }
             Expression::Ident(id) => {
                 let f = self.alloc();
                 let this = self.alloc();
                 match self.resolve(&id.name) {
                     Resolved::Dynamic(n) => {
-                        self.emit_load_name(&id.name, id.span, false);
-                        self.emit(Instr::Star(f));
                         let n = self.name_rc(&n);
-                        self.emit(Instr::ThisForDynamicCall(n));
+                        self.emit(Instr::ResolveDynamic { name: n, dst: this });
+                        self.set_pos(id.span);
+                        self.emit(Instr::LdaDynamicRef {
+                            name: n,
+                            reference: this,
+                        });
+                        self.emit(Instr::Star(f));
+                        self.emit(Instr::LdaRefThis(this));
                         self.emit(Instr::Star(this));
                     }
                     _ => {
@@ -786,7 +906,8 @@ impl<'a> Compiler<'a> {
             self.free_to(mark);
             return Ok(());
         }
-        let is_direct_eval = matches!(&c.callee, Expression::Ident(id) if &*id.name == "eval");
+        let is_direct_eval =
+            !c.optional && matches!(&c.callee, Expression::Ident(id) if &*id.name == "eval");
         let (callee, this) = self.callee_and_this(&c.callee)?;
         if c.optional {
             self.emit(Instr::Ldar(callee));
@@ -849,8 +970,9 @@ impl<'a> Compiler<'a> {
         match a.op {
             AssignOp::Assign => match &a.left {
                 Pattern::Ident(id) => {
+                    let r = self.assign_ref(&id.name);
                     self.expr_named(&a.right, NameHint::Static(&id.name))?;
-                    self.emit_store_name(&id.name, id.span, false);
+                    self.emit_store_ref(&id.name, id.span, r);
                 }
                 Pattern::Expression(e) => match e.unparen() {
                     Expression::Member(m) => {
@@ -860,8 +982,16 @@ impl<'a> Compiler<'a> {
                         self.emit_member_set(&r);
                     }
                     Expression::Ident(id) => {
-                        self.expr_named(&a.right, NameHint::Static(&id.name))?;
-                        self.emit_store_name(&id.name, id.span, false);
+                        // `(x) = function(){}` is not an IdentifierRef:
+                        // no name inference through parentheses.
+                        let hint = if matches!(&**e, Expression::Paren(..)) {
+                            NameHint::None
+                        } else {
+                            NameHint::Static(&id.name)
+                        };
+                        let r = self.assign_ref(&id.name);
+                        self.expr_named(&a.right, hint)?;
+                        self.emit_store_ref(&id.name, id.span, r);
                     }
                     Expression::Call(c) => {
                         // Annex B: a runtime ReferenceError after evaluating
@@ -888,15 +1018,17 @@ impl<'a> Compiler<'a> {
                 };
                 match &a.left {
                     Pattern::Ident(id) => {
-                        self.emit_load_name(&id.name, id.span, false);
+                        let r = self.dynamic_ref(&id.name);
+                        self.emit_load_ref(&id.name, id.span, r);
                         let j = jump(self);
                         self.expr_named(&a.right, NameHint::Static(&id.name))?;
-                        self.emit_store_name(&id.name, id.span, false);
+                        self.emit_store_ref(&id.name, id.span, r);
                         self.patch(j);
                     }
                     Pattern::Expression(e) => match e.unparen() {
                         Expression::Member(m) => {
                             let r = self.member_ref(m)?;
+                            self.emit_member_key_once(&r);
                             self.emit_member_get(&r);
                             let j = jump(self);
                             self.expr(&a.right)?;
@@ -905,10 +1037,16 @@ impl<'a> Compiler<'a> {
                             self.patch(j);
                         }
                         Expression::Ident(id) => {
-                            self.emit_load_name(&id.name, id.span, false);
+                            let hint = if matches!(&**e, Expression::Paren(..)) {
+                                NameHint::None
+                            } else {
+                                NameHint::Static(&id.name)
+                            };
+                            let r = self.dynamic_ref(&id.name);
+                            self.emit_load_ref(&id.name, id.span, r);
                             let j = jump(self);
-                            self.expr_named(&a.right, NameHint::Static(&id.name))?;
-                            self.emit_store_name(&id.name, id.span, false);
+                            self.expr_named(&a.right, hint)?;
+                            self.emit_store_ref(&id.name, id.span, r);
                             self.patch(j);
                         }
                         _ => return self.error("invalid assignment target", e.span()),
@@ -920,17 +1058,19 @@ impl<'a> Compiler<'a> {
                 let bin = compound_op(op);
                 match &a.left {
                     Pattern::Ident(id) => {
-                        self.emit_load_name(&id.name, id.span, false);
+                        let r = self.dynamic_ref(&id.name);
+                        self.emit_load_ref(&id.name, id.span, r);
                         let tmp = self.alloc();
                         self.emit(Instr::Star(tmp));
                         self.expr(&a.right)?;
                         self.set_pos(a.span);
                         self.emit(binary_instr(bin, tmp));
-                        self.emit_store_name(&id.name, id.span, false);
+                        self.emit_store_ref(&id.name, id.span, r);
                     }
                     Pattern::Expression(e) => match e.unparen() {
                         Expression::Member(m) => {
                             let r = self.member_ref(m)?;
+                            self.emit_member_key_once(&r);
                             self.emit_member_get(&r);
                             let tmp = self.alloc();
                             self.emit(Instr::Star(tmp));
@@ -950,13 +1090,14 @@ impl<'a> Compiler<'a> {
                             );
                         }
                         Expression::Ident(id) => {
-                            self.emit_load_name(&id.name, id.span, false);
+                            let r = self.dynamic_ref(&id.name);
+                            self.emit_load_ref(&id.name, id.span, r);
                             let tmp = self.alloc();
                             self.emit(Instr::Star(tmp));
                             self.expr(&a.right)?;
                             self.set_pos(a.span);
                             self.emit(binary_instr(bin, tmp));
-                            self.emit_store_name(&id.name, id.span, false);
+                            self.emit_store_ref(&id.name, id.span, r);
                         }
                         _ => return self.error("invalid assignment target", e.span()),
                     },
@@ -1026,6 +1167,31 @@ impl<'a> Compiler<'a> {
         self.emit(Instr::LdaInt(RESUME_NEXT));
         self.emit(Instr::Star(mode));
         let top = self.pc();
+        if is_async {
+            // AsyncGeneratorYield: a return resumption awaits its value
+            // before yield* sees it; a rejection becomes a throw resumption.
+            self.emit(Instr::LdaInt(RESUME_RETURN));
+            let do_await = self.emit_jump(Instr::JumpIfStrictEq {
+                reg: mode,
+                offset: 0,
+            });
+            let skip = self.emit_jump(Instr::Jump(0));
+            self.patch(do_await);
+            let cs = self.pc();
+            self.emit(Instr::Ldar(received));
+            self.emit(Instr::Await);
+            let ce = self.pc();
+            self.emit(Instr::Star(received));
+            let after = self.emit_jump(Instr::Jump(0));
+            let handler = self.pc();
+            let depth = self.env_depth();
+            self.add_handler(cs, ce, handler, depth);
+            self.emit(Instr::Star(received));
+            self.emit(Instr::LdaInt(RESUME_THROW));
+            self.emit(Instr::Star(mode));
+            self.patch(after);
+            self.patch(skip);
+        }
         // Dispatch on the resumption mode.
         self.emit(Instr::LdaInt(RESUME_NEXT));
         let to_next = self.emit_jump(Instr::JumpIfStrictEq {

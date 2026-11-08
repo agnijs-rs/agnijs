@@ -526,7 +526,29 @@ impl<'a> Compiler<'a> {
                 }
             }
         }
-        fs_annex_b(fs, name)
+        if !fs_annex_b(fs, name) {
+            return false;
+        }
+        // A `var` of this name would clash with a lexical binding in an
+        // enclosing block (short of the var scope): this declaration is
+        // not the one that was hoisted.
+        let fs_index = self.fns.len() - 1;
+        let base = fs.scope_base;
+        for (i, frame) in self.scopes.iter().enumerate().rev().skip(1) {
+            if frame.fn_index != fs_index || i < base || frame.is_var_scope {
+                break;
+            }
+            if matches!(
+                frame.kind,
+                ScopeKind::Eval | ScopeKind::Module | ScopeKind::Function
+            ) {
+                break;
+            }
+            if frame.kind != ScopeKind::Catch && frame.bindings.contains_key(name) {
+                return false;
+            }
+        }
+        true
     }
 
     /// Store acc into the var-scope binding `name` of the current
@@ -554,7 +576,7 @@ impl<'a> Compiler<'a> {
                             let n = self.name(name);
                             let strict = self.fs_ref().strict;
                             if self.eval_mode {
-                                self.emit(Instr::StaDynamic { name: n, strict });
+                                self.emit(Instr::StaEvalVar(n));
                             } else {
                                 self.emit(Instr::StaGlobal { name: n, strict });
                             }
@@ -568,11 +590,12 @@ impl<'a> Compiler<'a> {
                 depth += 1;
             }
         }
-        // Script top level: the var is a global.
+        // Script top level: the var is a global. Eval code: the eval's
+        // variable environment, found by the VM.
         let n = self.name(name);
         let strict = self.fs_ref().strict;
         if self.eval_mode {
-            self.emit(Instr::StaDynamic { name: n, strict });
+            self.emit(Instr::StaEvalVar(n));
         } else {
             self.emit(Instr::StaGlobal { name: n, strict });
         }
@@ -671,8 +694,19 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 (Pattern::Ident(id), Some(init)) => {
+                    // A var under with/eval: the reference is resolved
+                    // before the initialiser runs.
+                    let r = if d.kind == VariableKind::Var {
+                        self.dynamic_ref(&id.name)
+                    } else {
+                        None
+                    };
                     self.expr_named(init, NameHint::Static(&id.name))?;
-                    self.emit_store_name(&id.name, id.span, d.kind != VariableKind::Var);
+                    if r.is_some() {
+                        self.emit_store_ref(&id.name, id.span, r);
+                    } else {
+                        self.emit_store_name(&id.name, id.span, d.kind != VariableKind::Var);
+                    }
                 }
                 (pat, Some(init)) => {
                     self.expr(init)?;
@@ -792,7 +826,6 @@ impl<'a> Compiler<'a> {
             for n in &names {
                 self.declare(n, BindingKind::CatchParam, false);
             }
-            self.declare_block_scope(&h.body.body);
             let exc = self.alloc();
             self.emit(Instr::Star(exc));
             self.finish_scope();
@@ -803,8 +836,10 @@ impl<'a> Compiler<'a> {
                     pat => self.binding_pattern(pat, true)?,
                 }
             }
-            self.instantiate_functions(&h.body.body)?;
-            self.stmts(&h.body.body)?;
+            // The catch body is its own block scope: closures in parameter
+            // initialisers do not see its lexical declarations.
+            self.set_completion_undefined();
+            self.block(&h.body.body)?;
             self.close_scope();
             let catch_end = self.pc();
             catch_range = Some((catch_start, catch_end));
@@ -835,6 +870,20 @@ impl<'a> Compiler<'a> {
                 _ => unreachable!(),
             };
             self.patch_all(entries);
+            // The finally block's normal completion is discarded in favour
+            // of the try/catch result; an abrupt exit from the try/catch
+            // keeps its value too. Save it and start the block from empty.
+            let saved_cv = match self.fs_ref().completion {
+                Some(cv) => {
+                    let s = self.alloc();
+                    self.emit(Instr::Ldar(cv));
+                    self.emit(Instr::Star(s));
+                    self.emit(Instr::LdaUndefined);
+                    self.emit(Instr::Star(cv));
+                    Some((cv, s))
+                }
+                None => None,
+            };
             self.block(&fin.body)?;
             // Dispatch on the completion kind.
             let mut normal_jumps = Vec::new();
@@ -876,6 +925,10 @@ impl<'a> Compiler<'a> {
                 });
                 let skip = self.emit_jump(Instr::Jump(0));
                 self.patch(hit);
+                if let Some((cv, s)) = saved_cv {
+                    self.emit(Instr::Ldar(s));
+                    self.emit(Instr::Star(cv));
+                }
                 let from = self.fs_ref().ctl.len();
                 if !self.emit_unwind_to(exit.kind, exit.target, from) {
                     self.add_jump_patch(exit.kind, exit.target);
@@ -883,6 +936,10 @@ impl<'a> Compiler<'a> {
                 self.patch(skip);
             }
             self.patch_all(normal_jumps);
+            if let Some((cv, s)) = saved_cv {
+                self.emit(Instr::Ldar(s));
+                self.emit(Instr::Star(cv));
+            }
         } else {
             self.patch_all(to_end);
         }
@@ -1098,7 +1155,12 @@ impl<'a> Compiler<'a> {
             continues: Vec::new(),
             iterator: None,
         });
+        // Opening the iteration scope may emit TDZ initialisation that
+        // clobbers acc, so the iteration value travels in a temp.
+        let value = self.alloc();
+        self.emit(Instr::Star(value));
         let scoped = self.for_open_iteration_scope(&f.left);
+        self.emit(Instr::Ldar(value));
         self.for_bind(&f.left)?;
         self.sub_statement(&f.body)?;
         if scoped {
@@ -1153,7 +1215,12 @@ impl<'a> Compiler<'a> {
                 is_async: f.is_await,
             }),
         });
+        // Opening the iteration scope may emit TDZ initialisation that
+        // clobbers acc, so the iteration value travels in a temp.
+        let value = self.alloc();
+        self.emit(Instr::Star(value));
         let scoped = self.for_open_iteration_scope(&f.left);
+        self.emit(Instr::Ldar(value));
         self.for_bind(&f.left)?;
         self.sub_statement(&f.body)?;
         if scoped {
@@ -1173,12 +1240,13 @@ impl<'a> Compiler<'a> {
         let already = self.emit_jump(Instr::JumpIfTrue(0));
         if f.is_await {
             let fr = self.alloc();
+            // Errors from getting and calling return() are swallowed: cover
+            // the lookup, call and await with a handler that jumps to the
+            // rethrow.
+            let cs = self.pc();
             self.emit(Instr::GetIteratorReturn { iter });
             let skip = self.emit_jump(Instr::JumpIfUndefined(0));
             self.emit(Instr::Star(fr));
-            // Errors from return() are swallowed: cover the call+await with
-            // a handler that jumps to the rethrow.
-            let cs = self.pc();
             self.emit(Instr::Call {
                 callee: fr,
                 this: iter,

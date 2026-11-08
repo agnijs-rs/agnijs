@@ -147,23 +147,47 @@ pub fn run_test(
     if m.is_module() || m.is_raw() {
         return vec![RunResult {
             strict: None,
-            outcome: run_once(case, false, factory, harness, timeout),
+            outcome: run_guarded(case, false, factory, harness, timeout),
         }];
     }
     let mut runs = Vec::new();
     if !m.has_flag("onlyStrict") {
         runs.push(RunResult {
             strict: Some(false),
-            outcome: run_once(case, false, factory, harness, timeout),
+            outcome: run_guarded(case, false, factory, harness, timeout),
         });
     }
     if !m.has_flag("noStrict") {
         runs.push(RunResult {
             strict: Some(true),
-            outcome: run_once(case, true, factory, harness, timeout),
+            outcome: run_guarded(case, true, factory, harness, timeout),
         });
     }
     runs
+}
+
+/// Run once, turning an engine panic into a failure so one bad test does
+/// not take the whole run down with it.
+fn run_guarded(
+    case: &TestCase,
+    strict: bool,
+    factory: &Factory,
+    harness: &HarnessFiles,
+    timeout: Duration,
+) -> Outcome {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_once(case, strict, factory, harness, timeout)
+    })) {
+        Ok(o) => o,
+        Err(p) => {
+            let msg = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "unknown panic".into());
+            Outcome::Fail(format!("engine panic: {msg}"))
+        }
+    }
 }
 
 /// Parse-only run (see `Mode::ParseOnly`).
@@ -563,5 +587,74 @@ mod tests {
             Outcome::Fail(_)
         ));
         assert!(matches!(async_outcome(&[]), Outcome::Fail(_)));
+    }
+}
+
+/// Run one script or module file outside the suite (the `eval` subcommand):
+/// `$262`, `print` and the basic harness are installed, the file is run,
+/// jobs are drained and anything printed plus the completion is reported.
+pub fn eval_file(
+    factory: &Factory,
+    path: &Path,
+    source: &str,
+    harness: &HarnessFiles,
+    as_module: bool,
+    timeout: Duration,
+) -> std::result::Result<Vec<String>, (String, String, Vec<String>)> {
+    let host = Rc::new(Test262Host {
+        prints: RefCell::new(Vec::new()),
+        deadline: Instant::now() + timeout,
+        root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
+    });
+    let mut engine = factory(host.clone());
+    let realm = engine.main_realm();
+    if let Err(e) = install_262(&mut *engine, realm, &host) {
+        return Err((
+            "HostError".into(),
+            format!("installing $262: {e}"),
+            Vec::new(),
+        ));
+    }
+    for f in [
+        "assert.js",
+        "sta.js",
+        "compareArray.js",
+        "propertyHelper.js",
+        "doneprintHandle.js",
+    ] {
+        if let Some(src) = harness.get(f) {
+            if let Err(e) = engine.eval_script(realm, &format!("harness/{f}"), src) {
+                return Err((
+                    "HostError".into(),
+                    format!("harness {f} failed: {e}"),
+                    Vec::new(),
+                ));
+            }
+        }
+    }
+    let case = TestCase {
+        path: path.to_path_buf(),
+        rel: path.to_string_lossy().into_owned(),
+        source: source.to_string(),
+        meta: Default::default(),
+    };
+    let completion = if as_module {
+        run_module(&mut *engine, realm, &case)
+    } else {
+        match engine.eval_script(realm, &normalize(path), source) {
+            Ok(v) => {
+                let shown = engine
+                    .to_string(realm, &v)
+                    .unwrap_or_else(|_| "<unprintable>".into());
+                host.prints.borrow_mut().push(format!("=> {shown}"));
+                drain_jobs(&mut *engine, realm)
+            }
+            Err(e) => Err(describe_error(&mut *engine, realm, e)),
+        }
+    };
+    let prints = host.prints.borrow().clone();
+    match completion {
+        Ok(()) => Ok(prints),
+        Err((n, m)) => Err((n, m, prints)),
     }
 }
