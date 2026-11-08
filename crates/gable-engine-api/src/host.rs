@@ -1,4 +1,4 @@
-//! Hooks the Host runtime supplies to an engine.
+//! Hooks the embedder (the host) supplies to an engine.
 //!
 //! The engine never has an event loop, a clock or a module file system of its
 //! own: everything it needs from outside arrives through [`Host`]. A host is

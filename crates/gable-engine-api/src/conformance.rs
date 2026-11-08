@@ -94,7 +94,7 @@ impl Host for TestHost {
             realm,
             meta,
             &"url".into(),
-            &Value::string(&format!("gable://{module}")),
+            &Value::string(&format!("test://{module}")),
         )?;
         let hot = engine.new_object(realm)?;
         engine.set(realm, &hot, &"accepted".into(), &Value::Bool(false))?;
@@ -453,7 +453,7 @@ pub fn import_meta_is_populated_by_the_host(factory: &mut Factory) {
     engine.run_jobs(realm).unwrap();
     assert_eq!(
         eval(&mut *engine, realm, "metaUrl"),
-        Value::string("gable://app/meta.js")
+        Value::string("test://app/meta.js")
     );
     assert_eq!(eval(&mut *engine, realm, "metaHot"), Value::Bool(false));
     assert_eq!(

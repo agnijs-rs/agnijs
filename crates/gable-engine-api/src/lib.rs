@@ -1,4 +1,4 @@
-//! The Gable engine interface: the boundary the Host runtime codes against,
+//! The engine interface: the boundary an embedder (the host) codes against,
 //! satisfied by the Gable engine and by the interim QuickJS-NG adapter.
 //!
 //! See `docs/js-engine-spec.md` section 7 and ADR 0006 for the design.
@@ -50,7 +50,7 @@ pub mod bytecode {
         if bytes.len() < 5 || &bytes[..4] != MAGIC {
             return Err(Error::BytecodeMismatch {
                 expected: format!("{} {format}", String::from_utf8_lossy(MAGIC)),
-                found: "not Gable bytecode".into(),
+                found: "not a GBJS container".into(),
             });
         }
         let rest = &bytes[4..];

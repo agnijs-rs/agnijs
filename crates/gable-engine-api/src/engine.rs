@@ -1,4 +1,4 @@
-//! The engine interface: what the Host runtime codes against.
+//! The engine interface: what the embedder (the host) codes against.
 //!
 //! Every method takes `&mut self`. Engines are single-threaded and own their
 //! heap; the host drives them from one thread. Host functions receive

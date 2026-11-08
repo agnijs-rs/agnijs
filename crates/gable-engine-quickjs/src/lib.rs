@@ -1,5 +1,5 @@
-//! The interim engine: QuickJS-NG (through `rquickjs`) behind the Gable
-//! engine interface.
+//! The interim engine: QuickJS-NG (through `rquickjs`) behind the engine
+//! interface.
 //!
 //! Design notes (see ADR 0006):
 //!
@@ -80,7 +80,7 @@ pub struct QuickJsEngine {
 
 // ---- host object wrapper class ----------------------------------------
 
-/// Every host object is an instance of this one QuickJS class; the Gable
+/// Every host object is an instance of this one QuickJS class; the host
 /// class id and `Symbol.toStringTag` distinguish host classes.
 struct HostCell {
     class: HostClassId,
@@ -107,7 +107,7 @@ impl<'js> Trace<'js> for HostCell {
 }
 
 impl<'js> JsClass<'js> for HostCell {
-    const NAME: &'static str = "GableHostObject";
+    const NAME: &'static str = "HostObject";
     type Mutable = rquickjs::class::Writable;
     fn prototype(_ctx: &Ctx<'js>) -> rquickjs::Result<Option<Object<'js>>> {
         Ok(None)
@@ -223,7 +223,7 @@ impl Loader for HostLoader {
 }
 
 /// The referrer QuickJS reports for a root import through `Module::import`.
-const ROOT_REFERRER: &str = "<gable-root>";
+const ROOT_REFERRER: &str = "<root>";
 
 fn realm_of(shared: &Shared, ctx: &Ctx<'_>) -> RealmId {
     let raw = ctx.as_raw();
