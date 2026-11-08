@@ -818,12 +818,14 @@ impl Vm {
             r.status = ModuleStatus::Evaluated;
             r.async_evaluation = false;
         }
+        // Leaf to root: this module's own promise rejects before its async
+        // parents are told (AsyncModuleExecutionRejected steps 9 and 10).
+        if let Some(cap) = record(self, module).top_level_capability.clone() {
+            promise::reject_capability(self, &cap, error)?;
+        }
         let parents = record(self, module).async_parents.clone();
         for m in parents {
             self.async_module_execution_rejected(m, error)?;
-        }
-        if let Some(cap) = record(self, module).top_level_capability.clone() {
-            promise::reject_capability(self, &cap, error)?;
         }
         Ok(())
     }

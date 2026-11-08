@@ -408,6 +408,11 @@ impl Engine for Vm {
         Ok(self.to_api_value(Value::Object(p)))
     }
 
+    fn release_module(&mut self, realm: RealmId, specifier: &str) -> api::Result<bool> {
+        self.check_realm(realm)?;
+        Ok(self.modules.remove(&(realm, specifier.to_string())).is_some())
+    }
+
     fn run_jobs(&mut self, realm: RealmId) -> api::Result<usize> {
         self.run_pending_finalizers();
         self.enter(realm, |vm| vm.drain_jobs())

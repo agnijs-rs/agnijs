@@ -708,4 +708,3 @@ test/language/statementList/eval-fn-regexp-literal.js | needs the RegExp matcher
 test/language/statements/class/subclass/builtin-objects/RegExp/lastIndex.js | needs the RegExp matcher and prototype (exec, test, flags): M5 (TASK-100.6)
 test/language/statements/class/subclass/builtin-objects/RegExp/regular-subclassing.js | needs the RegExp matcher and prototype (exec, test, flags): M5 (TASK-100.6)
 
-test/language/module-code/top-level-await/rejection-order.js | async module rejection order across dynamic imports: M4 (TASK-100.5)

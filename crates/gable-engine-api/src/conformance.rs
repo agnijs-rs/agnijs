@@ -464,19 +464,41 @@ pub fn import_meta_is_populated_by_the_host(factory: &mut Factory) {
 
 pub fn modules_reload_under_a_new_specifier_and_old_records_are_collected(factory: &mut Factory) {
     let (host, mut engine, realm) = setup(factory);
+    // A host object reachable only from the v1 module's exports; its
+    // finaliser reports when that module record has been collected.
+    let finalized = Rc::new(Cell::new(0u32));
+    let f2 = finalized.clone();
+    let class = engine.register_host_class(HostClassDef {
+        name: "Marker".into(),
+        finalize: Some(Box::new(move |_data| f2.set(f2.get() + 1))),
+    });
+    let marker = engine
+        .new_host_object(
+            realm,
+            class,
+            Box::new(Counter {
+                count: 0,
+                label: Value::Undefined,
+            }),
+            None,
+        )
+        .unwrap();
+    let global = engine.global_object(realm).unwrap();
+    engine.set(realm, &global, &"marker".into(), &marker).unwrap();
+    drop(marker);
     host.add_module(
         "app/counter.js?v=1",
-        "export const version = 1; export const state = { big: new Array(1000).fill(0) };",
+        "export const version = 1; export const state = { marker: globalThis.marker };",
     );
     host.add_module(
         "app/counter.js?v=2",
-        "export const version = 2; export const state = { big: [] };",
+        "export const version = 2; export const state = {};",
     );
     eval(
         &mut *engine,
         realm,
-        "globalThis.weak = null; globalThis.versions = [];\n\
-         globalThis.load = (s) => import(s).then(m => { versions.push(m.version); weak = new WeakRef(m.state); });",
+        "globalThis.versions = [];\n\
+         globalThis.load = (s) => import(s).then(m => { versions.push(m.version); });",
     );
     eval(&mut *engine, realm, "load('app/counter.js?v=1')");
     engine.run_jobs(realm).unwrap();
@@ -484,28 +506,59 @@ pub fn modules_reload_under_a_new_specifier_and_old_records_are_collected(factor
         eval(&mut *engine, realm, "versions.join()"),
         Value::string("1")
     );
-    assert_eq!(
-        eval(&mut *engine, realm, "typeof weak.deref()"),
-        Value::string("object")
-    );
+    // From here the marker lives only in the v1 module's exports.
+    eval(&mut *engine, realm, "delete globalThis.marker;");
     eval(&mut *engine, realm, "load('app/counter.js?v=2')");
     engine.run_jobs(realm).unwrap();
     assert_eq!(
         eval(&mut *engine, realm, "versions.join()"),
         Value::string("1,2")
     );
-    // Re-importing the old specifier returns the same (old) record: specifiers are keys.
+    // Re-importing the old specifier returns the same (old) record:
+    // specifiers are keys of the module map.
     eval(&mut *engine, realm, "load('app/counter.js?v=1')");
     engine.run_jobs(realm).unwrap();
     assert_eq!(
         eval(&mut *engine, realm, "versions.join()"),
         Value::string("1,2,1")
     );
-    // Nothing references the v1 record any more except the module map
-    // entry, which is part of the record: it must be collectable once the
-    // host says it is no longer wanted. Here only JS references exist, and
-    // after the module graph is dropped the exports die with it.
-    let _ = &host;
+    engine.reclaim_handles();
+    engine.collect_garbage();
+    engine.run_jobs(realm).unwrap();
+    assert_eq!(finalized.get(), 0, "a registered module record stays alive");
+    // Release the record: the next import under that specifier evaluates
+    // the module again, and the old record dies with its exports.
+    let released = engine
+        .release_module(realm, "app/counter.js?v=1")
+        .unwrap();
+    host.add_module(
+        "app/counter.js?v=1",
+        "export const version = 3; export const state = {};",
+    );
+    eval(&mut *engine, realm, "load('app/counter.js?v=1')");
+    engine.run_jobs(realm).unwrap();
+    engine.reclaim_handles();
+    engine.collect_garbage();
+    engine.run_jobs(realm).unwrap();
+    if released {
+        assert_eq!(
+            eval(&mut *engine, realm, "versions.join()"),
+            Value::string("1,2,1,3"),
+            "a released specifier loads the module again"
+        );
+        assert_eq!(
+            finalized.get(),
+            1,
+            "the released module record and its exports are collected"
+        );
+    } else {
+        assert_eq!(
+            eval(&mut *engine, realm, "versions.join()"),
+            Value::string("1,2,1,1"),
+            "an engine that cannot release records keeps the old one"
+        );
+        assert_eq!(finalized.get(), 0);
+    }
 }
 
 pub fn realms_are_isolated(factory: &mut Factory) {

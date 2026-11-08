@@ -851,6 +851,13 @@ impl Engine for QuickJsEngine {
         })
     }
 
+    fn release_module(&mut self, realm: RealmId, _specifier: &str) -> Result<bool> {
+        // QuickJS keeps every loaded module in its context for the
+        // context's lifetime and offers no way to drop one; HMR on the
+        // interim engine reloads into a fresh realm instead.
+        self.with_api(realm, |_e, _ctx| Ok(false))
+    }
+
     fn load_module(&mut self, realm: RealmId, specifier: &str) -> Result<Value> {
         self.with_api(realm, |e, ctx| {
             e.shared.loader_error.borrow_mut().take();

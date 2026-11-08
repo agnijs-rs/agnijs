@@ -73,6 +73,17 @@ pub trait Engine {
     /// the host has run the pending jobs.
     fn load_module(&mut self, realm: RealmId, specifier: &str) -> Result<Value>;
 
+    /// Forget the module record registered under `specifier` (the resolved
+    /// specifier the host's loader received). The next import of that
+    /// specifier loads and evaluates the module again; the old record and
+    /// its exports are collected once nothing references them. Modules
+    /// that imported the old record keep their bindings to it: HMR logic in
+    /// JavaScript decides what to re-import. Returns `false` when the
+    /// engine cannot release records (the interim engine keeps every module
+    /// for the life of its context), in which case a reload needs a fresh
+    /// realm.
+    fn release_module(&mut self, realm: RealmId, specifier: &str) -> Result<bool>;
+
     /// Run every pending job (promise reactions and anything else the engine
     /// enqueued). The engine never runs jobs on its own. Returns the number
     /// of jobs run; an exception escaping a job stops the drain and is
