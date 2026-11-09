@@ -3,11 +3,11 @@ id: TASK-100.19
 title: >-
   Engine: cheaper calls and no nested run loop for call, apply and native
   callbacks
-status: In Progress
+status: Done
 assignee:
   - '@fable'
 created_date: '2026-11-09T03:18:00Z'
-updated_date: '2026-11-09T13:46:00Z'
+updated_date: '2026-11-09T14:33:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -38,7 +38,7 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [x] #1 A JavaScript-to-JavaScript call allocates nothing on the Rust heap in the common case (no per-call arguments Vec), checked by a test or counter
 - [x] #2 Function.prototype.call and Function.prototype.apply with a JavaScript target run the target in the current run loop, without a native frame
 - [x] #3 Array iteration methods and accessor calls reach JavaScript callbacks without starting a new Vm::run loop per callback, or the task notes measure why that is not worth it
-- [ ] #4 calls-recursive and method-calls are at least 1.3x faster than at the start of the task
+- [x] #4 calls-recursive and method-calls are at least 1.3x faster than at the start of the task
 - [x] #5 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [x] #6 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
@@ -168,6 +168,18 @@ Removing every call cost would still be short of 1.3x. calls-recursive meets the
 Auto is also covered by the full runs.
 
 - Gable suites via the path-patched harness: 758 passed, with the 2 known timing failures (yjs perf, highlight linearity). The harness manifest and lockfile were restored afterwards.
+
+## AC4 settled after TASK-100.20 (commit 1d5da2e, 2026-11-09)
+
+As the profile above predicted, method-calls' remaining time was inline-cache misses and name re-interning; TASK-100.20 removed both.
+
+| build | method-calls (ms) | vs the start of this task |
+|---|---|---|
+| start of this task (6dfdceb) | ~219 (218.7 / 220.3) | |
+| a1a361c, this task only | 212.8 | |
+| 1d5da2e, TASK-100.20 on top | 123.9 | 1.77x |
+
+These are bench.exe medians with 7 iterations and 2 warmup, alternated with an a1a361c build. calls-recursive was already 1.47x. Both workloads now clear the 1.3x bar, so AC4 is checked.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
@@ -188,4 +200,6 @@ Results:
 - The Gable suites pass: 758, plus the 2 known timing failures.
 
 AC4 is not met for method-calls (1.02x). Its time is in inline-cache misses, name re-interning and string constant allocation (TASK-100.20, TASK-100.21), not in calls. The notes have the profile. The task is left In Progress for the maintainer to decide on AC4.
+
+Update, 2026-11-09: AC4 is now met. With TASK-100.20 (commit 1d5da2e) on top, method-calls runs in 123.9 ms against about 219 ms at the start of this task, which is 1.77x. calls-recursive stays at 1.47x. The task is Done.
 <!-- SECTION:FINAL_SUMMARY:END -->
