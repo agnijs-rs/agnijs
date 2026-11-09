@@ -654,7 +654,13 @@ impl Vm {
             Property::data(Value::from_u32(length), Attrs::CONFIGURABLE_ONLY),
         );
         let name_key = PropKey::Str(self.names.name);
-        let name_val = self.str(name);
+        // Anonymous natives (resolving functions, element closures) share
+        // the empty atom instead of allocating an empty string each.
+        let name_val = if name.is_empty() {
+            Value::String(self.names.empty)
+        } else {
+            self.str(name)
+        };
         self.heap.add_own_property(
             obj,
             name_key,

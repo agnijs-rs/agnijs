@@ -5,9 +5,9 @@
 //! interpreter loop until the next suspension or completion.
 
 use super::{ConstructKind, Frame, RunOutcome};
-use crate::builtins::promise::{self, Capability};
+use crate::builtins::promise::{self, Capability, Handler};
 use crate::gc::Tracer;
-use crate::object::{CallArgs, Class, ObjectData};
+use crate::object::{Class, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::{ObjId, PropKey, Value};
 use crate::vm::{Fault, JsResult, Vm};
@@ -286,7 +286,7 @@ impl Vm {
         mode: ResumeMode,
         value: Value,
     ) -> JsResult<Value> {
-        let cap = promise::new_promise_capability_intrinsic(self);
+        let cap = promise::new_internal_capability_intrinsic(self);
         let go = match gen {
             Value::Object(go) if matches!(&self.heap.obj(go).class, Class::Generator(g) if g.kind == GenKind::Async) => {
                 go
@@ -349,25 +349,11 @@ impl Vm {
                             }
                             Err(f) => return Err(f),
                         };
-                        let on_ok = self.new_native_closure(
-                            "",
-                            1,
-                            async_gen_return_fulfilled,
-                            vec![Value::Object(go)],
-                        );
-                        let on_err = self.new_native_closure(
-                            "",
-                            1,
-                            async_gen_return_rejected,
-                            vec![Value::Object(go)],
-                        );
-                        promise::perform_then(
-                            self,
-                            p,
-                            Value::Object(on_ok),
-                            Value::Object(on_err),
-                            None,
-                        )?;
+                        let h = Handler::AsyncGenReturn {
+                            gen: go,
+                            realm: self.current_realm,
+                        };
+                        promise::perform_then_handlers(self, p, h, h, None);
                         return Ok(());
                     } else {
                         self.async_generator_complete_step(go, Err(value), true)?;
@@ -429,6 +415,23 @@ impl Vm {
 
     /// Await(v) for the body of `go`: hook the resumption to the promise.
     pub(crate) fn async_await(&mut self, go: ObjId, v: Value) -> JsResult<()> {
+        // The continuation is a record, not a pair of closures
+        // (TASK-100.25); it runs in the realm of the await.
+        let h = Handler::Await {
+            gen: go,
+            realm: self.current_realm,
+        };
+        if !v.is_object() {
+            // PromiseResolve(%Promise%, v) of a primitive is a new promise
+            // fulfilled with v that nothing else can reach, and
+            // PerformPromiseThen on it queues the reaction at once: queue
+            // it without the promise.
+            if self.debug_hot {
+                self.debug_note_await();
+            }
+            promise::queue_fulfilled_reaction(self, h, v);
+            return Ok(());
+        }
         let p = match promise::promise_resolve_intrinsic(self, v) {
             Ok(p) => p,
             Err(Fault::Throw(e)) => {
@@ -438,13 +441,23 @@ impl Vm {
             }
             Err(f) => return Err(f),
         };
-        let on_ok = self.new_native_closure("", 1, async_fulfilled, vec![Value::Object(go)]);
-        let on_err = self.new_native_closure("", 1, async_rejected, vec![Value::Object(go)]);
         if self.debug_hot {
             self.debug_note_await();
         }
-        promise::perform_then(self, p, Value::Object(on_ok), Value::Object(on_err), None)?;
+        promise::perform_then_handlers(self, p, h, h, None);
         Ok(())
+    }
+
+    /// The continuation of AsyncGeneratorAwaitReturn once the awaited
+    /// return value settled.
+    pub(crate) fn async_generator_return_settled(
+        &mut self,
+        go: ObjId,
+        completion: Result<Value, Value>,
+    ) -> JsResult<()> {
+        gen_data(self, go).state = GenState::Completed;
+        self.async_generator_complete_step(go, completion, true)?;
+        self.async_generator_resume_next(go)
     }
 
     /// Resume an awaiting body (async function or async generator) after
@@ -519,7 +532,7 @@ pub fn call_async_function(
     this: Value,
     args: &[Value],
 ) -> JsResult<Value> {
-    let cap = promise::new_promise_capability_intrinsic(vm);
+    let cap = promise::new_internal_capability_intrinsic(vm);
     let data = GeneratorData {
         kind: GenKind::AsyncFn,
         state: GenState::Executing,
@@ -548,32 +561,4 @@ pub fn call_async_function(
     });
     vm.async_function_settle(go, outcome)?;
     Ok(Value::Object(cap.promise))
-}
-
-fn async_fulfilled(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let go = vm.native_slot(a.callee, 0).as_object().unwrap();
-    vm.async_resume(go, ResumeMode::Next, a.arg(0))?;
-    Ok(Value::Undefined)
-}
-
-fn async_rejected(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let go = vm.native_slot(a.callee, 0).as_object().unwrap();
-    vm.async_resume(go, ResumeMode::Throw, a.arg(0))?;
-    Ok(Value::Undefined)
-}
-
-fn async_gen_return_fulfilled(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let go = vm.native_slot(a.callee, 0).as_object().unwrap();
-    gen_data(vm, go).state = GenState::Completed;
-    vm.async_generator_complete_step(go, Ok(a.arg(0)), true)?;
-    vm.async_generator_resume_next(go)?;
-    Ok(Value::Undefined)
-}
-
-fn async_gen_return_rejected(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let go = vm.native_slot(a.callee, 0).as_object().unwrap();
-    gen_data(vm, go).state = GenState::Completed;
-    vm.async_generator_complete_step(go, Err(a.arg(0)), true)?;
-    vm.async_generator_resume_next(go)?;
-    Ok(Value::Undefined)
 }

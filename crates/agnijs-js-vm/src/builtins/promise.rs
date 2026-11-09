@@ -23,9 +23,18 @@ pub enum ReactionKind {
 }
 
 /// A PromiseCapability record.
+///
+/// An *internal* capability (TASK-100.25) is one for a %Promise% whose
+/// resolving functions no script can reach: the engine settles it exactly
+/// once (a reaction's result, an async function's completion, an async
+/// generator request). Its `resolve` and `reject` are `Undefined` and
+/// settling it runs the body of the resolving function directly, in
+/// `realm`, the realm the functions would have belonged to. Every other
+/// capability holds real resolving functions.
 #[derive(Clone)]
 pub struct Capability {
     pub promise: ObjId,
+    pub realm: agnijs_engine_api::RealmId,
     pub resolve: Value,
     pub reject: Value,
 }
@@ -36,15 +45,65 @@ impl Capability {
         t.value(self.resolve);
         t.value(self.reject);
     }
+
+    /// Whether the resolving functions are only conceptual.
+    #[inline]
+    pub fn is_internal(&self) -> bool {
+        self.resolve.is_undefined()
+    }
 }
 
-/// A PromiseReaction record.
+/// The handler of a PromiseReaction record. Script-visible handlers are
+/// callable values; the engine's own continuations (an `await`, an async
+/// generator's `return`) are records naming what to resume, so they need
+/// no function object (TASK-100.25).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Handler {
+    /// No handler: the value passes through (fulfil) or is rethrown
+    /// (reject).
+    Default,
+    /// A callable value.
+    Call(Value),
+    /// Await's continuation: resume the async function or async generator
+    /// body `gen` with the value (fulfil) or by throwing it (reject).
+    Await {
+        gen: ObjId,
+        realm: agnijs_engine_api::RealmId,
+    },
+    /// AsyncGeneratorAwaitReturn's continuation for `gen`.
+    AsyncGenReturn {
+        gen: ObjId,
+        realm: agnijs_engine_api::RealmId,
+    },
+}
+
+impl Handler {
+    #[inline]
+    pub fn trace(&self, t: &mut Tracer) {
+        match *self {
+            Handler::Default => {}
+            Handler::Call(v) => t.value(v),
+            Handler::Await { gen, .. } | Handler::AsyncGenReturn { gen, .. } => t.obj(gen),
+        }
+    }
+
+    /// A handler argument of `then`: callable values only.
+    #[inline]
+    pub fn from_value(vm: &Vm, v: Value) -> Handler {
+        if vm.is_callable(v) {
+            Handler::Call(v)
+        } else {
+            Handler::Default
+        }
+    }
+}
+
+/// A PromiseReaction record, as queued in a job.
 #[derive(Clone)]
 pub struct Reaction {
     pub capability: Option<Capability>,
     pub kind: ReactionKind,
-    /// The handler, or `Undefined` for the default behaviour.
-    pub handler: Value,
+    pub handler: Handler,
     /// Where the reaction was registered, while a debugger collects async
     /// stacks.
     pub async_parent: Option<Rc<agnijs_js_debugger::AsyncStackTrace>>,
@@ -55,28 +114,84 @@ impl Reaction {
         if let Some(c) = &self.capability {
             c.trace(t);
         }
-        t.value(self.handler);
+        self.handler.trace(t);
+    }
+}
+
+/// The fulfil and reject reactions one PerformPromiseThen adds, kept as
+/// one record: the spec's two reaction lists always have the same length
+/// and order, and only one of them ever runs.
+pub struct ThenRecord {
+    pub capability: Option<Capability>,
+    pub on_fulfilled: Handler,
+    pub on_rejected: Handler,
+    pub async_parent: Option<Rc<agnijs_js_debugger::AsyncStackTrace>>,
+}
+
+impl ThenRecord {
+    fn trace(&self, t: &mut Tracer) {
+        if let Some(c) = &self.capability {
+            c.trace(t);
+        }
+        self.on_fulfilled.trace(t);
+        self.on_rejected.trace(t);
+    }
+
+    fn into_reaction(self, kind: ReactionKind) -> Reaction {
+        Reaction {
+            capability: self.capability,
+            kind,
+            handler: match kind {
+                ReactionKind::Fulfill => self.on_fulfilled,
+                ReactionKind::Reject => self.on_rejected,
+            },
+            async_parent: self.async_parent,
+        }
+    }
+}
+
+/// A pending promise's reactions, in registration order. The first one is
+/// held inline: most promises get one `then` (or one `await`).
+#[derive(Default)]
+pub enum Reactions {
+    #[default]
+    None,
+    One(ThenRecord),
+    Many(Vec<ThenRecord>),
+}
+
+impl Reactions {
+    fn push(&mut self, r: ThenRecord) {
+        match std::mem::take(self) {
+            Reactions::None => *self = Reactions::One(r),
+            Reactions::One(first) => *self = Reactions::Many(vec![first, r]),
+            Reactions::Many(mut v) => {
+                v.push(r);
+                *self = Reactions::Many(v);
+            }
+        }
+    }
+
+    fn trace(&self, t: &mut Tracer) {
+        match self {
+            Reactions::None => {}
+            Reactions::One(r) => r.trace(t),
+            Reactions::Many(v) => v.iter().for_each(|r| r.trace(t)),
+        }
     }
 }
 
 pub struct PromiseData {
     pub status: PromiseStatus,
-    pub result: Value,
-    pub fulfill_reactions: Vec<Reaction>,
-    pub reject_reactions: Vec<Reaction>,
     pub is_handled: bool,
+    pub result: Value,
+    pub reactions: Reactions,
 }
 
 impl PromiseData {
     pub fn trace(&self, t: &mut Tracer) {
         t.value(self.result);
-        for r in self
-            .fulfill_reactions
-            .iter()
-            .chain(self.reject_reactions.iter())
-        {
-            r.trace(t);
-        }
+        self.reactions.trace(t);
     }
 }
 
@@ -102,10 +217,9 @@ pub fn is_promise(vm: &Vm, v: Value) -> bool {
 pub fn new_promise_object(vm: &mut Vm, proto: ObjId) -> ObjId {
     let data = PromiseData {
         status: PromiseStatus::Pending,
-        result: Value::Undefined,
-        fulfill_reactions: Vec::new(),
-        reject_reactions: Vec::new(),
         is_handled: false,
+        result: Value::Undefined,
+        reactions: Reactions::None,
     };
     vm.alloc(ObjectData::new(Some(proto), Class::Promise(Box::new(data))))
 }
@@ -190,10 +304,9 @@ pub fn fulfill_promise(vm: &mut Vm, promise: ObjId, value: Value) -> JsResult<()
         debug_assert_eq!(d.status, PromiseStatus::Pending);
         d.result = value;
         d.status = PromiseStatus::Fulfilled;
-        d.reject_reactions.clear();
-        std::mem::take(&mut d.fulfill_reactions)
+        std::mem::take(&mut d.reactions)
     };
-    trigger_reactions(vm, reactions, value);
+    trigger_reactions(vm, reactions, ReactionKind::Fulfill, value);
     Ok(())
 }
 
@@ -203,22 +316,26 @@ pub fn reject_promise(vm: &mut Vm, promise: ObjId, reason: Value) -> JsResult<()
         debug_assert_eq!(d.status, PromiseStatus::Pending);
         d.result = reason;
         d.status = PromiseStatus::Rejected;
-        d.fulfill_reactions.clear();
-        (std::mem::take(&mut d.reject_reactions), d.is_handled)
+        (std::mem::take(&mut d.reactions), d.is_handled)
     };
     if !handled {
         host_rejection_tracker(vm, promise, false);
     }
-    trigger_reactions(vm, reactions, reason);
+    trigger_reactions(vm, reactions, ReactionKind::Reject, reason);
     Ok(())
 }
 
-fn trigger_reactions(vm: &mut Vm, reactions: Vec<Reaction>, argument: Value) {
-    for r in reactions {
+fn trigger_reactions(vm: &mut Vm, reactions: Reactions, kind: ReactionKind, argument: Value) {
+    let mut queue = |r: ThenRecord| {
         vm.jobs.push_back(Job::Reaction {
-            reaction: r,
+            reaction: r.into_reaction(kind),
             argument,
-        });
+        })
+    };
+    match reactions {
+        Reactions::None => {}
+        Reactions::One(r) => queue(r),
+        Reactions::Many(v) => v.into_iter().for_each(queue),
     }
 }
 
@@ -262,9 +379,33 @@ pub fn new_promise_capability_intrinsic(vm: &mut Vm) -> Capability {
     let (resolve, reject) = create_resolving_functions(vm, promise);
     Capability {
         promise,
+        realm: vm.current_realm,
         resolve,
         reject,
     }
+}
+
+/// NewPromiseCapability(%Promise%) for a capability the engine settles
+/// once and never hands to script: no resolving function objects.
+pub fn new_internal_capability_intrinsic(vm: &mut Vm) -> Capability {
+    let proto = vm.intrinsic(Intrinsic::PromisePrototype);
+    let promise = new_promise_object(vm, proto);
+    Capability {
+        promise,
+        realm: vm.current_realm,
+        resolve: Value::Undefined,
+        reject: Value::Undefined,
+    }
+}
+
+/// NewPromiseCapability(C) for a capability the engine settles once and
+/// never hands to script: internal for %Promise%, real for any other
+/// constructor (whose executor sees the functions).
+pub fn new_internal_capability(vm: &mut Vm, c: Value) -> JsResult<Capability> {
+    if c == Value::Object(vm.intrinsic(Intrinsic::Promise)) {
+        return Ok(new_internal_capability_intrinsic(vm));
+    }
+    new_promise_capability(vm, c)
 }
 
 /// NewPromiseCapability(C).
@@ -296,6 +437,7 @@ pub fn new_promise_capability(vm: &mut Vm, c: Value) -> JsResult<Capability> {
     };
     Ok(Capability {
         promise,
+        realm: vm.current_realm,
         resolve,
         reject,
     })
@@ -321,13 +463,42 @@ fn capabilities_executor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 }
 
 pub fn resolve_capability(vm: &mut Vm, cap: &Capability, v: Value) -> JsResult<()> {
+    if cap.is_internal() {
+        return settle_internal(vm, cap, v, resolve_promise);
+    }
     vm.call_value(cap.resolve, Value::Undefined, &[v])?;
     Ok(())
 }
 
 pub fn reject_capability(vm: &mut Vm, cap: &Capability, v: Value) -> JsResult<()> {
+    if cap.is_internal() {
+        return settle_internal(vm, cap, v, reject_promise);
+    }
     vm.call_value(cap.reject, Value::Undefined, &[v])?;
     Ok(())
+}
+
+/// Run a resolving function's body for an internal capability, as a call
+/// of the function would: in its realm, as a native frame. The engine
+/// settles an internal capability once, so its already-resolved record is
+/// always false here; a promise that is no longer pending is left alone
+/// all the same.
+fn settle_internal(
+    vm: &mut Vm,
+    cap: &Capability,
+    v: Value,
+    body: fn(&mut Vm, ObjId, Value) -> JsResult<()>,
+) -> JsResult<()> {
+    if promise_data(vm, cap.promise).map(|d| d.status) != Some(PromiseStatus::Pending) {
+        debug_assert!(false, "an internal capability settled twice");
+        return Ok(());
+    }
+    let saved = vm.current_realm;
+    vm.current_realm = cap.realm;
+    let promise = cap.promise;
+    let r = vm.in_native(|vm| body(vm, promise, v));
+    vm.current_realm = saved;
+    r
 }
 
 /// PromiseResolve(%Promise%, x).
@@ -346,7 +517,7 @@ pub fn promise_resolve(vm: &mut Vm, c: Value, x: Value) -> JsResult<ObjId> {
             }
         }
     }
-    let cap = new_promise_capability(vm, c)?;
+    let cap = new_internal_capability(vm, c)?;
     resolve_capability(vm, &cap, x)?;
     Ok(cap.promise)
 }
@@ -359,50 +530,39 @@ pub fn perform_then(
     on_rejected: Value,
     cap: Option<Capability>,
 ) -> JsResult<Value> {
-    let on_fulfilled = if vm.is_callable(on_fulfilled) {
-        on_fulfilled
-    } else {
-        Value::Undefined
-    };
-    let on_rejected = if vm.is_callable(on_rejected) {
-        on_rejected
-    } else {
-        Value::Undefined
-    };
+    let on_fulfilled = Handler::from_value(vm, on_fulfilled);
+    let on_rejected = Handler::from_value(vm, on_rejected);
+    let result = cap.as_ref().map(|c| Value::Object(c.promise));
+    perform_then_handlers(vm, promise, on_fulfilled, on_rejected, cap);
+    Ok(result.unwrap_or(Value::Undefined))
+}
+
+/// PerformPromiseThen with handlers that may be engine continuations.
+pub fn perform_then_handlers(
+    vm: &mut Vm,
+    promise: ObjId,
+    on_fulfilled: Handler,
+    on_rejected: Handler,
+    capability: Option<Capability>,
+) {
     let async_parent = if vm.debug_hot {
         vm.debug_async_parent()
     } else {
         None
     };
-    let fr = Reaction {
-        capability: cap.clone(),
-        kind: ReactionKind::Fulfill,
-        handler: on_fulfilled,
-        async_parent: async_parent.clone(),
-    };
-    let rr = Reaction {
-        capability: cap.clone(),
-        kind: ReactionKind::Reject,
-        handler: on_rejected,
+    let record = ThenRecord {
+        capability,
+        on_fulfilled,
+        on_rejected,
         async_parent,
     };
-    let (status, result, was_handled) = {
-        let d = promise_data_mut(vm, promise);
-        let r = (d.status, d.result, d.is_handled);
-        match d.status {
-            PromiseStatus::Pending => {
-                d.fulfill_reactions.push(fr.clone());
-                d.reject_reactions.push(rr.clone());
-            }
-            _ => {}
-        }
-        d.is_handled = true;
-        r
-    };
+    let d = promise_data_mut(vm, promise);
+    let (status, result, was_handled) = (d.status, d.result, d.is_handled);
+    d.is_handled = true;
     match status {
-        PromiseStatus::Pending => {}
+        PromiseStatus::Pending => d.reactions.push(record),
         PromiseStatus::Fulfilled => vm.jobs.push_back(Job::Reaction {
-            reaction: fr,
+            reaction: record.into_reaction(ReactionKind::Fulfill),
             argument: result,
         }),
         PromiseStatus::Rejected => {
@@ -410,15 +570,31 @@ pub fn perform_then(
                 host_rejection_tracker(vm, promise, true);
             }
             vm.jobs.push_back(Job::Reaction {
-                reaction: rr,
+                reaction: record.into_reaction(ReactionKind::Reject),
                 argument: result,
             });
         }
     }
-    Ok(match cap {
-        Some(c) => Value::Object(c.promise),
-        None => Value::Undefined,
-    })
+}
+
+/// Queue a reaction job for a promise that is already fulfilled with
+/// `value` and that nothing else can reach: PerformPromiseThen on it would
+/// queue exactly this job, so the promise itself need not exist.
+pub fn queue_fulfilled_reaction(vm: &mut Vm, handler: Handler, value: Value) {
+    let async_parent = if vm.debug_hot {
+        vm.debug_async_parent()
+    } else {
+        None
+    };
+    vm.jobs.push_back(Job::Reaction {
+        reaction: Reaction {
+            capability: None,
+            kind: ReactionKind::Fulfill,
+            handler,
+            async_parent,
+        },
+        argument: value,
+    });
 }
 
 // ---- jobs -----------------------------------------------------------------------------------
@@ -427,16 +603,34 @@ impl Vm {
     /// Run a PromiseReactionJob.
     #[inline]
     fn run_reaction(&mut self, reaction: Reaction, argument: Value) -> JsResult<()> {
-        let result: Result<Value, Value> = if reaction.handler.is_undefined() {
-            match reaction.kind {
+        let result: Result<Value, Value> = match reaction.handler {
+            Handler::Default => match reaction.kind {
                 ReactionKind::Fulfill => Ok(argument),
                 ReactionKind::Reject => Err(argument),
-            }
-        } else {
-            match self.call_value(reaction.handler, Value::Undefined, &[argument]) {
+            },
+            Handler::Call(f) => match self.call_value(f, Value::Undefined, &[argument]) {
                 Ok(v) => Ok(v),
                 Err(Fault::Throw(e)) => Err(e),
                 Err(f) => return Err(f),
+            },
+            // The engine's continuations run as the native closures they
+            // replace did: in the realm of the await, as a native frame.
+            // They have no result capability.
+            Handler::Await { gen, realm } => {
+                let mode = match reaction.kind {
+                    ReactionKind::Fulfill => crate::interp::generator::ResumeMode::Next,
+                    ReactionKind::Reject => crate::interp::generator::ResumeMode::Throw,
+                };
+                return self.run_continuation(realm, |vm| vm.async_resume(gen, mode, argument));
+            }
+            Handler::AsyncGenReturn { gen, realm } => {
+                let completion = match reaction.kind {
+                    ReactionKind::Fulfill => Ok(argument),
+                    ReactionKind::Reject => Err(argument),
+                };
+                return self.run_continuation(realm, |vm| {
+                    vm.async_generator_return_settled(gen, completion)
+                });
             }
         };
         if let Some(cap) = reaction.capability {
@@ -446,6 +640,25 @@ impl Vm {
             }
         }
         Ok(())
+    }
+
+    /// Run an engine continuation the way a call of its former closure
+    /// ran: as a native frame in `realm`. A throw out of it would have been
+    /// the closure's completion, which a reaction without a capability
+    /// drops.
+    fn run_continuation(
+        &mut self,
+        realm: agnijs_engine_api::RealmId,
+        f: impl FnOnce(&mut Vm) -> JsResult<()>,
+    ) -> JsResult<()> {
+        let saved = self.current_realm;
+        self.current_realm = realm;
+        let r = self.in_native(f);
+        self.current_realm = saved;
+        match r {
+            Ok(()) | Err(Fault::Throw(_)) => Ok(()),
+            Err(f) => Err(f),
+        }
     }
 
     /// Run one job from the queue.
@@ -591,7 +804,9 @@ fn this_promise(vm: &mut Vm, this: Value, method: &str) -> JsResult<ObjId> {
 fn promise_then(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let p = this_promise(vm, a.this, "then")?;
     let c = vm.species_constructor(p, Intrinsic::Promise)?;
-    let cap = new_promise_capability(vm, c)?;
+    // The result capability's functions are only ever called by the
+    // reaction job.
+    let cap = new_internal_capability(vm, c)?;
     perform_then(vm, p, a.arg(0), a.arg(1), Some(cap))
 }
 
@@ -665,7 +880,7 @@ fn promise_static_resolve(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 }
 
 fn promise_static_reject(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let cap = new_promise_capability(vm, a.this)?;
+    let cap = new_internal_capability(vm, a.this)?;
     reject_capability(vm, &cap, a.arg(0))?;
     Ok(Value::Object(cap.promise))
 }
@@ -690,7 +905,7 @@ fn promise_try(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     match vm.call_value(a.arg(0), Value::Undefined, &args) {
         Ok(v) => Ok(Value::Object(promise_resolve(vm, a.this, v)?)),
         Err(Fault::Throw(e)) => {
-            let cap = new_promise_capability(vm, a.this)?;
+            let cap = new_internal_capability(vm, a.this)?;
             reject_capability(vm, &cap, e)?;
             Ok(Value::Object(cap.promise))
         }

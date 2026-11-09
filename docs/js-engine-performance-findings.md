@@ -334,6 +334,8 @@ Fix: a per-site global cache keyed by a global-object version or property cell. 
 
 Fix: internal reaction records instead of closures where the function is unobservable, and a smaller promise layout. **Effort M, risk medium**: the ordering of jobs must stay exactly per spec. TASK-100.25.
 
+**Done (TASK-100.25).** A capability for `%Promise%` that script cannot see (from `then`, `Promise.resolve`, `Promise.reject`, `Promise.try`, async functions and async generators) is internal: it has no resolving functions, and the engine settles it once through the same resolve steps. `await` and the async generator's return step queue reactions whose handler is a record (the suspended body and its realm), not a native closure, and awaiting a primitive skips the wrapper promise. A promise keeps one record per `then` and holds its first one inline. Resolving functions handed to script (the `Promise` constructor, `withResolvers`, thenables, subclasses, the combinators) are unchanged. promise-chain went from 38.4 to 18.3 ms and from 134 to 57 MiB peak; async-await from 58.2 to 16.0 ms; the 100 000-`then` module reproduction from 243 to 104 ms (QuickJS 198 ms).
+
 **c. Parser and compiler allocation.** compile-source is 2.30x and ui-bundle-startup 2.07x. In compile-source, `RtlAllocateHeap` plus `RtlFreeHeap` are 36% self, and in ui-bundle-startup 32%. That comes from boxed AST nodes, `Rc<str>` names and SipHash `HashMap`s in scope analysis.
 
 Fix: an arena or index-based AST, interned identifiers, and a faster hasher for compiler-internal maps. **Effort M to L, risk low**: this is the front end only. TASK-100.26.

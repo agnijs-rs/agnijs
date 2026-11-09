@@ -343,6 +343,8 @@ pub struct Heap {
     pub pinned: HashSet<StrId>,
     /// Strings allocated so far (diagnostics and tests).
     pub strings_allocated: u64,
+    /// Objects allocated so far (diagnostics and tests).
+    pub objects_allocated: u64,
 }
 
 impl Default for Heap {
@@ -384,6 +386,7 @@ impl Heap {
             proto_epoch: 1,
             pinned: HashSet::new(),
             strings_allocated: 0,
+            objects_allocated: 0,
         }
     }
 
@@ -482,6 +485,7 @@ impl Heap {
     /// filled in (array literals, `new_array`), so that storage counts here.
     pub fn alloc_object(&mut self, data: ObjectData) -> ObjId {
         self.charge(OBJECT_BYTES + data.extra_bytes());
+        self.objects_allocated += 1;
         ObjId(self.objects.alloc(data))
     }
 

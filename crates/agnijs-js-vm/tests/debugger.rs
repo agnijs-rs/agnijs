@@ -673,6 +673,73 @@ fn a_pause_after_await_carries_the_async_stack_of_the_caller() {
     assert_eq!(async_stack_lines(0), Some(vec![]));
 }
 
+const STEP_ASYNC: &str = "async function work() {
+  debugger;
+  const a = await one();
+  const b = await a;
+  return a + b;
+}
+function one() { return Promise.resolve(1); }
+function* gen() {
+  debugger;
+  yield 1;
+  yield 2;
+}
+work().then(function (v) { globalThis.done = v; });
+const it = gen(); it.next(); it.next(); it.next();
+";
+
+/// Stepping over an `await` or a `yield` leaves for the caller, as it did
+/// before TASK-100.25 replaced the await reaction closures by internal
+/// records, and a breakpoint in the resumed body pauses inside the promise
+/// job with the `await` segment on the async stack.
+#[test]
+fn stepping_over_await_and_yield_and_pausing_after_the_resumption() {
+    let (mut d, client, realm) = debuggee();
+    d.set_async_stack_depth(32);
+    d.set_breakpoint(at_line("step-async.js", 4));
+    for _ in 0..8 {
+        client.on_pause(|_d, _p| ResumeAction::StepOver);
+    }
+    let seen = Rc::new(RefCell::new(None));
+    let s = seen.clone();
+    client.on_pause(move |_d, p| {
+        assert!(matches!(&p.reason, PauseReason::Breakpoint(_)));
+        let local = &p.frames[0].scopes[0];
+        *s.borrow_mut() = Some((
+            var(local, "a"),
+            var(local, "b"),
+            p.async_stack.as_ref().map(|a| a.description.clone()),
+        ));
+        ResumeAction::Continue
+    });
+    run(&mut *d, realm, "step-async.js", STEP_ASYNC);
+    d.engine().run_jobs(realm).unwrap();
+    assert_eq!(
+        client.pauses(),
+        vec![
+            ("work".to_string(), 1, 2),
+            ("work".to_string(), 2, 2),
+            (String::new(), 13, 0),
+            (String::new(), 13, 18),
+            ("gen".to_string(), 8, 2),
+            ("gen".to_string(), 9, 2),
+            (String::new(), 13, 29),
+            (String::new(), 13, 40),
+            ("work".to_string(), 4, 2),
+        ]
+    );
+    assert_eq!(
+        *seen.borrow(),
+        Some((
+            Some(Value::Number(1.0)),
+            Some(Value::Number(1.0)),
+            Some("await".to_string())
+        ))
+    );
+    assert_eq!(run(&mut *d, realm, "check.js", "done"), Value::Number(2.0));
+}
+
 #[test]
 fn script_parsed_reports_functions_and_detaching_stops_pausing() {
     let (mut d, client, realm) = debuggee();
