@@ -64,3 +64,34 @@ fn exec_on_a_long_string_does_not_reconvert_it_after_a_short_one() {
     let long = tokenizer_ms(500_000);
     assert!(long < short * 4.0 + 200.0, "4k line {short:.0} ms, 500k line {long:.0} ms");
 }
+
+/// A host that opts its engine out of the linear-time matcher.
+struct BacktrackingHost;
+
+impl gable_engine_api::Host for BacktrackingHost {
+    fn regex_matcher(&self) -> gable_engine_api::RegexMatcher {
+        gable_engine_api::RegexMatcher::BacktrackingOnly
+    }
+}
+
+#[test]
+fn the_host_picks_the_matcher_per_engine_at_creation() {
+    // ADR 0013: 14.9 s on the backtracking matcher with 28 a's.
+    #[cfg(feature = "linear-regex")]
+    {
+        let t = Instant::now();
+        assert_eq!(run(false, "/(a+)+$/.test('a'.repeat(40) + '!')"), Value::Bool(false));
+        assert!(t.elapsed().as_secs() < 2, "auto took {:?}", t.elapsed());
+    }
+
+    // An opted-out engine backtracks; one beside it keeps the default.
+    let mut out = Vm::new(std::rc::Rc::new(BacktrackingHost));
+    Vm::create_realm(&mut out);
+    assert_eq!(out.regex_mode, gable_js_regex::MatcherMode::BacktrackingOnly);
+    let realm = out.main_realm();
+    let ordinary = "/(\\d+)-(\\d+)/.exec('x 12-345 y').slice(1).join()";
+    assert_eq!(out.eval_script(realm, "a.js", ordinary).unwrap(), Value::string("12,345"));
+    let mut auto = Vm::new(TestHost::new());
+    Vm::create_realm(&mut auto);
+    assert_eq!(auto.regex_mode, gable_js_regex::MatcherMode::Auto);
+}

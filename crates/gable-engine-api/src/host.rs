@@ -47,6 +47,26 @@ pub enum RejectionEvent {
     Handle { promise: Value },
 }
 
+/// Which regular-expression matcher an engine may use. Both give the same
+/// results; they differ in worst-case time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum RegexMatcher {
+    /// The engine picks per pattern and input. Patterns whose backtracking
+    /// worst case is exponential or too large for the input run on a
+    /// linear-time matcher when the engine has one, so a hostile pattern or
+    /// input cannot stall the thread. The default.
+    #[default]
+    Auto,
+    /// Always backtrack (an embedder opt-out). Pathological patterns can
+    /// take exponential time; [`Host::interrupt`] is the only way out.
+    BacktrackingOnly,
+    /// Run every pattern the linear-time matcher supports on it, whatever
+    /// its cost estimate: for hosts that take untrusted patterns and want
+    /// no estimate in the way, and for measuring the matchers. Patterns it
+    /// cannot run (backreferences, lookaround) still backtrack.
+    LinearWhenEligible,
+}
+
 /// Hooks the engine calls. Every method has a default so hosts implement only
 /// what they use; the conformance kit's host implements all of them.
 pub trait Host {
@@ -140,6 +160,13 @@ pub trait Host {
     /// uses when none is given. Unknown names fall back to `UTC`.
     fn default_time_zone(&self) -> String {
         "UTC".to_string()
+    }
+
+    /// The regular-expression matcher policy. Read once, when the engine
+    /// is created, and fixed for that engine's lifetime; other engines in
+    /// the process are unaffected. Engines with a single matcher ignore it.
+    fn regex_matcher(&self) -> RegexMatcher {
+        RegexMatcher::Auto
     }
 }
 

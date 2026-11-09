@@ -2,7 +2,7 @@
 
 use crate::workloads::{generated_source, prelude, Kind, Workload};
 use anyhow::{anyhow, Result};
-use gable_engine_api::{Engine, Host, RealmId, Value};
+use gable_engine_api::{Engine, Host, RealmId, RegexMatcher, Value};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -13,6 +13,12 @@ pub enum EngineKind {
     Owned,
     /// The QuickJS-NG adapter.
     QuickJs,
+    /// The owned engine with `RegexMatcher::BacktrackingOnly`, for the
+    /// matcher comparison (ADR 0013 addendum). Not in [`EngineKind::ALL`].
+    OwnedBacktracking,
+    /// The owned engine with `RegexMatcher::LinearWhenEligible`. Not in
+    /// [`EngineKind::ALL`].
+    OwnedLinear,
 }
 
 impl EngineKind {
@@ -23,26 +29,41 @@ impl EngineKind {
         match self {
             EngineKind::Owned => "gable",
             EngineKind::QuickJs => "quickjs",
+            EngineKind::OwnedBacktracking => "gable-backtracking",
+            EngineKind::OwnedLinear => "gable-linear",
         }
     }
 
     pub fn parse(name: &str) -> Option<EngineKind> {
-        EngineKind::ALL.into_iter().find(|e| e.name() == name)
+        [EngineKind::Owned, EngineKind::QuickJs, EngineKind::OwnedBacktracking, EngineKind::OwnedLinear]
+            .into_iter()
+            .find(|e| e.name() == name)
     }
 
     pub fn make(self) -> Box<dyn Engine> {
-        let host: Rc<dyn Host> = Rc::new(BenchHost);
+        let regex = match self {
+            EngineKind::OwnedBacktracking => RegexMatcher::BacktrackingOnly,
+            EngineKind::OwnedLinear => RegexMatcher::LinearWhenEligible,
+            _ => RegexMatcher::Auto,
+        };
+        let host: Rc<dyn Host> = Rc::new(BenchHost { regex });
         match self {
-            EngineKind::Owned => gable_js_vm::make_engine(host),
             EngineKind::QuickJs => gable_engine_quickjs::make_engine(host),
+            _ => gable_js_vm::make_engine(host),
         }
     }
 }
 
 /// A host with every hook at its default: workloads use only the standard
 /// library.
-struct BenchHost;
-impl Host for BenchHost {}
+struct BenchHost {
+    regex: RegexMatcher,
+}
+impl Host for BenchHost {
+    fn regex_matcher(&self) -> RegexMatcher {
+        self.regex
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RunConfig {

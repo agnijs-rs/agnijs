@@ -8,6 +8,31 @@
 
 pub mod syntax;
 
+#[cfg(feature = "linear")]
+mod linear;
+
+/// How compiled patterns are matched (ADR 0013 addendum). The mode never
+/// changes what matches, only which matcher finds it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MatcherMode {
+    /// Patterns without backreferences or lookaround run on the
+    /// linear-time matcher unless the backtracking matcher's estimated
+    /// worst case for this input is small; everything else backtracks.
+    #[default]
+    Auto,
+    /// Every pattern backtracks, as in V8 and most other engines.
+    BacktrackingOnly,
+    /// Every eligible pattern runs on the linear-time matcher, whatever
+    /// the input. For tests and benchmarks.
+    LinearWhenEligible,
+}
+
+/// Under [`MatcherMode::Auto`], an eligible pattern stays on the
+/// backtracking matcher when its estimated worst case for the input is at
+/// most this many steps (a few milliseconds).
+#[cfg(feature = "linear")]
+const BACKTRACK_BUDGET: u64 = 1 << 20;
+
 /// The eight ECMAScript flags, parsed and validated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Flags {
@@ -93,6 +118,10 @@ pub struct Regex {
     /// Capture-group names by group number (1-based groups at index
     /// `n - 1`); `None` for unnamed groups.
     names: Vec<Option<String>>,
+    mode: MatcherMode,
+    /// The linear-time program, or why the pattern is not eligible.
+    #[cfg(feature = "linear")]
+    linear: Result<linear::Linear, &'static str>,
 }
 
 /// One successful match: `ranges[0]` is the whole match, `ranges[n]` the
@@ -108,6 +137,11 @@ impl Regex {
     /// `ToString(pattern)` gives it) under `flags`. The error message is
     /// what the `SyntaxError` carries.
     pub fn compile(pattern: &[u16], flags: &Flags) -> Result<Regex, String> {
+        Regex::compile_with(pattern, flags, MatcherMode::Auto)
+    }
+
+    /// [`Regex::compile`] under an explicit matcher mode.
+    pub fn compile_with(pattern: &[u16], flags: &Flags, mode: MatcherMode) -> Result<Regex, String> {
         let unicode_mode = flags.unicode_mode();
         // Our own grammar check first, so literals and `new RegExp` report
         // the same errors.
@@ -128,6 +162,20 @@ impl Regex {
         let stripped = strip_group_names(&code_points, unicode_mode, &names);
         let inner = regress::Regex::from_unicode(stripped.iter().copied(), rflags)
             .map_err(|e| format!("Invalid regular expression: {}", e.text))?;
+        #[cfg(feature = "linear")]
+        let linear = if mode == MatcherMode::BacktrackingOnly {
+            Err("the matcher mode is backtracking only")
+        } else {
+            linear::Linear::compile(
+                &stripped,
+                names.len(),
+                flags.ignore_case,
+                flags.multiline,
+                flags.dot_all,
+                flags.unicode,
+                flags.unicode_sets,
+            )
+        };
         Ok(Regex {
             inner,
             anchored: std::cell::OnceCell::new(),
@@ -135,7 +183,62 @@ impl Regex {
             backend_flags: rflags,
             unicode_mode,
             names,
+            mode,
+            #[cfg(feature = "linear")]
+            linear,
         })
+    }
+
+    /// The matcher mode this pattern was compiled under.
+    pub fn mode(&self) -> MatcherMode {
+        self.mode
+    }
+
+    /// Whether the pattern can run on the linear-time matcher, or why
+    /// not. Ineligible patterns always backtrack.
+    pub fn linear_eligibility(&self) -> Result<(), &'static str> {
+        #[cfg(feature = "linear")]
+        {
+            self.linear.as_ref().map(|_| ()).map_err(|e| *e)
+        }
+        #[cfg(not(feature = "linear"))]
+        {
+            Err("the linear matcher is compiled out")
+        }
+    }
+
+    /// Whether a search over `input` from `start` would run on the
+    /// linear-time matcher (the routing rule, exposed for tests).
+    pub fn uses_linear_matcher(&self, input_len: usize, start: usize, sticky: bool) -> bool {
+        #[cfg(feature = "linear")]
+        {
+            self.linear_for(input_len, start, sticky).is_some()
+        }
+        #[cfg(not(feature = "linear"))]
+        {
+            let _ = (input_len, start, sticky);
+            false
+        }
+    }
+
+    #[cfg(feature = "linear")]
+    fn linear_for(&self, input_len: usize, start: usize, sticky: bool) -> Option<&linear::Linear> {
+        let lin = self.linear.as_ref().ok()?;
+        match self.mode {
+            MatcherMode::BacktrackingOnly => None,
+            MatcherMode::LinearWhenEligible => Some(lin),
+            MatcherMode::Auto => {
+                let len = input_len.saturating_sub(start);
+                let starts = if sticky { 1 } else { len + 1 };
+                (!lin.backtracking_is_bounded(len, starts, BACKTRACK_BUDGET)).then_some(lin)
+            }
+        }
+    }
+
+    #[cfg(feature = "linear")]
+    fn exec_linear(&self, input: &[u16], start: usize, sticky: bool) -> Option<Option<Captures>> {
+        let lin = self.linear_for(input.len(), start, sticky)?;
+        Some(lin.exec(input, start, sticky).map(|ranges| Captures { ranges }))
     }
 
     /// Number of capturing groups (not counting the whole match).
@@ -155,6 +258,10 @@ impl Regex {
 
     /// Find the leftmost match starting at or after `start`.
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
+        #[cfg(feature = "linear")]
+        if let Some(found) = self.exec_linear(input, start, false) {
+            return found;
+        }
         let m = self.find(&self.inner, input, start)?;
         Some(self.captures(&m, m.captures.len()))
     }
@@ -194,9 +301,13 @@ impl Regex {
     /// of `P`'s groups) participates, or the empty alternative matches
     /// right there. Either way the search stops at `start`.
     pub fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
+        #[cfg(feature = "linear")]
+        if let Some(found) = self.exec_linear(input, start, true) {
+            return found;
+        }
         let anchored = self.anchored.get_or_init(|| {
             let mut p: Vec<u32> = "(?:".chars().map(|c| c as u32).collect();
-            p.extend_from_slice(&self.source);
+            p.extend(pin_group_count_escapes(&self.source, self.names.len(), self.backend_flags.unicode_sets));
             p.extend(")()|".chars().map(|c| c as u32));
             regress::Regex::from_unicode(p.into_iter(), self.backend_flags)
                 .expect("a pattern that compiled still compiles inside a group")
@@ -373,6 +484,72 @@ fn strip_group_names(p: &[u32], unicode_sets: bool, names: &[Option<String>]) ->
     out
 }
 
+/// `p` (with `groups` capture groups) rewritten so that one more group
+/// appended to it changes nothing: outside unicode mode, `\N` with
+/// N = groups + 1 is an Annex B octal or identity escape, which the extra
+/// group would turn into a backreference. Such an escape is spelled out
+/// (`\xHH` for the octal part, then the remaining digits as literals).
+fn pin_group_count_escapes(p: &[u32], groups: usize, unicode_sets: bool) -> Vec<u32> {
+    let digit = |x: Option<&u32>| x.and_then(|&d| char::from_u32(d)?.to_digit(10));
+    let mut out = Vec::with_capacity(p.len());
+    let mut i = 0;
+    let mut class_depth = 0usize;
+    while i < p.len() {
+        let c = p[i];
+        if c == '\\' as u32 {
+            if class_depth == 0 && matches!(digit(p.get(i + 1)), Some(1..=9)) {
+                let mut end = i + 1;
+                let mut value = 0usize;
+                while let Some(d) = digit(p.get(end)) {
+                    value = value.saturating_mul(10).saturating_add(d as usize);
+                    end += 1;
+                }
+                if value == groups + 1 {
+                    let mut j = i + 1;
+                    let first = digit(p.get(j)).unwrap_or(0);
+                    if first <= 7 {
+                        // LegacyOctalEscapeSequence: up to three digits from
+                        // 0-3, up to two from 4-7.
+                        let max = if first <= 3 { 3 } else { 2 };
+                        let mut octal = 0u32;
+                        while j < end && j - (i + 1) < max && matches!(digit(p.get(j)), Some(0..=7)) {
+                            octal = octal * 8 + digit(p.get(j)).unwrap_or(0);
+                            j += 1;
+                        }
+                        out.extend(format!("\\x{octal:02X}").chars().map(|c| c as u32));
+                    }
+                    // An 8 or 9 (IdentityEscape) and any digits past the
+                    // octal escape are literal.
+                    out.extend_from_slice(&p[j..end]);
+                    i = end;
+                    continue;
+                }
+                out.extend_from_slice(&p[i..end]);
+                i = end;
+                continue;
+            }
+            out.push(c);
+            if let Some(&n) = p.get(i + 1) {
+                out.push(n);
+            }
+            i += 2;
+            continue;
+        }
+        if class_depth > 0 {
+            if c == ']' as u32 {
+                class_depth -= 1;
+            } else if c == '[' as u32 && unicode_sets {
+                class_depth += 1;
+            }
+        } else if c == '[' as u32 {
+            class_depth = 1;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Decode `\u{XXXX}` or `\uXXXX` (with a possible trailing surrogate
 /// escape) at `p[i] == '\\'`; returns the code point and the next index.
 fn name_escape(p: &[u32], i: usize) -> (u32, usize) {
@@ -457,6 +634,27 @@ mod tests {
         let re = Regex::compile(&u("."), &Flags { unicode: true, ..Flags::default() }).unwrap();
         assert_eq!(re.exec_sticky(&u("a\u{1F600}"), 1).unwrap().ranges, vec![Some((1, 3))]);
         assert!(re.exec_sticky(&u("a"), 1).is_none());
+    }
+
+    #[test]
+    fn sticky_matching_keeps_escapes_that_name_no_group() {
+        // `\2` and `\8` with one group are an octal and an identity escape
+        // (Annex B); the sticky wrapper's extra group must not turn them
+        // into backreferences.
+        let bt = |p: &str| Regex::compile_with(&u(p), &Flags::default(), MatcherMode::BacktrackingOnly).unwrap();
+        let re = bt("(a)\\8");
+        assert!(re.exec_sticky(&u("a"), 0).is_none());
+        assert_eq!(re.exec_sticky(&u("a8"), 0).unwrap().ranges, vec![Some((0, 2)), Some((0, 1))]);
+        let re = bt("(a)\\2");
+        assert!(re.exec_sticky(&u("a"), 0).is_none());
+        assert_eq!(re.exec_sticky(&u("a\u{2}"), 0).unwrap().ranges, vec![Some((0, 2)), Some((0, 1))]);
+        let re = bt("(a)\\24[\\2]");
+        assert_eq!(re.exec_sticky(&u("a\u{14}\u{2}"), 0).unwrap().ranges, vec![Some((0, 3)), Some((0, 1))]);
+        let re = bt("()()()()()()()()\\9");
+        assert!(re.exec_sticky(&u(""), 0).is_none());
+        assert_eq!(re.exec_sticky(&u("9"), 0).unwrap().ranges[0], Some((0, 1)));
+        let re = bt("(a)\\2(?:)7");
+        assert_eq!(re.exec_sticky(&u("a\u{2}7"), 0).unwrap().ranges[0], Some((0, 3)));
     }
 
     #[test]

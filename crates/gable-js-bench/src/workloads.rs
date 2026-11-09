@@ -349,6 +349,64 @@ function bench() {
             "bench()",
         ),
         script(
+            "regex-tokenize",
+            Category::Regex,
+            "Sticky-regex tokenizer over source text (ordinary patterns)",
+            r#"
+var src = '';
+for (var i = 0; i < 300; i++) src += 'var x' + i + ' = foo(' + i + ', "s' + i + '") + 3.5e' + (i % 9) + '; // note\n';
+var rules = [/\s+/y, /\/\/[^\n]*/y, /[A-Za-z_$][\w$]*/y, /\d+(?:\.\d+)?(?:e[+-]?\d+)?/y, /"(?:[^"\\]|\\.)*"/y, /[=+();,.]/y];
+function bench() {
+  var n = 0, rounds = scaled(4);
+  for (var r = 0; r < rounds; r++) {
+    var pos = 0;
+    while (pos < src.length) {
+      for (var k = 0; k < rules.length; k++) {
+        var re = rules[k]; re.lastIndex = pos;
+        var m = re.exec(src);
+        if (m) { pos += m[0].length; n += k; break; }
+      }
+      if (k === rules.length) pos++;
+    }
+  }
+  return n;
+}"#,
+            "bench()",
+        ),
+        script(
+            "regex-long-input",
+            Category::Regex,
+            "Searches over a 40k-character text, including a trailing-space trim",
+            r#"
+var words = [];
+for (var i = 0; i < 6000; i++) words.push(i % 97 === 0 ? 'mail' + i + '@host.com' : 'w' + (i % 13));
+var text = words.join(' ') + '   x';
+var mail = /\b[a-z]+\d+@[a-z]+\.com\b/g, trail = /\s+$/, num = /\d{3,}/g;
+function bench() {
+  var s = 0, rounds = scaled(3);
+  for (var r = 0; r < rounds; r++) {
+    s += text.match(mail).length;
+    s += trail.test(text) ? 1 : 0;
+    s += text.replace(num, '#').length;
+  }
+  return s;
+}"#,
+            "bench()",
+        ),
+        script(
+            "regex-redos",
+            Category::Regex,
+            "Nested quantifier on a failing input (/(a+)+$/, ADR 0013)",
+            r#"
+var input = 'a'.repeat(20) + '!';
+function bench() {
+  var s = 0, rounds = scaled(2);
+  for (var r = 0; r < rounds; r++) s += /(a+)+$/.test(input) ? 1 : 0;
+  return s + rounds;
+}"#,
+            "bench()",
+        ),
+        script(
             "json-stringify",
             Category::Json,
             "JSON.stringify of a nested object tree",

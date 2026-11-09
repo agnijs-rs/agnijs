@@ -7,6 +7,12 @@ rust-version.workspace = true
 repository.workspace = true
 description = "The Gable JavaScript virtual machine: interpreter, object model, heap and GC, built-ins"
 
+[features]
+default = ["linear-regex"]
+# The linear-time regular-expression matcher (ADR 0013 addendum). Without
+# it every pattern backtracks, whatever Host::regex_matcher says.
+linear-regex = ["gable-js-regex/linear"]
+
 [dependencies]
 gable-engine-api.workspace = true
 gable-js-parser.workspace = true

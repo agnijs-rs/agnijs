@@ -333,6 +333,8 @@ pub struct Vm {
     pub host_classes: Vec<gable_engine_api::HostClassDef>,
     /// Compiled regular expressions by (pattern, flags); see builtins::regexp.
     pub regex_cache: HashMap<(Vec<u16>, String), Rc<gable_js_regex::Regex>>,
+    /// The matcher policy from [`Host::regex_matcher`], fixed at creation.
+    pub regex_mode: gable_js_regex::MatcherMode,
     /// The UTF-16 form of the last few long strings RegExp exec ran against,
     /// most recent first, so a global match/replace/split or a sticky
     /// tokenizer over a long string stays linear. String ids are reused
@@ -359,6 +361,13 @@ impl Vm {
         let names = Names::new(&mut heap);
         let well_known = WellKnown::new(&mut heap, &names);
         let engine_id = gable_engine_api::next_engine_id();
+        let regex_mode = match host.regex_matcher() {
+            gable_engine_api::RegexMatcher::Auto => gable_js_regex::MatcherMode::Auto,
+            gable_engine_api::RegexMatcher::BacktrackingOnly => gable_js_regex::MatcherMode::BacktrackingOnly,
+            gable_engine_api::RegexMatcher::LinearWhenEligible => {
+                gable_js_regex::MatcherMode::LinearWhenEligible
+            }
+        };
         let mut vm = Vm {
             heap,
             realms: Vec::new(),
@@ -375,6 +384,7 @@ impl Vm {
             symbol_registry: HashMap::new(),
             jobs: VecDeque::new(),
             regex_cache: HashMap::new(),
+            regex_mode,
             regex_input_cache: Vec::new(),
             engine_id,
             scripts: HashMap::new(),

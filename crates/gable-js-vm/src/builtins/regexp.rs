@@ -59,7 +59,7 @@ fn compile(vm: &mut Vm, pattern: StrId, flags: StrId) -> JsResult<(Rc<Regex>, Fl
     if let Some(r) = vm.regex_cache.get(&key) {
         return Ok((r.clone(), parsed));
     }
-    let re = match Regex::compile(&key.0, &parsed) {
+    let re = match Regex::compile_with(&key.0, &parsed, vm.regex_mode) {
         Ok(r) => Rc::new(r),
         Err(msg) => return vm.syntax_error(&msg),
     };

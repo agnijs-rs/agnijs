@@ -27,7 +27,9 @@ gable-engine-quickjs = { path = "crates/gable-engine-quickjs" }
 gable-js-parser = { path = "crates/gable-js-parser" }
 gable-js-compiler = { path = "crates/gable-js-compiler" }
 gable-js-vm = { path = "crates/gable-js-vm" }
-gable-js-regex = { path = "crates/gable-js-regex" }
+# No default features: the engine crate (gable-js-vm) decides whether the
+# linear-time matcher is compiled in.
+gable-js-regex = { path = "crates/gable-js-regex", default-features = false }
 gable-js-intl = { path = "crates/gable-js-intl" }
 gable-js-debugger = { path = "crates/gable-js-debugger" }
 gable-js-cdp = { path = "crates/gable-js-cdp" }

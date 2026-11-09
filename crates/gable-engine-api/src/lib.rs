@@ -21,7 +21,7 @@ pub use engine::{Engine, EngineInfo, ErrorKind, MemoryUsage};
 pub use error::{Error, Exception, Result, StackFrame};
 pub use host::{
     CallContext, ConsoleLevel, Host, HostClassDef, HostClassId, HostFunction, HostObject,
-    ImportAttribute, ModuleSource, RejectionEvent, Tracer,
+    ImportAttribute, ModuleSource, RegexMatcher, RejectionEvent, Tracer,
 };
 pub use value::{
     next_engine_id, EngineId, Handle, HandleRegistry, HeapKind, JsBigInt, JsString, PromiseState,

@@ -3,12 +3,17 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use gable_engine_api::{
+    ConsoleLevel, Engine, Host, ImportAttribute, ModuleSource, RealmId, RegexMatcher,
+    RejectionEvent, Value,
+};
 use gable_js_test262::exclusions::Exclusions;
 use gable_js_test262::features::{parse_name_list, FeatureCut, FeatureList};
 use gable_js_test262::runner::Mode;
 use gable_js_test262::suite::{self, Baseline, RunOptions, Selection};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -76,6 +81,10 @@ enum Cmd {
         /// exclusions and baseline. Engines with a bytecode format only.
         #[arg(long)]
         precompile: bool,
+        /// The engine's regular-expression matcher policy (`Host::regex_matcher`):
+        /// `auto` (the default), `backtracking-only` or `linear-when-eligible`. Same baseline either way.
+        #[arg(long, default_value = "auto")]
+        regex_matcher: String,
     },
     /// Run one JS file against an engine with the test262 harness loaded
     /// (for debugging; not part of the conformance run).
@@ -129,7 +138,7 @@ fn main() -> Result<()> {
             }
             let root = test262.unwrap_or_else(default_test262_dir);
             let harness = suite::load_harness(&root)?;
-            let Mode::Engine(factory) = factory_for(&engine)? else {
+            let Mode::Engine(factory) = factory_for(&engine, RegexMatcher::Auto)? else {
                 bail!("eval needs a real engine");
             };
             let source = std::fs::read_to_string(&file)?;
@@ -177,6 +186,7 @@ fn main() -> Result<()> {
             only_intl402,
             verbose,
             precompile,
+            regex_matcher,
         } => run(RunArgs {
             engine,
             test262: test262.unwrap_or_else(default_test262_dir),
@@ -192,6 +202,7 @@ fn main() -> Result<()> {
             only_intl402,
             verbose,
             precompile,
+            regex_matcher: parse_regex_matcher(&regex_matcher)?,
         }),
     }
 }
@@ -247,9 +258,27 @@ struct RunArgs {
     only_intl402: bool,
     verbose: bool,
     precompile: bool,
+    regex_matcher: RegexMatcher,
 }
 
-fn factory_for(engine: &str) -> Result<Mode> {
+fn parse_regex_matcher(name: &str) -> Result<RegexMatcher> {
+    match name {
+        "auto" => Ok(RegexMatcher::Auto),
+        "backtracking-only" => Ok(RegexMatcher::BacktrackingOnly),
+        "linear-when-eligible" => Ok(RegexMatcher::LinearWhenEligible),
+        other => bail!("unknown --regex-matcher {other:?}; available: auto, backtracking-only, linear-when-eligible"),
+    }
+}
+
+fn factory_for(engine: &str, regex: RegexMatcher) -> Result<Mode> {
+    if regex != RegexMatcher::Auto {
+        let Mode::Engine(inner) = factory_for(engine, RegexMatcher::Auto)? else {
+            bail!("--regex-matcher needs an engine that runs code");
+        };
+        return Ok(Mode::Engine(Arc::new(move |host| {
+            inner(Rc::new(MatcherHost { inner: host, regex }))
+        })));
+    }
     match engine {
         "quickjs" => Ok(Mode::Engine(Arc::new(|host| {
             gable_engine_quickjs::make_engine(host)
@@ -284,7 +313,7 @@ fn run(args: RunArgs) -> Result<()> {
         eprintln!("warning: checkout is at {commit}, PIN says {pinned}");
     }
 
-    let factory = match (factory_for(&args.engine)?, args.precompile) {
+    let factory = match (factory_for(&args.engine, args.regex_matcher)?, args.precompile) {
         (Mode::Engine(f), true) => Mode::Precompiled(f),
         (_, true) => bail!("--precompile needs an engine that runs code"),
         (mode, false) => mode,
@@ -457,5 +486,65 @@ fn dump_code(code: &gable_js_compiler::bytecode::CodeBlock, depth: usize) {
     }
     for f in &code.functions {
         dump_code(f, depth + 1);
+    }
+}
+
+/// The runner's host with a different `regex_matcher` answer; every other
+/// hook goes to the wrapped host.
+struct MatcherHost {
+    inner: Rc<dyn Host>,
+    regex: RegexMatcher,
+}
+
+impl Host for MatcherHost {
+    fn resolve_module(
+        &self,
+        referrer: Option<&str>,
+        specifier: &str,
+        attributes: &[ImportAttribute],
+    ) -> std::result::Result<String, String> {
+        self.inner.resolve_module(referrer, specifier, attributes)
+    }
+    fn load_module(&self, resolved: &str) -> std::result::Result<ModuleSource, String> {
+        self.inner.load_module(resolved)
+    }
+    fn import_meta(
+        &self,
+        engine: &mut dyn Engine,
+        realm: RealmId,
+        module: &str,
+        meta: &Value,
+    ) -> gable_engine_api::Result<()> {
+        self.inner.import_meta(engine, realm, module, meta)
+    }
+    fn promise_rejection(&self, engine: &mut dyn Engine, realm: RealmId, event: RejectionEvent) {
+        self.inner.promise_rejection(engine, realm, event)
+    }
+    fn can_compile_strings(&self, realm: RealmId) -> bool {
+        self.inner.can_compile_strings(realm)
+    }
+    fn console(&self, realm: RealmId, level: ConsoleLevel, args: Vec<String>) {
+        self.inner.console(realm, level, args)
+    }
+    fn interrupt(&self) -> bool {
+        self.inner.interrupt()
+    }
+    fn now_ms(&self) -> f64 {
+        self.inner.now_ms()
+    }
+    fn time_zone_offset_ms(&self, epoch_ms: f64, is_utc: bool) -> f64 {
+        self.inner.time_zone_offset_ms(epoch_ms, is_utc)
+    }
+    fn time_zone_name(&self, epoch_ms: f64) -> String {
+        self.inner.time_zone_name(epoch_ms)
+    }
+    fn default_locale(&self) -> String {
+        self.inner.default_locale()
+    }
+    fn default_time_zone(&self) -> String {
+        self.inner.default_time_zone()
+    }
+    fn regex_matcher(&self) -> RegexMatcher {
+        self.regex
     }
 }
