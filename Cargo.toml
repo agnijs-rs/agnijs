@@ -11,6 +11,7 @@ members = [
     "crates/gable-js-debugger",
     "crates/gable-js-cdp",
     "crates/gable-js-test262",
+    "crates/gable-js-bench",
 ]
 
 [workspace.package]

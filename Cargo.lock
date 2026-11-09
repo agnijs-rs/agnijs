@@ -247,6 +247,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gable-js-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "gable-engine-api",
+ "gable-engine-quickjs",
+ "gable-js-vm",
+ "serde",
+ "serde_json",
+ "windows-sys",
+]
+
+[[package]]
 name = "gable-js-cdp"
 version = "0.1.0"
 dependencies = [
