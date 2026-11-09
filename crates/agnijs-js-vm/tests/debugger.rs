@@ -370,6 +370,106 @@ fn scripts_are_listed_with_their_source_including_those_run_before_attaching() {
     assert_eq!(eval.kind, ScriptKind::Eval);
 }
 
+// ---- fused compare-and-branch (TASK-100.18) --------------------------------------------------
+
+const FUSED: &str = "globalThis.picked = pick(1, 2);
+for (var i = 0; i < 2; i++) {
+  globalThis.picked += i;
+}
+function pick(a, b) {
+  debugger;
+  if (a < b && b < 10) {
+    return 1;
+  }
+  return 2;
+}
+";
+
+#[test]
+fn stepping_over_a_fused_condition_pauses_on_each_statement_line() {
+    // An `if` whose test is one compare-and-branch instruction, and a `for`
+    // loop whose test and update are: the statement starts and lines are
+    // those of the source, and each step lands on the next statement.
+    let (mut d, client, realm) = debuggee();
+    for _ in 0..6 {
+        client.on_pause(|_d, _p| ResumeAction::StepOver);
+    }
+    run(&mut *d, realm, "fused.js", FUSED);
+    // Stepping over `return 1` lands on the caller's next statement (the
+    // assignment on line 0 is already under way), then the loop body twice,
+    // then the script's end (the hoisted declaration's start, line 4).
+    assert_eq!(
+        client.pauses(),
+        vec![
+            ("pick".to_string(), 5, 2),
+            ("pick".to_string(), 6, 2),
+            ("pick".to_string(), 7, 4),
+            (String::new(), 1, 0),
+            (String::new(), 2, 2),
+            (String::new(), 2, 2),
+            (String::new(), 4, 0),
+        ]
+    );
+    assert_eq!(run(&mut *d, realm, "check.js", "picked"), Value::Number(2.0));
+    let script = d.scripts().iter().find(|s| s.url == "fused.js").unwrap().id;
+    let lines: Vec<u32> = d
+        .breakable_locations(Location { script, line: 0, column: 0 }, None)
+        .iter()
+        .map(|l| l.line)
+        .collect();
+    // Line 4 is the function declaration's own (hoisted) start, as for any
+    // declaration; the fused `if` and `for` tests keep lines 1, 2, 6 and 7.
+    assert_eq!(lines, vec![0, 1, 2, 4, 5, 6, 7, 9]);
+}
+
+#[test]
+fn a_breakpoint_on_a_loop_whose_test_is_fused_pauses_each_iteration_with_the_locals() {
+    let (mut d, client, realm) = debuggee();
+    d.set_breakpoint(at_line("loop.js", 2));
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    for _ in 0..3 {
+        let s = seen.clone();
+        client.on_pause(move |d, _p| {
+            s.borrow_mut().push(d.evaluate_on_frame(0, "i * 10 + s").unwrap());
+            ResumeAction::Continue
+        });
+    }
+    run(
+        &mut *d,
+        realm,
+        "loop.js",
+        "function sum(n) {\n  for (var i = 0, s = 0; i < n; i++) {\n    s += i;\n  }\n  return s;\n}\nglobalThis.total = sum(3);\n",
+    );
+    assert_eq!(
+        *seen.borrow(),
+        vec![Value::Number(0.0), Value::Number(10.0), Value::Number(21.0)]
+    );
+    assert_eq!(client.pauses().len(), 3);
+    assert_eq!(run(&mut *d, realm, "check.js", "total"), Value::Number(3.0));
+}
+
+#[test]
+fn an_exception_thrown_inside_a_fused_comparison_is_reported_at_the_comparison() {
+    let (mut d, client, realm) = debuggee();
+    d.set_pause_on_exceptions(PauseOnExceptions::All);
+    client.on_pause(|d, p| {
+        assert!(matches!(&p.reason, PauseReason::Exception { .. }));
+        // The throw is in valueOf; the frame below is paused inside the
+        // fused compare-and-branch, reported at its statement (the `if`),
+        // with its locals as they were before the comparison.
+        let caller = &p.frames[1];
+        assert_eq!(caller.function_name, "cmp");
+        assert_eq!((caller.location.line, caller.location.column), (2, 2));
+        assert_eq!(d.evaluate_on_frame(1, "s").unwrap(), Value::Number(10.0));
+        ResumeAction::Continue
+    });
+    let src = "function cmp(a, b) {\n  var s = 10;\n  if (a < b) {\n    s = 1;\n  }\n  return s;\n}\ntry { cmp({ valueOf() { throw new TypeError('bad'); } }, 2); } catch (e) {}\n";
+    run(&mut *d, realm, "cmp.js", src);
+    // The pause itself is at the `throw` statement inside the (anonymous)
+    // valueOf method.
+    assert_eq!(client.pauses(), vec![(String::new(), 7, 24)]);
+}
+
 const THROWS: &str = "function fail(msg) {
   throw new TypeError(msg);
 }

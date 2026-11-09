@@ -11,11 +11,11 @@ pub mod globals;
 pub mod ic;
 pub mod step;
 
-use crate::convert::{number_arith, number_bitwise};
+use crate::convert::{number_arith, number_binop, number_bitwise, number_compare};
 use crate::value::{EnvId, ObjId, Value};
 use crate::vm::{Fault, JsResult, Vm};
 use agnijs_engine_api::RealmId;
-use agnijs_js_compiler::bytecode::{CodeBlock, Constant, Instr};
+use agnijs_js_compiler::bytecode::{BinOp, CodeBlock, Constant, Instr};
 use std::rc::Rc;
 use step::instr_arith;
 
@@ -211,6 +211,10 @@ impl Vm {
             }
             let instr = code.instrs[pc];
             pc += 1;
+            #[cfg(feature = "instr-count")]
+            {
+                self.instr_count += 1;
+            }
             match instr {
                 // ---- loads and moves ----
                 Instr::LdaUndefined => acc = Value::Undefined,
@@ -322,6 +326,37 @@ impl Vm {
                     acc = Value::Bool(!self.strict_equals(l, acc));
                 }
                 Instr::Not => acc = Value::Bool(!self.to_boolean(acc)),
+
+                // ---- operators with named operands (TASK-100.18) ----
+                Instr::BinRR { op, a, b } => match (reg!(a), reg!(b)) {
+                    (Value::Number(x), Value::Number(y)) => match number_binop(op, x, y) {
+                        Some(v) => acc = v,
+                        None => slow!(instr),
+                    },
+                    _ => slow!(instr),
+                },
+                Instr::BinRI { op, a, imm } => match reg!(a) {
+                    Value::Number(x) => match number_binop(op, x, imm as f64) {
+                        Some(v) => acc = v,
+                        None => slow!(instr),
+                    },
+                    _ => slow!(instr),
+                },
+                Instr::BinAR { op, b } => match (acc, reg!(b)) {
+                    (Value::Number(x), Value::Number(y)) => match number_binop(op, x, y) {
+                        Some(v) => acc = v,
+                        None => slow!(instr),
+                    },
+                    _ => slow!(instr),
+                },
+                Instr::BinAI { op, imm } => match acc {
+                    Value::Number(x) => match number_binop(op, x, imm as f64) {
+                        Some(v) => acc = v,
+                        None => slow!(instr),
+                    },
+                    _ => slow!(instr),
+                },
+
                 Instr::Inc => match acc {
                     Value::Number(n) => acc = Value::Number(n + 1.0),
                     _ => slow!(instr),
@@ -386,6 +421,70 @@ impl Vm {
                     }
                 }
 
+                // ---- fused compare-and-branch (TASK-100.18) ----
+                Instr::JumpIfCmpRR { op, a, b, offset } => {
+                    let (l, r) = (reg!(a), reg!(b));
+                    match self.fast_compare(op, l, r) {
+                        Some(true) => jump!(offset),
+                        Some(false) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfNotCmpRR { op, a, b, offset } => {
+                    let (l, r) = (reg!(a), reg!(b));
+                    match self.fast_compare(op, l, r) {
+                        Some(false) => jump!(offset),
+                        Some(true) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfCmpRI { op, a, imm, offset } => {
+                    let l = reg!(a);
+                    match self.fast_compare(op, l, Value::Number(imm as f64)) {
+                        Some(true) => jump!(offset),
+                        Some(false) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfNotCmpRI { op, a, imm, offset } => {
+                    let l = reg!(a);
+                    match self.fast_compare(op, l, Value::Number(imm as f64)) {
+                        Some(false) => jump!(offset),
+                        Some(true) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfCmpRA { op, a, offset } => {
+                    let l = reg!(a);
+                    match self.fast_compare(op, l, acc) {
+                        Some(true) => jump!(offset),
+                        Some(false) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfNotCmpRA { op, a, offset } => {
+                    let l = reg!(a);
+                    match self.fast_compare(op, l, acc) {
+                        Some(false) => jump!(offset),
+                        Some(true) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfCmpAI { op, imm, offset } => {
+                    match self.fast_compare(op, acc, Value::Number(imm as f64)) {
+                        Some(true) => jump!(offset),
+                        Some(false) => {}
+                        None => slow!(instr),
+                    }
+                }
+                Instr::JumpIfNotCmpAI { op, imm, offset } => {
+                    match self.fast_compare(op, acc, Value::Number(imm as f64)) {
+                        Some(false) => jump!(offset),
+                        Some(true) => {}
+                        None => slow!(instr),
+                    }
+                }
+
                 // ---- calls and returns ----
                 Instr::Call {
                     callee,
@@ -408,6 +507,21 @@ impl Vm {
 
                 _ => slow!(instr),
             }
+        }
+    }
+
+    /// A comparison that cannot fault or allocate: two numbers under any
+    /// comparison, or any two values under `===`/`!==`. `None` sends the
+    /// fused compare-and-branch to `step` for the generic semantics.
+    #[inline]
+    fn fast_compare(&mut self, op: BinOp, l: Value, r: Value) -> Option<bool> {
+        match (l, r) {
+            (Value::Number(x), Value::Number(y)) => Some(number_compare(op, x, y)),
+            _ => match op {
+                BinOp::StrictEq => Some(self.strict_equals(l, r)),
+                BinOp::StrictNe => Some(!self.strict_equals(l, r)),
+                _ => None,
+            },
         }
     }
 

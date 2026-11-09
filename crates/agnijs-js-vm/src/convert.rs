@@ -6,6 +6,7 @@ use crate::realm::Intrinsic;
 use crate::string::{is_js_whitespace, trim_range, StrBuilder, Units};
 use crate::value::{Attrs, BigId, ObjId, PropKey, Property, StrId, Value};
 use crate::vm::{JsResult, Vm};
+use agnijs_js_compiler::bytecode::BinOp;
 use num_bigint::BigInt;
 use num_traits::{Signed, ToPrimitive, Zero};
 
@@ -785,6 +786,65 @@ pub(crate) fn number_arith(op: ArithOp, a: f64, b: f64) -> f64 {
         ArithOp::Mod => js_fmod(a, b),
         ArithOp::Exp => js_pow(a, b),
         _ => unreachable!(),
+    }
+}
+
+/// The arithmetic operator behind a `BinOp`, for `op_arith`/`op_bitwise`.
+pub(crate) fn bin_arith(op: BinOp) -> ArithOp {
+    match op {
+        BinOp::Sub => ArithOp::Sub,
+        BinOp::Mul => ArithOp::Mul,
+        BinOp::Div => ArithOp::Div,
+        BinOp::Mod => ArithOp::Mod,
+        BinOp::Exp => ArithOp::Exp,
+        BinOp::Shl => ArithOp::Shl,
+        BinOp::Shr => ArithOp::Shr,
+        BinOp::UShr => ArithOp::UShr,
+        BinOp::BitAnd => ArithOp::BitAnd,
+        BinOp::BitOr => ArithOp::BitOr,
+        BinOp::BitXor => ArithOp::BitXor,
+        other => unreachable!("{other:?} is not arithmetic"),
+    }
+}
+
+/// `a OP b` on two numbers: the Number case of every binary operator that
+/// has one (the dispatch loop's fast path for the named-operand
+/// instructions, TASK-100.18). `None` for `instanceof` and `in`, which
+/// throw on numbers and take the generic path.
+#[inline]
+pub(crate) fn number_binop(op: BinOp, a: f64, b: f64) -> Option<Value> {
+    Some(match op {
+        BinOp::Add => Value::Number(a + b),
+        BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Exp => {
+            Value::Number(number_arith(bin_arith(op), a, b))
+        }
+        BinOp::Shl | BinOp::Shr | BinOp::UShr | BinOp::BitAnd | BinOp::BitOr | BinOp::BitXor => {
+            Value::Number(number_bitwise(bin_arith(op), a, b))
+        }
+        BinOp::Eq
+        | BinOp::Ne
+        | BinOp::StrictEq
+        | BinOp::StrictNe
+        | BinOp::Lt
+        | BinOp::Le
+        | BinOp::Gt
+        | BinOp::Ge => Value::Bool(number_compare(op, a, b)),
+        BinOp::InstanceOf | BinOp::In => return None,
+    })
+}
+
+/// A comparison of two numbers (`BinOp::is_comparison`); NaN compares
+/// unequal and unordered, so the `Ne` forms are true negations.
+#[inline]
+pub(crate) fn number_compare(op: BinOp, a: f64, b: f64) -> bool {
+    match op {
+        BinOp::Eq | BinOp::StrictEq => a == b,
+        BinOp::Ne | BinOp::StrictNe => a != b,
+        BinOp::Lt => a < b,
+        BinOp::Le => a <= b,
+        BinOp::Gt => a > b,
+        BinOp::Ge => a >= b,
+        other => unreachable!("{other:?} is not a comparison"),
     }
 }
 

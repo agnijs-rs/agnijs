@@ -308,6 +308,12 @@ impl<'a> Compiler<'a> {
         }
     }
 
+    pub(crate) fn patch_all_to(&mut self, list: Vec<usize>, target: usize) {
+        for at in list {
+            self.patch_to(at, target);
+        }
+    }
+
     pub(crate) fn emit_jump_to(&mut self, target: usize) {
         let at = self.pc();
         let off = target as i64 - at as i64;
@@ -416,11 +422,14 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn emit_load_number(&mut self, n: f64) {
-        if n.fract() == 0.0 && n.abs() < 1e9 && !(n == 0.0 && n.is_sign_negative()) {
-            self.emit(Instr::LdaInt(n as i32));
-        } else {
-            let c = self.const_number(n);
-            self.emit(Instr::LdaConst(c));
+        match expr::int_immediate(n) {
+            Some(i) => {
+                self.emit(Instr::LdaInt(i));
+            }
+            None => {
+                let c = self.const_number(n);
+                self.emit(Instr::LdaConst(c));
+            }
         }
     }
 
@@ -1284,6 +1293,14 @@ pub(crate) fn with_offset(i: Instr, off: Offset) -> Instr {
         Instr::JumpIfNotEmpty(_) => Instr::JumpIfNotEmpty(off),
         Instr::JumpIfObject(_) => Instr::JumpIfObject(off),
         Instr::JumpIfStrictEq { reg, .. } => Instr::JumpIfStrictEq { reg, offset: off },
+        Instr::JumpIfCmpRR { op, a, b, .. } => Instr::JumpIfCmpRR { op, a, b, offset: off },
+        Instr::JumpIfNotCmpRR { op, a, b, .. } => Instr::JumpIfNotCmpRR { op, a, b, offset: off },
+        Instr::JumpIfCmpRI { op, a, imm, .. } => Instr::JumpIfCmpRI { op, a, imm, offset: off },
+        Instr::JumpIfNotCmpRI { op, a, imm, .. } => Instr::JumpIfNotCmpRI { op, a, imm, offset: off },
+        Instr::JumpIfCmpRA { op, a, .. } => Instr::JumpIfCmpRA { op, a, offset: off },
+        Instr::JumpIfNotCmpRA { op, a, .. } => Instr::JumpIfNotCmpRA { op, a, offset: off },
+        Instr::JumpIfCmpAI { op, imm, .. } => Instr::JumpIfCmpAI { op, imm, offset: off },
+        Instr::JumpIfNotCmpAI { op, imm, .. } => Instr::JumpIfNotCmpAI { op, imm, offset: off },
         Instr::IteratorStep { iter, next, .. } => Instr::IteratorStep {
             iter,
             next,

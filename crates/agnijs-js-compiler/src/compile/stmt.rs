@@ -387,24 +387,26 @@ impl<'a> Compiler<'a> {
                 Ok(())
             }
             Statement::Expression(e) => {
-                self.expr(&e.expression)?;
-                if let Some(cv) = self.fs_ref().completion {
-                    self.emit(Instr::Star(cv));
+                match self.fs_ref().completion {
+                    Some(cv) => {
+                        self.expr(&e.expression)?;
+                        self.emit(Instr::Star(cv));
+                    }
+                    None => self.expr_unused(&e.expression)?,
                 }
                 Ok(())
             }
             Statement::If(i) => {
                 self.set_completion_undefined();
-                self.expr(&i.test)?;
-                let jf = self.emit_jump(Instr::JumpIfFalse(0));
+                let jf = self.cond_jump(&i.test, false)?;
                 self.sub_statement(&i.consequent)?;
                 if let Some(alt) = &i.alternate {
                     let jend = self.emit_jump(Instr::Jump(0));
-                    self.patch(jf);
+                    self.patch_all(jf);
                     self.sub_statement(alt)?;
                     self.patch(jend);
                 } else {
-                    self.patch(jf);
+                    self.patch_all(jf);
                 }
                 Ok(())
             }
@@ -963,13 +965,12 @@ impl<'a> Compiler<'a> {
                     continues: Vec::new(),
                     iterator: None,
                 });
-                self.expr(&w.test)?;
-                let exit = self.emit_jump(Instr::JumpIfFalse(0));
+                let exit = self.cond_jump(&w.test, false)?;
                 self.sub_statement(&w.body)?;
                 let (breaks, continues) = self.pop_loop();
                 self.patch_all(continues);
                 self.emit_jump_to(top);
-                self.patch(exit);
+                self.patch_all(exit);
                 self.patch_all(breaks);
             }
             Statement::DoWhile(d) => {
@@ -983,9 +984,8 @@ impl<'a> Compiler<'a> {
                 self.sub_statement(&d.body)?;
                 let (breaks, continues) = self.pop_loop();
                 self.patch_all(continues);
-                self.expr(&d.test)?;
-                let back = self.emit_jump(Instr::JumpIfTrue(0));
-                self.patch_to(back, top);
+                let back = self.cond_jump(&d.test, true)?;
+                self.patch_all_to(back, top);
                 self.patch_all(breaks);
             }
             Statement::For(f) => self.for_stmt(f, labels)?,
@@ -1031,7 +1031,7 @@ impl<'a> Compiler<'a> {
             }
             Some(ForInit::VariableDeclaration(d)) => self.variable_declaration(d)?,
             Some(ForInit::Expression(e)) => {
-                self.expr(e)?;
+                self.expr_unused(e)?;
             }
             None => {}
         }
@@ -1039,10 +1039,9 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::CopyEnv);
         }
         let top = self.pc();
-        let mut exit = None;
+        let mut exit = Vec::new();
         if let Some(t) = &f.test {
-            self.expr(t)?;
-            exit = Some(self.emit_jump(Instr::JumpIfFalse(0)));
+            exit = self.cond_jump(t, false)?;
         }
         self.fs().ctl.push(Ctl::Loop {
             labels,
@@ -1057,12 +1056,10 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::CopyEnv);
         }
         if let Some(u) = &f.update {
-            self.expr(u)?;
+            self.expr_unused(u)?;
         }
         self.emit_jump_to(top);
-        if let Some(e) = exit {
-            self.patch(e);
-        }
+        self.patch_all(exit);
         self.patch_all(breaks);
         if lexical_scope {
             self.close_scope();

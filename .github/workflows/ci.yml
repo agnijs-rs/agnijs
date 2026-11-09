@@ -18,6 +18,8 @@ jobs:
           workspaces: .
       - run: cargo build --workspace --locked
       - run: cargo test --workspace --locked
+      - name: Instructions dispatched per iteration and per call on the hot workloads (TASK-100.18)
+        run: cargo test --locked -p agnijs-js-vm --features instr-count --test instr_count
       - name: Regex crate and VM RegExp tests with the linear matcher compiled out
         run: |
           cargo test --locked -p agnijs-js-regex --no-default-features

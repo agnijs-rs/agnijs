@@ -1,13 +1,14 @@
 //! One instruction at a time: the big match.
 
 use super::{Flow, RunOutcome};
-use crate::convert::Hint;
+use crate::convert::{bin_arith, Hint};
 use crate::object::{Class, FieldKey, ObjectData};
 use crate::symbol::{PrivateElement, SymbolData, SymbolKind};
 use crate::value::{Attrs, PropKey, PropSlot, Property, PropertyDescriptor, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
 use agnijs_js_compiler::bytecode::{
-    CodeBlock, Constant, ErrorKind, Instr, NamePrefix, PrivateKind, RESUME_RETURN, RESUME_THROW,
+    BinOp, CodeBlock, Constant, ErrorKind, Instr, NamePrefix, PrivateKind, RESUME_RETURN,
+    RESUME_THROW,
 };
 use std::rc::Rc;
 
@@ -677,6 +678,25 @@ impl Vm {
                 let v = self.has_property(o, pk)?;
                 set_acc!(Value::Bool(v));
             }
+            Instr::BinRR { op, a, b } => {
+                let (l, r) = (reg!(a), reg!(b));
+                let v = self.binary_op(op, l, r)?;
+                set_acc!(v);
+            }
+            Instr::BinRI { op, a, imm } => {
+                let l = reg!(a);
+                let v = self.binary_op(op, l, Value::Number(imm as f64))?;
+                set_acc!(v);
+            }
+            Instr::BinAR { op, b } => {
+                let r = reg!(b);
+                let v = self.binary_op(op, acc!(), r)?;
+                set_acc!(v);
+            }
+            Instr::BinAI { op, imm } => {
+                let v = self.binary_op(op, acc!(), Value::Number(imm as f64))?;
+                set_acc!(v);
+            }
             Instr::Neg => {
                 let v = self.to_numeric(acc!())?;
                 let r = match v {
@@ -806,6 +826,34 @@ impl Vm {
             Instr::JumpIfStrictEq { reg, offset } => {
                 let l = reg!(reg);
                 if self.strict_equals(l, acc!()) {
+                    jump!(offset);
+                }
+            }
+            Instr::JumpIfCmpRR { op, a, b, offset } | Instr::JumpIfNotCmpRR { op, a, b, offset } => {
+                let (l, r) = (reg!(a), reg!(b));
+                let taken = self.compare(op, l, r)?;
+                if taken == matches!(instr, Instr::JumpIfCmpRR { .. }) {
+                    jump!(offset);
+                }
+            }
+            Instr::JumpIfCmpRI { op, a, imm, offset }
+            | Instr::JumpIfNotCmpRI { op, a, imm, offset } => {
+                let l = reg!(a);
+                let taken = self.compare(op, l, Value::Number(imm as f64))?;
+                if taken == matches!(instr, Instr::JumpIfCmpRI { .. }) {
+                    jump!(offset);
+                }
+            }
+            Instr::JumpIfCmpRA { op, a, offset } | Instr::JumpIfNotCmpRA { op, a, offset } => {
+                let l = reg!(a);
+                let taken = self.compare(op, l, acc!())?;
+                if taken == matches!(instr, Instr::JumpIfCmpRA { .. }) {
+                    jump!(offset);
+                }
+            }
+            Instr::JumpIfCmpAI { op, imm, offset } | Instr::JumpIfNotCmpAI { op, imm, offset } => {
+                let taken = self.compare(op, acc!(), Value::Number(imm as f64))?;
+                if taken == matches!(instr, Instr::JumpIfCmpAI { .. }) {
                     jump!(offset);
                 }
             }
@@ -1675,6 +1723,63 @@ pub enum ArithOp {
     BitAnd,
     BitOr,
     BitXor,
+}
+
+impl Vm {
+    /// `l OP r` for any binary operator: the generic semantics behind the
+    /// named-operand instructions (`BinRR` and friends, TASK-100.18). The
+    /// left operand's conversions run first, as the spec orders them.
+    pub(crate) fn binary_op(&mut self, op: BinOp, l: Value, r: Value) -> JsResult<Value> {
+        Ok(match op {
+            BinOp::Add => self.op_add(l, r)?,
+            BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Mod | BinOp::Exp => {
+                self.op_arith(bin_arith(op), l, r)?
+            }
+            BinOp::Shl
+            | BinOp::Shr
+            | BinOp::UShr
+            | BinOp::BitAnd
+            | BinOp::BitOr
+            | BinOp::BitXor => self.op_bitwise(bin_arith(op), l, r)?,
+            BinOp::Eq
+            | BinOp::Ne
+            | BinOp::StrictEq
+            | BinOp::StrictNe
+            | BinOp::Lt
+            | BinOp::Le
+            | BinOp::Gt
+            | BinOp::Ge => Value::Bool(self.compare(op, l, r)?),
+            BinOp::InstanceOf => Value::Bool(self.instance_of(l, r)?),
+            BinOp::In => {
+                let Value::Object(o) = r else {
+                    return Err(self.throw_type(
+                        "Cannot use 'in' operator to search for a key in a non-object",
+                    ));
+                };
+                let pk = self.to_property_key(l)?;
+                Value::Bool(self.has_property(o, pk)?)
+            }
+        })
+    }
+
+    /// `l OP r` for a comparison operator (`BinOp::is_comparison`), as the
+    /// fused compare-and-branch instructions decide their branch. The
+    /// relational operators convert the left operand first whichever way
+    /// IsLessThan takes them (the spec's LeftFirst flag), so `acc > r` is
+    /// not `r < acc` when a conversion has effects.
+    pub(crate) fn compare(&mut self, op: BinOp, l: Value, r: Value) -> JsResult<bool> {
+        Ok(match op {
+            BinOp::Eq => self.loose_equals(l, r)?,
+            BinOp::Ne => !self.loose_equals(l, r)?,
+            BinOp::StrictEq => self.strict_equals(l, r),
+            BinOp::StrictNe => !self.strict_equals(l, r),
+            BinOp::Lt => self.op_less_than(l, r, true)? == Some(true),
+            BinOp::Gt => self.op_less_than(r, l, false)? == Some(true),
+            BinOp::Le => self.op_less_than(r, l, false)? == Some(false),
+            BinOp::Ge => self.op_less_than(l, r, true)? == Some(false),
+            other => unreachable!("{other:?} is not a comparison"),
+        })
+    }
 }
 
 pub(crate) fn instr_arith(i: Instr) -> ArithOp {

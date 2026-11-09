@@ -335,6 +335,30 @@ wire_enum!(ErrorKind {
     Range
 });
 wire_enum!(NamePrefix { None, Get, Set });
+wire_enum!(BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Exp,
+    Shl,
+    Shr,
+    UShr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    InstanceOf,
+    In
+});
 wire_enum!(PrivateKind {
     Method,
     Getter,
@@ -465,6 +489,14 @@ impl Verifier<'_> {
             invalid(format!("inline cache {i} at pc {} out of range", self.pc))
         }
     }
+    /// The operator of a fused compare-and-branch: a comparison.
+    fn cmp(&mut self, op: BinOp) -> Result<()> {
+        if op.is_comparison() {
+            Ok(())
+        } else {
+            invalid(format!("{op:?} at pc {} is not a comparison", self.pc))
+        }
+    }
     fn off(&mut self, o: Offset) -> Result<()> {
         let target = self.pc as i64 + o as i64;
         if target >= 0 && (target as usize) < self.len {
@@ -588,6 +620,10 @@ instr_table! {
     Shl(a: reg); Shr(a: reg); UShr(a: reg); BitAnd(a: reg); BitOr(a: reg); BitXor(a: reg);
     Eq(a: reg); Ne(a: reg); StrictEq(a: reg); StrictNe(a: reg);
     Lt(a: reg); Le(a: reg); Gt(a: reg); Ge(a: reg); InstanceOf(a: reg); In(a: reg);
+    BinRR { op: raw, a: reg, b: reg };
+    BinRI { op: raw, a: reg, imm: raw };
+    BinAR { op: raw, b: reg };
+    BinAI { op: raw, imm: raw };
     Neg; Pos; Not; BitNot; Typeof; ToNumeric; Inc; Dec; ToString; ToPropertyKey;
     RequireObjectCoercible;
     Jump(a: off); JumpIfTrue(a: off); JumpIfFalse(a: off);
@@ -595,6 +631,14 @@ instr_table! {
     JumpIfUndefined(a: off); JumpIfNotUndefined(a: off);
     JumpIfEmpty(a: off); JumpIfNotEmpty(a: off); JumpIfObject(a: off);
     JumpIfStrictEq { reg: reg, offset: off };
+    JumpIfCmpRR { op: cmp, a: reg, b: reg, offset: off };
+    JumpIfNotCmpRR { op: cmp, a: reg, b: reg, offset: off };
+    JumpIfCmpRI { op: cmp, a: reg, imm: raw, offset: off };
+    JumpIfNotCmpRI { op: cmp, a: reg, imm: raw, offset: off };
+    JumpIfCmpRA { op: cmp, a: reg, offset: off };
+    JumpIfNotCmpRA { op: cmp, a: reg, offset: off };
+    JumpIfCmpAI { op: cmp, imm: raw, offset: off };
+    JumpIfNotCmpAI { op: cmp, imm: raw, offset: off };
     Call { callee: reg, this: reg, args: raw, argc: raw };
     CallSpread { callee: reg, this: reg, args: reg };
     CallEval { callee: reg, this: reg, args: raw, argc: raw, strict: raw };

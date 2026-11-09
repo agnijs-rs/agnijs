@@ -60,6 +60,53 @@ pub enum PrivateKind {
     Setter,
 }
 
+/// A binary operator, for the instructions that name their operands
+/// (`BinRR` and friends, TASK-100.18) rather than encode the operator in
+/// the opcode. The bytecode owns this list: it is not the parser's
+/// `BinaryOp`, so the wire encoding does not follow the AST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Exp,
+    Shl,
+    Shr,
+    UShr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Eq,
+    Ne,
+    StrictEq,
+    StrictNe,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    InstanceOf,
+    In,
+}
+
+impl BinOp {
+    /// The operators the fused compare-and-branch instructions accept.
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            BinOp::Eq
+                | BinOp::Ne
+                | BinOp::StrictEq
+                | BinOp::StrictNe
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+        )
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Instr {
     // ---- loads and moves -------------------------------------------------
@@ -314,6 +361,34 @@ pub enum Instr {
     InstanceOf(Reg),
     /// acc = reg in acc
     In(Reg),
+    // ---- operators with named operands (TASK-100.18) ----------------------
+    // The left operand is always the first named; an integer immediate
+    // only ever stands on the right, so `7 + x` keeps its string semantics
+    // and ToPrimitive order. Each reads its operands, performs every
+    // observable effect (ToPrimitive, valueOf) and then writes acc once
+    // (ADR 0019 J3).
+    /// acc = a OP b
+    BinRR {
+        op: BinOp,
+        a: Reg,
+        b: Reg,
+    },
+    /// acc = a OP imm
+    BinRI {
+        op: BinOp,
+        a: Reg,
+        imm: i32,
+    },
+    /// acc = acc OP b
+    BinAR {
+        op: BinOp,
+        b: Reg,
+    },
+    /// acc = acc OP imm
+    BinAI {
+        op: BinOp,
+        imm: i32,
+    },
     // ---- unary (on acc) --------------------------------------------------
     Neg,
     Pos,
@@ -342,6 +417,64 @@ pub enum Instr {
     /// Jump if the register holds a value strictly equal to acc.
     JumpIfStrictEq {
         reg: Reg,
+        offset: Offset,
+    },
+    // ---- fused compare-and-branch (TASK-100.18) ---------------------------
+    // `op` is a comparison (`BinOp::is_comparison`). The `Not` forms branch
+    // when the comparison is false, which is not the opposite comparison:
+    // `JumpIfNotCmp Lt` jumps on NaN where `JumpIfCmp Ge` would not. The
+    // comparison's effects (ToPrimitive on both sides) all happen before
+    // the single branch; acc is left as it was (J3).
+    /// Jump if a OP b.
+    JumpIfCmpRR {
+        op: BinOp,
+        a: Reg,
+        b: Reg,
+        offset: Offset,
+    },
+    /// Jump unless a OP b.
+    JumpIfNotCmpRR {
+        op: BinOp,
+        a: Reg,
+        b: Reg,
+        offset: Offset,
+    },
+    /// Jump if a OP imm.
+    JumpIfCmpRI {
+        op: BinOp,
+        a: Reg,
+        imm: i32,
+        offset: Offset,
+    },
+    /// Jump unless a OP imm.
+    JumpIfNotCmpRI {
+        op: BinOp,
+        a: Reg,
+        imm: i32,
+        offset: Offset,
+    },
+    /// Jump if a OP acc.
+    JumpIfCmpRA {
+        op: BinOp,
+        a: Reg,
+        offset: Offset,
+    },
+    /// Jump unless a OP acc.
+    JumpIfNotCmpRA {
+        op: BinOp,
+        a: Reg,
+        offset: Offset,
+    },
+    /// Jump if acc OP imm.
+    JumpIfCmpAI {
+        op: BinOp,
+        imm: i32,
+        offset: Offset,
+    },
+    /// Jump unless acc OP imm.
+    JumpIfNotCmpAI {
+        op: BinOp,
+        imm: i32,
         offset: Offset,
     },
 

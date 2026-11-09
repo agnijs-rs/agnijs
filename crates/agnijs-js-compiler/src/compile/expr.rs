@@ -96,16 +96,15 @@ impl<'a> Compiler<'a> {
                 self.class(c, hint)?;
             }
             Expression::Unary(u) => self.unary(u)?,
-            Expression::Update(u) => self.update(u)?,
+            Expression::Update(u) => self.update(u, true)?,
             Expression::Binary(b) => self.binary(b)?,
             Expression::Logical(l) => self.logical(l)?,
             Expression::Assignment(a) => self.assignment(a)?,
             Expression::Conditional(c) => {
-                self.expr(&c.test)?;
-                let jf = self.emit_jump(Instr::JumpIfFalse(0));
+                let jf = self.cond_jump(&c.test, false)?;
                 self.expr_named(&c.consequent, hint)?;
                 let jend = self.emit_jump(Instr::Jump(0));
-                self.patch(jf);
+                self.patch_all(jf);
                 self.expr_named(&c.alternate, hint)?;
                 self.patch(jend);
             }
@@ -121,7 +120,7 @@ impl<'a> Compiler<'a> {
                         // definition: `(0, function(){})` stays nameless.
                         self.expr(x)?;
                     } else {
-                        self.expr(x)?;
+                        self.expr_unused(x)?;
                     }
                 }
             }
@@ -225,7 +224,8 @@ impl<'a> Compiler<'a> {
 
     fn tagged_template(&mut self, t: &TaggedTemplate) -> CResult<()> {
         let mark = self.mark();
-        let (callee, this) = self.callee_and_this(&t.tag)?;
+        let args_write = t.quasi.expressions.iter().any(may_write_locals);
+        let (callee, this) = self.callee_and_this(&t.tag, args_write)?;
         let argc = (t.quasi.expressions.len() + 1) as u16;
         let args = self.alloc_n(argc);
         let tmpl = self.template_object(&t.quasi);
@@ -481,22 +481,46 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn update(&mut self, u: &UpdateExpression) -> CResult<()> {
+    /// Evaluate `e` for its effects; acc is unspecified afterwards. An
+    /// update whose value nobody reads (`i++;`, a `for` update) skips the
+    /// ToNumeric and the copy of the old value (TASK-100.18).
+    pub(crate) fn expr_unused(&mut self, e: &Expression) -> CResult<()> {
+        match e {
+            Expression::Paren(inner, _) => self.expr_unused(inner),
+            Expression::Update(u) => {
+                self.set_pos(u.span);
+                self.update(u, false)
+            }
+            Expression::Sequence(s) => {
+                for x in &s.expressions {
+                    self.expr_unused(x)?;
+                }
+                Ok(())
+            }
+            _ => self.expr(e),
+        }
+    }
+
+    /// `used`: the expression's value is read. Only a postfix update whose
+    /// old value is used needs the ToNumeric: Inc and Dec convert their
+    /// operand themselves.
+    fn update(&mut self, u: &UpdateExpression, used: bool) -> CResult<()> {
         let mark = self.mark();
         let op = if u.increment { Instr::Inc } else { Instr::Dec };
+        let keep_old = used && !u.prefix;
         match u.argument.unparen() {
             Expression::Ident(id) => {
                 let r = self.dynamic_ref(&id.name);
                 self.emit_load_ref(&id.name, id.span, r);
                 self.set_pos(u.span);
-                self.emit(Instr::ToNumeric);
                 let old = self.alloc();
-                if !u.prefix {
+                if keep_old {
+                    self.emit(Instr::ToNumeric);
                     self.emit(Instr::Star(old));
                 }
                 self.emit(op);
                 self.emit_store_ref(&id.name, id.span, r);
-                if !u.prefix {
+                if keep_old {
                     self.emit(Instr::Ldar(old));
                 }
             }
@@ -505,14 +529,14 @@ impl<'a> Compiler<'a> {
                 self.emit_member_key_once(&r);
                 self.emit_member_get(&r);
                 self.set_pos(u.span);
-                self.emit(Instr::ToNumeric);
                 let old = self.alloc();
-                if !u.prefix {
+                if keep_old {
+                    self.emit(Instr::ToNumeric);
                     self.emit(Instr::Star(old));
                 }
                 self.emit(op);
                 self.emit_member_set(&r);
-                if !u.prefix {
+                if keep_old {
                     self.emit(Instr::Ldar(old));
                 }
             }
@@ -528,14 +552,188 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    /// An operand a named-operand instruction reads in place: an
+    /// initialised binding held in a register of this function, or an
+    /// integer literal that `LdaInt` would load (TASK-100.18).
+    pub(crate) fn direct_operand(&self, e: &Expression) -> Option<Operand> {
+        match e {
+            Expression::Paren(inner, _) => self.direct_operand(inner),
+            Expression::Ident(id) => match self.resolve(&id.name) {
+                Resolved::Reg {
+                    reg,
+                    check_tdz: false,
+                    ..
+                } => Some(Operand::Reg(reg)),
+                _ => None,
+            },
+            Expression::Number(n, _) => int_immediate(*n).map(Operand::Imm),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn direct_reg(&self, e: &Expression) -> Option<Reg> {
+        match self.direct_operand(e) {
+            Some(Operand::Reg(r)) => Some(r),
+            _ => None,
+        }
+    }
+
+    /// `left OP right` with the operands read in place where the spec's
+    /// evaluation order allows. The left operand is evaluated first, so a
+    /// register on the left is read in place only when the right operand
+    /// cannot assign to it; a register on the right is always read after
+    /// the left operand has been evaluated, as the spec orders it. An
+    /// integer literal is an immediate only on the right (`7 + x` is string
+    /// concatenation when x is a string, so the left operand is loaded).
     fn binary(&mut self, b: &BinaryExpression) -> CResult<()> {
         let mark = self.mark();
-        let l = self.expr_to_reg(&b.left)?;
-        self.expr(&b.right)?;
-        self.set_pos(b.span);
-        self.emit(binary_instr(b.op, l));
+        let op = bin_op(b.op);
+        let left = self.direct_operand(&b.left);
+        let right = self.direct_operand(&b.right);
+        match (left, right) {
+            (Some(Operand::Reg(a)), Some(Operand::Reg(rb))) => {
+                self.set_pos(b.span);
+                self.emit(Instr::BinRR { op, a, b: rb });
+            }
+            (Some(Operand::Reg(a)), Some(Operand::Imm(imm))) => {
+                self.set_pos(b.span);
+                self.emit(Instr::BinRI { op, a, imm });
+            }
+            (Some(Operand::Reg(a)), None) if !may_write_locals(&b.right) => {
+                self.expr(&b.right)?;
+                self.set_pos(b.span);
+                self.emit(binary_instr(b.op, a));
+            }
+            (_, Some(Operand::Reg(rb))) => {
+                self.expr(&b.left)?;
+                self.set_pos(b.span);
+                self.emit(Instr::BinAR { op, b: rb });
+            }
+            (_, Some(Operand::Imm(imm))) => {
+                self.expr(&b.left)?;
+                self.set_pos(b.span);
+                self.emit(Instr::BinAI { op, imm });
+            }
+            _ => {
+                let l = self.expr_to_reg(&b.left)?;
+                self.expr(&b.right)?;
+                self.set_pos(b.span);
+                self.emit(binary_instr(b.op, l));
+            }
+        }
         self.free_to(mark);
         Ok(())
+    }
+
+    /// Branch on a condition: emit a jump taken when `e` evaluates to
+    /// `when`, falling through otherwise, and return the jumps to patch to
+    /// the taken target. A comparison becomes one fused compare-and-branch
+    /// (TASK-100.18); `!`, `&&` and `||` branch directly instead of
+    /// producing a boolean in acc.
+    pub(crate) fn cond_jump(&mut self, e: &Expression, when: bool) -> CResult<Vec<usize>> {
+        match e {
+            Expression::Paren(inner, _) => return self.cond_jump(inner, when),
+            Expression::Unary(u) if u.op == UnaryOp::Not => {
+                return self.cond_jump(&u.argument, !when)
+            }
+            Expression::Logical(l) if l.op != LogicalOp::Nullish => {
+                let or = l.op == LogicalOp::Or;
+                if or == when {
+                    // `a || b` branching when true, `a && b` when false:
+                    // either operand alone decides.
+                    let mut jumps = self.cond_jump(&l.left, when)?;
+                    jumps.extend(self.cond_jump(&l.right, when)?);
+                    return Ok(jumps);
+                }
+                // `a || b` branching when false (`a && b` when true): a
+                // decisive left operand skips the right one and falls
+                // through.
+                let skip = self.cond_jump(&l.left, !when)?;
+                let jumps = self.cond_jump(&l.right, when)?;
+                self.patch_all(skip);
+                return Ok(jumps);
+            }
+            Expression::Binary(b) => {
+                if let Some(op) = cmp_op(b.op) {
+                    let j = self.fused_cmp_jump(b, op, when)?;
+                    return Ok(vec![j]);
+                }
+            }
+            _ => {}
+        }
+        self.expr(e)?;
+        let j = self.emit_jump(if when {
+            Instr::JumpIfTrue(0)
+        } else {
+            Instr::JumpIfFalse(0)
+        });
+        Ok(vec![j])
+    }
+
+    /// One compare-and-branch for `b`, with the operand rules of `binary`.
+    /// The general case spills the left operand to a register and compares
+    /// it with acc, one instruction fewer than compare, store and branch.
+    fn fused_cmp_jump(&mut self, b: &BinaryExpression, op: BinOp, when: bool) -> CResult<usize> {
+        let mark = self.mark();
+        let left = self.direct_operand(&b.left);
+        let right = self.direct_operand(&b.right);
+        let instr = match (left, right) {
+            (Some(Operand::Reg(a)), Some(Operand::Reg(rb))) => {
+                if when {
+                    Instr::JumpIfCmpRR { op, a, b: rb, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpRR { op, a, b: rb, offset: 0 }
+                }
+            }
+            (Some(Operand::Reg(a)), Some(Operand::Imm(imm))) => {
+                if when {
+                    Instr::JumpIfCmpRI { op, a, imm, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpRI { op, a, imm, offset: 0 }
+                }
+            }
+            (Some(Operand::Reg(a)), None) if !may_write_locals(&b.right) => {
+                self.expr(&b.right)?;
+                if when {
+                    Instr::JumpIfCmpRA { op, a, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpRA { op, a, offset: 0 }
+                }
+            }
+            (_, Some(Operand::Imm(imm))) => {
+                self.expr(&b.left)?;
+                if when {
+                    Instr::JumpIfCmpAI { op, imm, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpAI { op, imm, offset: 0 }
+                }
+            }
+            (_, Some(Operand::Reg(rb)))
+                if matches!(op, BinOp::Eq | BinOp::Ne | BinOp::StrictEq | BinOp::StrictNe) =>
+            {
+                // Equality converts at most one operand, so `acc == r` and
+                // `r == acc` run the same effects in the same order.
+                self.expr(&b.left)?;
+                if when {
+                    Instr::JumpIfCmpRA { op, a: rb, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpRA { op, a: rb, offset: 0 }
+                }
+            }
+            _ => {
+                let a = self.expr_to_reg(&b.left)?;
+                self.expr(&b.right)?;
+                if when {
+                    Instr::JumpIfCmpRA { op, a, offset: 0 }
+                } else {
+                    Instr::JumpIfNotCmpRA { op, a, offset: 0 }
+                }
+            }
+        };
+        self.set_pos(b.span);
+        let j = self.emit_jump(instr);
+        self.free_to(mark);
+        Ok(j)
     }
 
     fn logical(&mut self, l: &LogicalExpression) -> CResult<()> {
@@ -553,8 +751,22 @@ impl<'a> Compiler<'a> {
     // ---- member references -------------------------------------------
 
     /// Evaluate the object (and key) of a member expression into registers
-    /// without reading the property.
+    /// without reading the property. The registers are fresh copies, so a
+    /// caller may overwrite them (`emit_member_key_once`).
     pub(crate) fn member_ref(&mut self, m: &MemberExpression) -> CResult<MemberRef> {
+        self.member_ref_in(m, true)
+    }
+
+    /// `member_ref` for a reference that is only read: a register-resident
+    /// object or key is addressed in place instead of being copied, unless
+    /// `later_writes` (code emitted between this reference and its last
+    /// use, such as a right-hand side or call arguments, could assign to a
+    /// register binding) or the computed key itself could.
+    pub(crate) fn member_ref_in(
+        &mut self,
+        m: &MemberExpression,
+        later_writes: bool,
+    ) -> CResult<MemberRef> {
         if matches!(m.object.unparen(), Expression::Super(_)) {
             let this = self.alloc();
             self.emit_load_this(m.span);
@@ -578,7 +790,14 @@ impl<'a> Compiler<'a> {
             self.emit(Instr::Star(key));
             return Ok(MemberRef::Super { this, func, key });
         }
-        let obj = self.expr_to_reg(&m.object)?;
+        let key_writes = match &m.property {
+            MemberProperty::Computed(c) => may_write_locals(c),
+            _ => false,
+        };
+        let obj = match self.direct_reg(&m.object) {
+            Some(r) if !later_writes && !key_writes => r,
+            _ => self.expr_to_reg(&m.object)?,
+        };
         if m.optional {
             self.emit(Instr::Ldar(obj));
             self.optional_exit();
@@ -589,7 +808,10 @@ impl<'a> Compiler<'a> {
                 MemberRef::Named { obj, name }
             }
             MemberProperty::Computed(c) => {
-                let key = self.expr_to_reg(c)?;
+                let key = match self.direct_reg(c) {
+                    Some(r) if !later_writes => r,
+                    _ => self.expr_to_reg(c)?,
+                };
                 MemberRef::Keyed { obj, key }
             }
             MemberProperty::Private(p) => {
@@ -705,7 +927,7 @@ impl<'a> Compiler<'a> {
 
     fn member(&mut self, m: &MemberExpression) -> CResult<()> {
         let mark = self.mark();
-        let r = self.member_ref(m)?;
+        let r = self.member_ref_in(m, false)?;
         self.set_pos(m.span);
         self.emit_member_get(&r);
         self.free_to(mark);
@@ -753,10 +975,13 @@ impl<'a> Compiler<'a> {
     // ---- calls -----------------------------------------------------------
 
     /// Evaluate a callee into (callee, this) registers.
-    fn callee_and_this(&mut self, callee: &Expression) -> CResult<(Reg, Reg)> {
+    /// `args_write`: evaluating the arguments could assign to a register
+    /// binding, so the callee and `this` must be copied rather than read
+    /// in place at the call.
+    fn callee_and_this(&mut self, callee: &Expression, args_write: bool) -> CResult<(Reg, Reg)> {
         match callee.unparen() {
             Expression::Member(m) if !matches!(callee, Expression::Paren(..)) || true => {
-                let r = self.member_ref(m)?;
+                let r = self.member_ref_in(m, args_write)?;
                 let this = match &r {
                     MemberRef::Named { obj, .. }
                     | MemberRef::Keyed { obj, .. }
@@ -799,6 +1024,14 @@ impl<'a> Compiler<'a> {
                 Ok((f, this))
             }
             Expression::Ident(id) => {
+                if !args_write {
+                    if let Some(f) = self.direct_reg(callee.unparen()) {
+                        let this = self.alloc();
+                        self.emit(Instr::LdaUndefined);
+                        self.emit(Instr::Star(this));
+                        return Ok((f, this));
+                    }
+                }
                 let f = self.alloc();
                 let this = self.alloc();
                 match self.resolve(&id.name) {
@@ -841,8 +1074,17 @@ impl<'a> Compiler<'a> {
             let argc = args.len() as u16;
             let base = self.alloc_n(argc);
             for (i, a) in args.iter().enumerate() {
-                self.expr(a)?;
-                self.emit(Instr::Star(base + i as u16));
+                let dst = base + i as u16;
+                match self.direct_reg(a) {
+                    Some(src) => {
+                        self.set_pos(a.span());
+                        self.emit(Instr::Mov { dst, src });
+                    }
+                    None => {
+                        self.expr(a)?;
+                        self.emit(Instr::Star(dst));
+                    }
+                }
             }
             return Ok(Ok((base, argc)));
         }
@@ -914,7 +1156,8 @@ impl<'a> Compiler<'a> {
         }
         let is_direct_eval =
             !c.optional && matches!(&c.callee, Expression::Ident(id) if &*id.name == "eval");
-        let (callee, this) = self.callee_and_this(&c.callee)?;
+        let args_write = c.arguments.iter().any(may_write_locals);
+        let (callee, this) = self.callee_and_this(&c.callee, args_write)?;
         if c.optional {
             self.emit(Instr::Ldar(callee));
             self.optional_exit();
@@ -982,7 +1225,7 @@ impl<'a> Compiler<'a> {
                 }
                 Pattern::Expression(e) => match e.unparen() {
                     Expression::Member(m) => {
-                        let r = self.member_ref(m)?;
+                        let r = self.member_ref_in(m, may_write_locals(&a.right))?;
                         self.expr(&a.right)?;
                         self.set_pos(a.span);
                         self.emit_member_set(&r);
@@ -1295,6 +1538,109 @@ impl<'a> Compiler<'a> {
         self.free_to(mark);
         Ok(())
     }
+}
+
+/// An operand read in place by a named-operand instruction.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Operand {
+    Reg(Reg),
+    Imm(i32),
+}
+
+/// The integer `LdaInt` loads for a numeric literal, when it fits: an
+/// integral value below 1e9 in magnitude other than -0.
+pub(crate) fn int_immediate(n: f64) -> Option<i32> {
+    if n.fract() == 0.0 && n.abs() < 1e9 && !(n == 0.0 && n.is_sign_negative()) {
+        Some(n as i32)
+    } else {
+        None
+    }
+}
+
+/// Whether evaluating `e` could assign to a binding held in a register of
+/// the current function. Only an assignment or update in this function's
+/// own code can: a function expression's body is its own code block and
+/// reaches captured bindings through environments, and a direct `eval`
+/// makes every binding dynamic. A class expression's computed keys and
+/// heritage run in this function's code, so a class is assumed to write.
+/// The walk covers the expression shapes that appear as operands; anything
+/// else is assumed to write.
+pub(crate) fn may_write_locals(e: &Expression) -> bool {
+    match e {
+        Expression::Ident(_)
+        | Expression::This(_)
+        | Expression::Super(_)
+        | Expression::Null(_)
+        | Expression::Bool(..)
+        | Expression::Number(..)
+        | Expression::BigInt(..)
+        | Expression::String(_)
+        | Expression::RegExp(_)
+        | Expression::Function(_)
+        | Expression::Arrow(_)
+        | Expression::MetaProperty(_) => false,
+        Expression::Paren(inner, _) | Expression::OptionalChain(inner, _) => {
+            may_write_locals(inner)
+        }
+        Expression::Unary(u) => may_write_locals(&u.argument),
+        Expression::Binary(b) => may_write_locals(&b.left) || may_write_locals(&b.right),
+        Expression::Logical(l) => may_write_locals(&l.left) || may_write_locals(&l.right),
+        Expression::Conditional(c) => {
+            may_write_locals(&c.test)
+                || may_write_locals(&c.consequent)
+                || may_write_locals(&c.alternate)
+        }
+        Expression::Member(m) => {
+            may_write_locals(&m.object)
+                || matches!(&m.property, MemberProperty::Computed(c) if may_write_locals(c))
+        }
+        Expression::Call(c) => {
+            may_write_locals(&c.callee) || c.arguments.iter().any(may_write_locals)
+        }
+        Expression::New(n) => may_write_locals(&n.callee) || n.arguments.iter().any(may_write_locals),
+        Expression::Template(t) => t.expressions.iter().any(may_write_locals),
+        Expression::Array(a) => a.elements.iter().flatten().any(may_write_locals),
+        Expression::Spread(s) => may_write_locals(&s.argument),
+        Expression::Sequence(s) => s.expressions.iter().any(may_write_locals),
+        Expression::PrivateIn(p) => may_write_locals(&p.right),
+        Expression::Assignment(_) | Expression::Update(_) => true,
+        _ => true,
+    }
+}
+
+/// The bytecode operator for a parser operator.
+pub(crate) fn bin_op(op: BinaryOp) -> BinOp {
+    match op {
+        BinaryOp::EqEq => BinOp::Eq,
+        BinaryOp::NotEq => BinOp::Ne,
+        BinaryOp::EqEqEq => BinOp::StrictEq,
+        BinaryOp::NotEqEq => BinOp::StrictNe,
+        BinaryOp::Lt => BinOp::Lt,
+        BinaryOp::LtEq => BinOp::Le,
+        BinaryOp::Gt => BinOp::Gt,
+        BinaryOp::GtEq => BinOp::Ge,
+        BinaryOp::Shl => BinOp::Shl,
+        BinaryOp::Shr => BinOp::Shr,
+        BinaryOp::UShr => BinOp::UShr,
+        BinaryOp::Add => BinOp::Add,
+        BinaryOp::Sub => BinOp::Sub,
+        BinaryOp::Mul => BinOp::Mul,
+        BinaryOp::Div => BinOp::Div,
+        BinaryOp::Mod => BinOp::Mod,
+        BinaryOp::Exp => BinOp::Exp,
+        BinaryOp::BitOr => BinOp::BitOr,
+        BinaryOp::BitXor => BinOp::BitXor,
+        BinaryOp::BitAnd => BinOp::BitAnd,
+        BinaryOp::In => BinOp::In,
+        BinaryOp::Instanceof => BinOp::InstanceOf,
+    }
+}
+
+/// The operator of a comparison that the fused compare-and-branch
+/// instructions accept.
+fn cmp_op(op: BinaryOp) -> Option<BinOp> {
+    let op = bin_op(op);
+    op.is_comparison().then_some(op)
 }
 
 pub(crate) fn binary_instr(op: BinaryOp, l: Reg) -> Instr {

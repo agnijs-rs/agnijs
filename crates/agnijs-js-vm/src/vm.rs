@@ -352,6 +352,9 @@ pub struct Vm {
     pub(crate) debug: Option<Box<crate::debug::DebugState>>,
     /// Tested on the dispatch loop's slow path: a client is attached.
     pub(crate) debug_hot: bool,
+    /// Instructions dispatched by `Vm::run` (feature `instr-count`).
+    #[cfg(feature = "instr-count")]
+    pub instr_count: u64,
 }
 
 impl Vm {
@@ -402,6 +405,8 @@ impl Vm {
             gc_requested: false,
             debug: None,
             debug_hot: false,
+            #[cfg(feature = "instr-count")]
+            instr_count: 0,
         };
         let main = vm.create_realm();
         vm.current_realm = main;

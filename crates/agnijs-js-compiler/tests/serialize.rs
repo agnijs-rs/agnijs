@@ -2,7 +2,9 @@
 //! unchanged, and bad input is refused with an error instead of a panic.
 
 use agnijs_js_compiler::serialize::{decode, encode, DecodeError};
-use agnijs_js_compiler::{compile_module, compile_script, CodeBlock, DebugInfo, DebugSection, Instr};
+use agnijs_js_compiler::{
+    compile_module, compile_script, BinOp, CodeBlock, DebugInfo, DebugSection, Instr,
+};
 use std::rc::Rc;
 
 /// The compiler's own output, printed in full, is the reference: a decoded
@@ -38,6 +40,83 @@ eval('1');
 fn a_script_with_every_kind_of_function_round_trips() {
     let code = compile_script(SCRIPT, "all.js").unwrap();
     assert_round_trips(&code);
+}
+
+#[test]
+fn named_operand_and_fused_branch_instructions_round_trip_and_are_verified() {
+    // TASK-100.18: every operand form and both branch polarities.
+    let src = "function f(a, b, o) {
+        var s = a * b + (a - 1) + (o.x * 2) + (3 * a);
+        if (a < b && !(a >= 7) || o.x > 1) s = s % 1000003;
+        while (b > a) { b--; }
+        do { a++; } while (a <= 5);
+        do { b++; } while (o.x < 3);
+        do { s--; } while (s < b);
+        do { s--; } while (a < o.x);
+        for (var i = 0; i < b; i++) { s = s + i; }
+        return a == b ? s : a === o.x ? -s : 0;
+    }";
+    let code = compile_script(src, "ops.js").unwrap();
+    let f = &code.functions[0];
+    let shapes: [(&str, fn(&Instr) -> bool); 12] = [
+        ("BinRR", |i| matches!(i, Instr::BinRR { .. })),
+        ("BinRI", |i| matches!(i, Instr::BinRI { .. })),
+        ("BinAR", |i| matches!(i, Instr::BinAR { .. })),
+        ("BinAI", |i| matches!(i, Instr::BinAI { .. })),
+        ("JumpIfCmpRR", |i| matches!(i, Instr::JumpIfCmpRR { .. })),
+        ("JumpIfNotCmpRR", |i| matches!(i, Instr::JumpIfNotCmpRR { .. })),
+        ("JumpIfCmpRI", |i| matches!(i, Instr::JumpIfCmpRI { .. })),
+        ("JumpIfNotCmpRI", |i| matches!(i, Instr::JumpIfNotCmpRI { .. })),
+        ("JumpIfCmpRA", |i| matches!(i, Instr::JumpIfCmpRA { .. })),
+        ("JumpIfNotCmpRA", |i| matches!(i, Instr::JumpIfNotCmpRA { .. })),
+        ("JumpIfCmpAI", |i| matches!(i, Instr::JumpIfCmpAI { .. })),
+        ("JumpIfNotCmpAI", |i| matches!(i, Instr::JumpIfNotCmpAI { .. })),
+    ];
+    for (name, shape) in shapes {
+        assert!(f.instrs.iter().any(shape), "no {name} in {:#?}", f.instrs);
+    }
+    assert_round_trips(&code);
+
+    // A fused branch names a comparison; an arithmetic operator there is
+    // refused, as are registers and jump targets outside the block.
+    let cases: [(fn(&mut Instr), &str); 3] = [
+        (
+            |i| {
+                if let Instr::JumpIfNotCmpRR { op, .. } = i {
+                    *op = BinOp::Add
+                }
+            },
+            "comparison",
+        ),
+        (
+            |i| {
+                if let Instr::BinRI { a, .. } = i {
+                    *a = 999
+                }
+            },
+            "register",
+        ),
+        (
+            |i| {
+                if let Instr::JumpIfCmpAI { offset, .. } = i {
+                    *offset = 10_000
+                }
+            },
+            "jump",
+        ),
+    ];
+    for (tamper, what) in cases {
+        let code = compile_script(src, "ops.js").unwrap();
+        let mut owned = Rc::try_unwrap(code).expect("sole owner");
+        let f = Rc::get_mut(&mut owned.functions[0]).expect("sole owner");
+        let before = f.instrs.clone();
+        f.instrs.iter_mut().for_each(tamper);
+        assert_ne!(before, f.instrs, "{what}: nothing was tampered");
+        match decode(&encode(&owned)) {
+            Err(DecodeError::Invalid(m)) => assert!(m.contains(what), "{m}"),
+            other => panic!("expected a verification error for {what}, got {other:?}"),
+        }
+    }
 }
 
 #[test]
