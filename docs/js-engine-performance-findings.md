@@ -362,6 +362,18 @@ Fix: decode with known capacities, decode debug info lazily on first debugger or
 
 **Effort M, risk low**: test262 covers these built-ins well. TASK-100.29.
 
+**Done (TASK-100.29).** The built-ins copied strings to UTF-16, built intermediate `Vec`s, formatted with `format!` and materialised a match array per `exec`. Now:
+
+- Strings are built in a one-byte or two-byte `StrBuilder` that widens on demand, and slices, split parts, trims and captures are substrings of the original.
+- Searching compares one-byte and two-byte units in place. Case mapping has an ASCII and a Latin-1 path and returns the receiver when nothing changes.
+- The regex cache is a hash table keyed by the pattern's units, so a hit allocates nothing. Two-byte input is matched in place and short one-byte input is widened into a reused buffer.
+- `@@match`, `@@replace`, `@@search` and `@@split` call the built-in `exec` without building its result array when `exec` is unmodified. A `$` template is expanded straight into the output.
+- JSON parses the source in its own width without copying it, stringifies into one builder, and formats numbers into a stack buffer.
+
+regex went from 291.3 to 155.9 ms (1.87x), string-methods from 56.5 to 32.1 ms (1.76x), json-parse from 113.3 to 44.5 ms (2.55x) and json-stringify from 175.7 to 47.0 ms (3.74x). No other micro or Gable benchmark got more than about 3% slower; ui-bundle-startup got 5% faster. Allocations per call: `exec` with two captures went from 13 to 7, a global `replace` from 85 to 22, `JSON.parse` of a small document from 34 to 8, and `JSON.stringify` from 50 to 9 (`crates/agnijs-js-bench/tests/builtin_allocs.rs`).
+
+Splitting by a regex still costs about 155 allocations for 3 parts, because regress sets up again at each position; a sticky-free scan is a follow-up. The rewrite also fixed a panic: `/(?:)/gu` with `lastIndex` inside a surrogate pair sliced backwards.
+
 **g. A failed anchored regex scans the whole input.**
 
 ```js
