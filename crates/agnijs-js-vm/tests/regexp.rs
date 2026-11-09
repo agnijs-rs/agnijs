@@ -74,6 +74,43 @@ impl agnijs_engine_api::Host for BacktrackingHost {
     }
 }
 
+/// A host that sends every eligible pattern to the linear-time matcher.
+struct LinearHost;
+
+impl agnijs_engine_api::Host for LinearHost {
+    fn regex_matcher(&self) -> agnijs_engine_api::RegexMatcher {
+        agnijs_engine_api::RegexMatcher::LinearWhenEligible
+    }
+}
+
+#[test]
+fn the_former_regress_divergences_hold_under_every_matcher_policy() {
+    // TASK-105 (escaped surrogate pairs outside u mode are two units),
+    // TASK-106 (\u{2} outside u mode is `u` twice), TASK-107 (\b under ui
+    // and vi uses folded word characters), TASK-108 (an empty loop
+    // iteration inside a counted loop finishes).
+    let src = r"[
+        /😀/.test('😀'),
+        /\uD83Db?/.exec('a😀').index,
+        /^\u{2}$/.test('uu'),
+        /a\b/ui.test('aſ'),
+        /a\b/vi.test('aſ'),
+        /a\b/u.test('aſ'),
+        /(?:(_|)+){2}K/.test('__'),
+        /(?:(_|)+){2}K/.exec('__K')[0]
+    ].join()";
+    let hosts: [std::rc::Rc<dyn agnijs_engine_api::Host>; 3] =
+        [TestHost::new(), std::rc::Rc::new(BacktrackingHost), std::rc::Rc::new(LinearHost)];
+    for host in hosts {
+        let mut vm = Vm::new(host);
+        Vm::create_realm(&mut vm);
+        let mode = vm.regex_mode;
+        let realm = vm.main_realm();
+        let v = vm.eval_script(realm, "divergences.js", src).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(v, Value::string("true,1,true,false,false,true,false,__K"), "{mode:?}");
+    }
+}
+
 #[test]
 fn the_host_picks_the_matcher_per_engine_at_creation() {
     // ADR 0013: 14.9 s on the backtracking matcher with 28 a's.

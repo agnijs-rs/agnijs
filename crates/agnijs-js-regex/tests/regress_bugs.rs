@@ -30,6 +30,17 @@ fn escaped_surrogate_pairs_outside_u_mode_are_two_units() {
     // TASK-105
     assert_eq!(find(r"\uD83D\uDE00", "", &[0xD83D, 0xDE00]), Some((0, 2)));
     assert_eq!(find(r"\uD83Db?", "", &[0x61, 0xD83D, 0xDE00]), Some((1, 2)));
+    assert_eq!(find(r"\uD83Db?", "", &[0x61, 0xD83D, 0xDE00]), Some((1, 2)));
+    // No longer routed away from the linear matcher.
+    assert_linear_eligible(r"😀");
+    assert_linear_eligible(r"\uD83Db?");
+}
+
+fn assert_linear_eligible(pattern: &str) {
+    if cfg!(feature = "linear") {
+        let re = Regex::compile(&u(pattern), &Flags::default()).unwrap();
+        assert_eq!(re.linear_eligibility(), Ok(()), "/{pattern}/");
+    }
 }
 
 #[test]
@@ -37,6 +48,13 @@ fn braced_u_escape_outside_u_mode_is_an_identity_escape_and_a_quantifier() {
     // TASK-106: `\u{2}` is `u` twice.
     assert_eq!(find(r"^\u{2}$", "", &u("uu")), Some((0, 2)));
     assert_eq!(find(r"\u{2}", "", &[0x2]), None);
+    assert_linear_eligible(r"^\u{2}$");
+    // In u and v mode it stays a code-point escape.
+    for flags in ["u", "v"] {
+        assert_eq!(find(r"^\u{1F600}$", flags, &u("\u{1F600}")), Some((0, 2)), "{flags}");
+        assert_eq!(find(r"\u{2}", flags, &[0x2]), Some((0, 1)), "{flags}");
+        assert_eq!(find(r"\u{2}", flags, &u("uu")), None, "{flags}");
+    }
 }
 
 #[test]
@@ -100,7 +118,12 @@ fn a_backreference_inside_its_own_group_matches_empty_after_backing_off() {
 
 #[test]
 fn empty_iterations_inside_a_counted_loop_finish() {
-    // TASK-108: regress never returned on "__".
-    assert_eq!(find(r"(?:(_|)+){2}K", "", &u("__")), None);
-    assert_eq!(find(r"(?:(_|)+){2}K", "", &u("__K")), Some((0, 3)));
+    // TASK-108: regress never returned on "__", so this runs under a
+    // timeout: a hang fails the test instead of stalling the suite.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        tx.send((find(r"(?:(_|)+){2}K", "", &u("__")), find(r"(?:(_|)+){2}K", "", &u("__K")))).unwrap();
+    });
+    let results = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("/(?:(_|)+){2}K/ did not finish in 10 s");
+    assert_eq!(results, (None, Some((0, 3))));
 }
