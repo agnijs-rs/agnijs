@@ -25,7 +25,7 @@ The current engine (checked at `59fb104`, 2026-11-09) is already close:
 - `pc` is an instruction index into a fixed-size `Instr` enum.
 - Exceptions are `Result`s routed through a per-block handler table.
 - Inline caches are a per-`CodeBlock` side table of plain ids.
-- Shapes are never freed.
+- Shapes are freed only when nothing names them: since TASK-100.22 the collector traces shapes from live objects and from the inline caches of live blocks, and clears untraced caches before reuse.
 - The heap is precise, non-moving and index-based, and collects only at safe points.
 - The engine interface (`agnijs-engine-api`) exposes no interpreter type, only opaque bytecode bytes.
 - No engine crate uses `unsafe`; the only uses are in the QuickJS-NG FFI adapter and the benchmark's process-memory probe. Since TASK-100.32 every engine crate (`agnijs-js-parser`, `-compiler`, `-vm`, `-regex`, `-intl`, `-debugger`, `-cdp` and `agnijs-engine-api`) enforces this with `#![forbid(unsafe_code)]` at the crate root; `agnijs-engine-quickjs` (FFI into QuickJS-NG) and `agnijs-js-bench` (the process-memory probe calls `K32GetProcessMemoryInfo`/`getrusage`) are the two crates that keep it.

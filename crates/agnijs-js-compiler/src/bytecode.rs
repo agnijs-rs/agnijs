@@ -980,6 +980,13 @@ pub struct Feedback {
     pub name_keys: Box<[Cell<u64>]>,
     /// String constants, indexed by constant index.
     pub strings: Box<[Cell<ConstString>]>,
+    /// The owning VM's shape epoch the `ic` entries are valid in: a VM
+    /// that frees shapes (and may reuse their ids) moves its epoch, and
+    /// clears entries recorded in an earlier one before using them.
+    pub shape_epoch: Cell<u64>,
+    /// The owning VM's collection that last traced this feedback (its
+    /// collector's bookkeeping).
+    pub gc_mark: Cell<u64>,
 }
 
 /// A cached global binding for one name of a block ([`CodeBlock::globals`],
@@ -1080,6 +1087,8 @@ impl CodeBlock {
                 .iter()
                 .map(|_| Cell::new(ConstString::EMPTY))
                 .collect(),
+            shape_epoch: Cell::new(0),
+            gc_mark: Cell::new(0),
         });
         if f.owner == owner {
             Some(f)

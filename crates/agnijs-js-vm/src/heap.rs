@@ -16,7 +16,8 @@ use crate::env::Environment;
 use crate::object::{KeyTable, ObjectData, Shape};
 use crate::string::{Repr, StringData, Units};
 use crate::symbol::SymbolData;
-use crate::value::{BigId, EnvId, ObjId, ShapeId, StrId, SymId};
+use crate::object::KeyTableId;
+use crate::value::{BigId, EnvId, ObjId, PropSlot, ShapeId, StrId, SymId, Value};
 use hashbrown::HashTable;
 use std::collections::HashSet;
 
@@ -114,26 +115,36 @@ impl<T> Arena<T> {
         matches!(self.slots.get(i as usize), Some(Some(_)))
     }
 
-    /// Free every unmarked live slot, clearing marks. `on_free` sees each
-    /// freed value before it is dropped.
-    pub fn sweep(&mut self, mut on_free: impl FnMut(u32, &T)) -> usize {
+    /// Free every unmarked live slot, clearing marks. `live` sees each
+    /// survivor; `dead` takes each freed value (and may keep its buffers).
+    pub fn sweep(&mut self, mut live: impl FnMut(&T), mut dead: impl FnMut(T)) -> usize {
         let mut freed = 0;
-        for i in 0..self.slots.len() {
-            if self.slots[i].is_some() {
-                if self.marks[i] {
-                    self.marks[i] = false;
-                } else {
-                    if let Some(v) = &self.slots[i] {
-                        on_free(i as u32, v);
-                    }
-                    self.slots[i] = None;
-                    self.free.push(i as u32);
-                    self.live -= 1;
-                    freed += 1;
+        for (i, (slot, mark)) in self.slots.iter_mut().zip(self.marks.iter_mut()).enumerate() {
+            if *mark {
+                *mark = false;
+                if let Some(v) = slot {
+                    live(v);
                 }
+            } else if let Some(v) = slot.take() {
+                dead(v);
+                self.free.push(i as u32);
+                freed += 1;
             }
         }
+        self.live -= freed;
         freed
+    }
+
+    /// Move the mark bits out for the marking phase (see `gc::Tracer`);
+    /// [`Arena::restore_marks`] puts them back. Every slot is unmarked
+    /// between collections.
+    pub(crate) fn take_marks(&mut self) -> Vec<bool> {
+        std::mem::take(&mut self.marks)
+    }
+
+    pub(crate) fn restore_marks(&mut self, marks: Vec<bool>) {
+        debug_assert_eq!(marks.len(), self.slots.len());
+        self.marks = marks;
     }
 
     pub fn live(&self) -> usize {
@@ -152,16 +163,88 @@ impl<T> Arena<T> {
     }
 }
 
+/// Storage buffers taken from dead heap values by the sweep and handed to
+/// new ones (TASK-100.22), so a collection that frees many small objects
+/// does not pay one allocator call per buffer, and the program that
+/// replaces them does not pay another. Buffers are kept empty. Only
+/// buffers of at most `MAX_CAP` entries are kept, up to a byte limit the
+/// collector sets from its threshold (what the program allocates before
+/// the next collection); the rest are freed as before, and so are
+/// buffers still unused when the next collection starts.
+pub struct BufPool<T> {
+    bufs: Vec<Vec<T>>,
+    bytes: usize,
+    limit: usize,
+}
+
+impl<T> Default for BufPool<T> {
+    fn default() -> Self {
+        BufPool {
+            bufs: Vec::new(),
+            bytes: 0,
+            limit: Self::MIN_LIMIT,
+        }
+    }
+}
+
+impl<T> BufPool<T> {
+    const MAX_CAP: usize = 32;
+    const MIN_LIMIT: usize = 4 * 1024 * 1024;
+    const MAX_LIMIT: usize = 64 * 1024 * 1024;
+
+    /// Start a sweep: free the buffers no allocation needed since the last
+    /// one, and keep up to about `budget` bytes from this one.
+    pub fn restart(&mut self, budget: usize) {
+        self.bufs.clear();
+        self.bytes = 0;
+        self.limit = budget.clamp(Self::MIN_LIMIT, Self::MAX_LIMIT);
+    }
+
+
+    /// Keep `buf`'s storage for reuse, or free it.
+    #[inline]
+    pub fn give(&mut self, mut buf: Vec<T>) {
+        let cap = buf.capacity();
+        if cap == 0 || cap > Self::MAX_CAP {
+            return;
+        }
+        let bytes = cap * std::mem::size_of::<T>();
+        if self.bytes + bytes > self.limit {
+            return;
+        }
+        buf.clear();
+        self.bytes += bytes;
+        self.bufs.push(buf);
+    }
+
+    /// An empty buffer, with capacity when the pool has one.
+    #[inline]
+    pub fn take(&mut self) -> Vec<T> {
+        match self.bufs.pop() {
+            Some(b) => {
+                self.bytes -= b.capacity() * std::mem::size_of::<T>();
+                b
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Bytes held for reuse.
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+}
+
 /// Approximate allocation sizes, for GC scheduling only. The fixed part of
 /// each heap value is counted when it is allocated; the storage that grows
 /// afterwards (elements, property slots, dictionaries, flattened string
 /// buffers) is counted as it grows, through [`Heap::note_growth`], at the
 /// per-entry sizes below. [`Heap::approx_live_bytes`] uses the same sizes,
 /// so the live figure after a collection and the allocation counter agree.
-const OBJECT_BYTES: usize = 160;
-const ENV_BYTES: usize = 64;
-const SYMBOL_BYTES: usize = 32;
-const STRING_BYTES: usize = 40;
+pub(crate) const OBJECT_BYTES: usize = 160;
+pub(crate) const ENV_BYTES: usize = 64;
+pub(crate) const SYMBOL_BYTES: usize = 32;
+pub(crate) const STRING_BYTES: usize = 40;
 const DEFAULT_GC_THRESHOLD: usize = 8 * 1024 * 1024;
 
 /// Attention bit: a collection is wanted at the next safe point (threshold
@@ -183,13 +266,32 @@ pub struct Heap {
     pub symbols: Arena<SymbolData>,
     pub bigints: Arena<BigIntData>,
     pub envs: Arena<Environment>,
-    /// Shapes are never freed in this version: they are bounded by the
-    /// program's property-shape structure, and their keys are kept alive
-    /// as roots. See ADR 0009.
+    /// Shapes, by id; shape 0 is the empty root shape. A shape lives while
+    /// a live object has it, a live shape descends from it, or a traced
+    /// inline cache names it (`gc::Tracer::shape`); the collector frees the
+    /// rest and reuses their ids. Inline caches that the collector did not
+    /// trace are invalidated through `shape_epoch` before they can hit on a
+    /// reused id. See ADR 0009.
     pub shapes: Vec<Shape>,
+    /// Freed shape ids, for reuse.
+    shape_free: Vec<u32>,
     /// The key storage shapes share along a transition chain
     /// (`object::KeyTable`); table 0 is the root shape's empty table.
+    /// Freed with the last shape over them.
     pub key_tables: Vec<KeyTable>,
+    /// Freed key-table ids, for reuse.
+    table_free: Vec<u32>,
+    /// Moves whenever a collection frees a shape. Inline-cache entries
+    /// (`Feedback::shape_epoch`) recorded in an earlier epoch may name a
+    /// freed, reused shape id and are cleared before use, unless the
+    /// collector traced them (so every shape they name survived) and
+    /// carried them over.
+    pub shape_epoch: u64,
+    /// Emptied property-slot buffers of dead objects, for new objects.
+    pub(crate) slot_pool: BufPool<PropSlot>,
+    /// Emptied value buffers of dead objects' elements and dead scopes'
+    /// bindings, for new ones.
+    pub(crate) value_pool: BufPool<Value>,
     /// Interned strings (atoms), weakly held: the sweep removes dead ones.
     intern: HashTable<StrId>,
     /// The VM's attention word (ADR 0019 J7): non-zero when the dispatch
@@ -253,7 +355,12 @@ impl Heap {
             bigints: Arena::default(),
             envs: Arena::default(),
             shapes: Vec::new(),
+            shape_free: Vec::new(),
             key_tables: vec![KeyTable::default()],
+            table_free: Vec::new(),
+            shape_epoch: 0,
+            slot_pool: BufPool::default(),
+            value_pool: BufPool::default(),
             intern: HashTable::new(),
             attention: if stress_every.is_some() { ATTENTION_GC } else { 0 },
             allocated_since_gc: 0,
@@ -384,6 +491,25 @@ impl Heap {
         EnvId(self.envs.alloc(env))
     }
 
+    /// A declarative environment for `scope` (see
+    /// [`Environment::declarative`]), its bindings in a recycled buffer
+    /// when the sweep left one.
+    pub fn alloc_declarative(
+        &mut self,
+        scope: Option<(std::rc::Rc<agnijs_js_compiler::bytecode::CodeBlock>, u32)>,
+        parent: Option<EnvId>,
+    ) -> EnvId {
+        let has_bindings = scope
+            .as_ref()
+            .is_some_and(|(code, idx)| !code.scopes[*idx as usize].bindings.is_empty());
+        let buf = if has_bindings {
+            self.value_pool.take()
+        } else {
+            Vec::new()
+        };
+        self.alloc_env(Environment::declarative_in(buf, scope, parent))
+    }
+
     #[inline]
     pub fn env(&self, id: EnvId) -> &Environment {
         self.envs.get(id.0)
@@ -426,9 +552,79 @@ impl Heap {
     // ---- shapes --------------------------------------------------------------
 
     pub fn alloc_shape(&mut self, shape: Shape) -> ShapeId {
+        if let Some(i) = self.shape_free.pop() {
+            self.shapes[i as usize] = shape;
+            return ShapeId(i);
+        }
         let id = ShapeId(self.shapes.len() as u32);
         self.shapes.push(shape);
         id
+    }
+
+    pub(crate) fn alloc_key_table(&mut self, table: KeyTable) -> KeyTableId {
+        if let Some(i) = self.table_free.pop() {
+            self.key_tables[i as usize] = table;
+            return KeyTableId(i);
+        }
+        let id = KeyTableId(self.key_tables.len() as u32);
+        self.key_tables.push(table);
+        id
+    }
+
+    /// Shapes in use (for tests and diagnostics).
+    pub fn live_shapes(&self) -> usize {
+        self.shapes.len() - self.shape_free.len()
+    }
+
+    /// Key tables in use (for tests and diagnostics).
+    pub fn live_key_tables(&self) -> usize {
+        self.key_tables.len() - self.table_free.len()
+    }
+
+    /// Free every shape the collector did not mark (`marks`, by shape id;
+    /// the root is always marked) and every key table no surviving shape
+    /// uses; trim each surviving table to the longest surviving shape over
+    /// it (`table_len`, by table id). Dead shapes leave their live parents'
+    /// transition maps. Returns the number of shapes freed; when it is not
+    /// zero the shape epoch moves (the caller re-stamps the inline caches
+    /// it traced).
+    pub(crate) fn sweep_shapes(&mut self, marks: &[bool], table_len: &[u32]) -> usize {
+        debug_assert!(marks[0], "the root shape is always live");
+        let mut freed = 0;
+        for i in 1..self.shapes.len() {
+            if marks[i] || !self.shapes[i].live {
+                continue;
+            }
+            let (parent, table, len) = {
+                let s = &self.shapes[i];
+                (s.parent, s.table, s.len)
+            };
+            if let Some(p) = parent {
+                if marks[p.index()] {
+                    let key = self.key_tables[table.0 as usize].keys[len as usize - 1];
+                    self.shapes[p.index()].unlink(key, ShapeId(i as u32));
+                }
+            }
+            self.shapes[i] = Shape::dead();
+            self.shape_free.push(i as u32);
+            freed += 1;
+        }
+        for (t, &len) in table_len.iter().enumerate().skip(1) {
+            let table = &mut self.key_tables[t];
+            if !table.live {
+                continue;
+            }
+            if len == 0 {
+                *table = KeyTable::dead();
+                self.table_free.push(t as u32);
+            } else {
+                table.truncate(len as usize);
+            }
+        }
+        if freed != 0 {
+            self.shape_epoch += 1;
+        }
+        freed
     }
 
     #[inline]

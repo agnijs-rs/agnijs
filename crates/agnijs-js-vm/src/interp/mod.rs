@@ -696,6 +696,11 @@ impl Vm {
         frame.base = self.regs.len();
         let n = frame.code.register_count as usize;
         self.regs.resize(self.regs.len() + n, Value::Undefined);
+        // Every run of a block starts here; its caches may predate a
+        // collection that freed shapes without tracing them (TASK-100.22).
+        if let Some(fb) = frame.code.feedback_if(self.feedback_owner) {
+            self.fresh_ic(fb);
+        }
         self.current_realm = frame.realm;
         self.frames.push(frame);
         Ok(())

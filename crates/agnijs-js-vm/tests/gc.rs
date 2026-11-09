@@ -207,6 +207,66 @@ fn a_memory_limit_stops_a_loop_that_only_grows_arrays() {
     );
 }
 
+/// The sweep hands dead objects' and environments' storage to later
+/// allocations (TASK-100.22). Whatever the buffers held before must never
+/// show through: new objects start with no properties or elements, and new
+/// scopes start with `undefined` or in the temporal dead zone.
+#[test]
+fn recycled_storage_starts_empty() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var junk = []; for (var i = 0; i < 3000; i++) {
+           var o = { a: i, b: 'x', c: null, d: i }; o.e = [i, i, i];
+           junk.push(o, [1, 2, 3, 4, 5, 6, 7, 8], (function (z) { var q = z; let w = z; return () => q + w; })(i));
+         }
+         junk = null;",
+    );
+    vm.collect_garbage();
+    let v = run(
+        &mut vm,
+        "var ok = true;
+         for (var i = 0; i < 3000 && ok; i++) {
+           var o = {}; var a = []; var b = new Array(3);
+           ok = Object.keys(o).length === 0 && o.a === undefined && a.length === 0 && a[0] === undefined
+             && b.length === 3 && !(0 in b);
+           o.z = i; a.push(i);
+           ok = ok && Object.keys(o).join() === 'z' && o.z === i && a.length === 1 && a[0] === i;
+           ok = ok && (function () { var u; var tdz; try { tdz; } catch (e) { return false; }
+                      try { late; return false; } catch (e) { if (!(e instanceof ReferenceError)) return false; }
+                      let late = 1; return u === undefined && late === 1; })();
+         }
+         ok",
+    );
+    assert_eq!(v, Value::Bool(true));
+}
+
+/// Weak containers are found during marking rather than by a scan of the
+/// whole object arena; they must still be processed: dead keys leave a
+/// WeakMap, values reachable only through a live key survive (also in a
+/// chain of ephemerons), and a WeakRef to a dead target is cleared.
+#[test]
+fn weak_containers_are_processed() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var wm = new WeakMap(), ws = new WeakSet();
+         var k1 = {}, k2 = {}, k3 = {};
+         // k1 -> v1 -> (key of) v2 chain: v1 is the key of the next entry.
+         var v1 = { name: 'v1' }; wm.set(k1, v1); wm.set(v1, { name: 'v2' }); v1 = null;
+         wm.set(k2, { name: 'gone' }); ws.add(k2); ws.add(k3);
+         var dead = {}; var wr = new WeakRef(dead); var wr2 = new WeakRef(k3); dead = null;
+         k2 = null;",
+    );
+    vm.collect_garbage();
+    let v = run(
+        &mut vm,
+        "var v1 = wm.get(k1);
+         [v1 && v1.name, v1 && wm.get(v1) && wm.get(v1).name, ws.has(k3), wr.deref() === undefined, wr2.deref() === k3].join()",
+    );
+    assert_eq!(v, Value::string("v1,v2,true,true,true"));
+}
+
 /// A Miri-sized program: closures, a generator, an exception and a
 /// string concatenation, with a collection at every safe point.
 #[test]

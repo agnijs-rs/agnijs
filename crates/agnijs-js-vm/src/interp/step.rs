@@ -185,10 +185,7 @@ impl Vm {
             // ---- environments ----
             Instr::PushEnv(scope) => {
                 let parent = self.frames[fi].env;
-                let env = self.heap.alloc_env(crate::env::Environment::declarative(
-                    Some((code.clone(), scope)),
-                    parent,
-                ));
+                let env = self.heap.alloc_declarative(Some((code.clone(), scope)), parent);
                 let f = &mut self.frames[fi];
                 f.env = Some(env);
                 f.env_depth += 1;

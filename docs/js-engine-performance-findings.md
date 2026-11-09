@@ -302,6 +302,8 @@ About 4 ms per collection with only 400 KB live is high. Sweep time is 60 to 80%
 
 Once finding 1 lets the collector run during execution, collections become more frequent, so this cost matters more. **Effort M, risk medium.** TASK-100.22.
 
+**Done (TASK-100.22).** Shapes are traced, marking writes mark bits directly and records weak containers, and the sweep recycles small buffers and totals live bytes. A prop-write-alloc collection (394 KB live) went from about 2 ms to 0.6 ms; time in `Vm::collect` fell 46% on list-diff and 45% on template-mount. Lazy sweeping was not needed.
+
 ### 8. Heap accounting ignores growth
 
 **Evidence.** Only fixed sizes count towards `allocated_since_gc`: 160 bytes per object, 64 per environment, 40 plus the length per string. Growth of elements, slots and dictionaries is never counted. array-methods ran zero collections over six iterations while `heap_bytes` reached 81.7 MB across only 21 K objects, with a peak RSS of 105.6 MiB against 20.3 MiB. The memory limit in the run loop uses the same counters, so it undercounts too.

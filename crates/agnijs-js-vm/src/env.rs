@@ -52,23 +52,30 @@ pub struct ObjectEnv {
 
 impl Environment {
     pub fn declarative(scope: Option<(Rc<CodeBlock>, u32)>, parent: Option<EnvId>) -> Environment {
-        let (slots, is_var_scope) = match &scope {
+        Environment::declarative_in(Vec::new(), scope, parent)
+    }
+
+    /// [`Environment::declarative`] with its bindings stored in `slots`,
+    /// an empty buffer (`Heap::alloc_declarative` passes a recycled one).
+    pub fn declarative_in(
+        mut slots: Vec<Value>,
+        scope: Option<(Rc<CodeBlock>, u32)>,
+        parent: Option<EnvId>,
+    ) -> Environment {
+        debug_assert!(slots.is_empty());
+        let is_var_scope = match &scope {
             Some((code, idx)) => {
                 let info: &ScopeInfo = &code.scopes[*idx as usize];
-                let slots = info
-                    .bindings
-                    .iter()
-                    .map(|(_, kind)| {
-                        if kind.starts_empty() {
-                            Value::Empty
-                        } else {
-                            Value::Undefined
-                        }
-                    })
-                    .collect();
-                (slots, info.is_var_scope)
+                slots.extend(info.bindings.iter().map(|(_, kind)| {
+                    if kind.starts_empty() {
+                        Value::Empty
+                    } else {
+                        Value::Undefined
+                    }
+                }));
+                info.is_var_scope
             }
-            None => (Vec::new(), false),
+            None => false,
         };
         Environment::Declarative(DeclEnv {
             slots,

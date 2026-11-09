@@ -15,8 +15,11 @@
 //!
 //! - A shape fixes the keys and attributes of every slot (changing
 //!   attributes or deleting a property other than the last moves the
-//!   object to dictionary mode, or to another shape), and shapes are never
-//!   freed, so a shape id never comes to mean another layout. Whether a
+//!   object to dictionary mode, or to another shape). A freed shape's id
+//!   can be reused (TASK-100.22), but never under a valid entry: the
+//!   collector keeps every shape a traced block's entries name, and an
+//!   untraced block's entries are cleared (`Vm::fresh_ic`) before their
+//!   first use after a collection that freed shapes. Whether a
 //!   slot holds data or an accessor is read live and must match the entry.
 //! - Dictionary-mode objects (shape 0, like an empty object) and objects
 //!   with exotic named-property behaviour (proxies, typed arrays, module
@@ -36,7 +39,7 @@ use crate::object::{Class, Elements, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::{ObjId, PropKey, PropSlot, Value};
 use crate::vm::Vm;
-use agnijs_js_compiler::bytecode::{CodeBlock, IcEntry, IcIdx, IcSite, IC_ENTRIES, NO_IC};
+use agnijs_js_compiler::bytecode::{CodeBlock, Feedback, IcEntry, IcIdx, IcSite, IC_ENTRIES, NO_IC};
 
 /// Hops a prototype entry may look through before the cache gives up.
 const MAX_DEPTH: usize = 16;
@@ -144,8 +147,31 @@ impl Vm {
         if ic == NO_IC {
             return None;
         }
-        code.feedback_if(self.feedback_owner)
-            .map(|f| &f.ic[ic as usize])
+        let f = code.feedback_if(self.feedback_owner)?;
+        Some(&f.ic[ic as usize])
+    }
+
+    /// Clear `fb`'s cache entries if they were recorded before the latest
+    /// collection that freed shapes and that collection did not trace them:
+    /// a shape id they name may since have been reused.
+    #[inline]
+    pub(crate) fn fresh_ic(&self, fb: &Feedback) {
+        if fb.shape_epoch.get() != self.heap.shape_epoch {
+            self.reset_ic(fb);
+        }
+    }
+
+    #[cold]
+    pub(crate) fn reset_ic(&self, fb: &Feedback) {
+        for site in fb.ic.iter() {
+            // Megamorphic sticks (ADR 0019 J4) and names no shape.
+            if site.entries[0].get().kind != IcEntry::KIND_MEGAMORPHIC {
+                for c in &site.entries {
+                    c.set(IcEntry::EMPTY);
+                }
+            }
+        }
+        fb.shape_epoch.set(self.heap.shape_epoch);
     }
 
     /// The cached read of a named property of `recv` at site `ic`, if an
@@ -230,6 +256,7 @@ impl Vm {
         let Some(fb) = code.feedback(self.feedback_owner) else {
             return;
         };
+        self.fresh_ic(fb);
         let site = &fb.ic[ic as usize];
         if site.entries[0].get().kind == IcEntry::KIND_MEGAMORPHIC {
             return;
@@ -484,6 +511,7 @@ impl Vm {
         let Some(fb) = code.feedback(self.feedback_owner) else {
             return;
         };
+        self.fresh_ic(fb);
         let site = &fb.ic[ic as usize];
         if site.entries[0].get().kind == IcEntry::KIND_MEGAMORPHIC {
             return;

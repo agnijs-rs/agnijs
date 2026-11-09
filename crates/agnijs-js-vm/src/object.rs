@@ -44,6 +44,8 @@ pub struct Shape {
     pub len: u32,
     transitions: HashMap<(PropKey, Attrs), ShapeId>,
     pub parent: Option<ShapeId>,
+    /// False for a freed id awaiting reuse (`Heap::sweep_shapes`).
+    pub(crate) live: bool,
 }
 
 impl Shape {
@@ -54,6 +56,23 @@ impl Shape {
             len: 0,
             transitions: HashMap::new(),
             parent: None,
+            live: true,
+        }
+    }
+
+    /// The placeholder left at a freed id.
+    pub(crate) fn dead() -> Shape {
+        Shape {
+            live: false,
+            ..Shape::root()
+        }
+    }
+
+    /// Forget the transition to `child` (which is being freed), whose
+    /// last key is `key`.
+    pub(crate) fn unlink(&mut self, key: (PropKey, Attrs), child: ShapeId) {
+        if self.transitions.get(&key) == Some(&child) {
+            self.transitions.remove(&key);
         }
     }
 
@@ -74,10 +93,21 @@ pub struct KeyTableId(pub u32);
 /// grows. Up to [`KeyTable::INDEX_FROM`] keys a lookup scans the prefix;
 /// past that the table carries a hash index of every key it holds, which
 /// a shape consults for positions below its own `len`.
-#[derive(Default)]
 pub struct KeyTable {
     pub keys: Vec<(PropKey, Attrs)>,
     index: HashMap<PropKey, u32>,
+    /// False for a freed id awaiting reuse (`Heap::sweep_shapes`).
+    pub(crate) live: bool,
+}
+
+impl Default for KeyTable {
+    fn default() -> Self {
+        KeyTable {
+            keys: Vec::new(),
+            index: HashMap::new(),
+            live: true,
+        }
+    }
 }
 
 impl KeyTable {
@@ -85,7 +115,7 @@ impl KeyTable {
     const INDEX_FROM: usize = 8;
 
     fn with_keys(keys: Vec<(PropKey, Attrs)>) -> KeyTable {
-        let mut t = KeyTable { keys: Vec::new(), index: HashMap::new() };
+        let mut t = KeyTable::default();
         for (k, a) in keys {
             t.push(k, a);
         }
@@ -102,6 +132,29 @@ impl KeyTable {
             }
         } else if self.keys.len() > KeyTable::INDEX_FROM {
             self.index.insert(key, i);
+        }
+    }
+
+    /// The placeholder left at a freed id.
+    pub(crate) fn dead() -> KeyTable {
+        KeyTable {
+            live: false,
+            ..KeyTable::default()
+        }
+    }
+
+    /// Drop the keys past `len` (no surviving shape owns them), so the
+    /// longest surviving shape is the table's tip again and extends it in
+    /// place.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        if self.keys.len() <= len {
+            return;
+        }
+        self.keys.truncate(len);
+        if len <= KeyTable::INDEX_FROM {
+            self.index = HashMap::new();
+        } else {
+            self.index.retain(|_, i| (*i as usize) < len);
         }
     }
 
@@ -493,8 +546,7 @@ impl Heap {
             // Another transition already extended this table past
             // `shape`: the new chain gets its own copy of the prefix.
             let prefix = self.key_tables[table.0 as usize].keys[..len].to_vec();
-            table = KeyTableId(self.key_tables.len() as u32);
-            self.key_tables.push(KeyTable::with_keys(prefix));
+            table = self.alloc_key_table(KeyTable::with_keys(prefix));
         }
         self.key_tables[table.0 as usize].push(key, attrs);
         let new = Shape {
@@ -502,6 +554,7 @@ impl Heap {
             len: len as u32 + 1,
             transitions: HashMap::new(),
             parent: Some(shape),
+            live: true,
         };
         let id = self.alloc_shape(new);
         self.shape_mut(shape).transitions.insert((key, attrs), id);
@@ -592,7 +645,7 @@ impl Heap {
         match key {
             PropKey::Index(i) => {
                 let is_default_data = !prop.is_accessor() && prop.attrs == Attrs::ALL;
-                let o = self.obj_mut(obj);
+                let o = self.objects.get_mut(obj.0);
                 let grown = match &mut o.elements {
                     Elements::Dense(v)
                         if is_default_data && i as usize <= v.len() + DENSE_GAP as usize =>
@@ -603,6 +656,9 @@ impl Heap {
                             0
                         } else {
                             let added = idx + 1 - v.len();
+                            if v.capacity() == 0 {
+                                *v = self.value_pool.take();
+                            }
                             if idx > v.len() {
                                 v.resize(idx, Value::Empty);
                             }
@@ -639,8 +695,11 @@ impl Heap {
                 } else {
                     let shape = o.shape;
                     let new_shape = self.shape_add(shape, key, prop.attrs);
-                    let o = self.obj_mut(obj);
+                    let o = self.objects.get_mut(obj.0);
                     o.shape = new_shape;
+                    if o.slots.capacity() == 0 {
+                        o.slots = self.slot_pool.take();
+                    }
                     o.slots.push(prop.slot);
                     self.note_growth(SLOT_BYTES);
                 }
@@ -872,9 +931,12 @@ impl Heap {
 
     /// Append to a dense array (used by literals and `push`).
     pub fn array_push_dense(&mut self, obj: ObjId, value: Value) -> bool {
-        let o = self.obj_mut(obj);
+        let o = self.objects.get_mut(obj.0);
         if let (Elements::Dense(v), Class::Array(a)) = (&mut o.elements, &mut o.class) {
             if v.len() == a.length as usize && a.length < PropKey::MAX_INDEX {
+                if v.capacity() == 0 {
+                    *v = self.value_pool.take();
+                }
                 v.push(value);
                 a.length += 1;
                 self.note_growth(ELEMENT_BYTES);

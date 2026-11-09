@@ -9,7 +9,6 @@
 //! read by `LdaImport`.
 
 use crate::builtins::promise::{self, Capability};
-use crate::env::Environment;
 use crate::gc::Tracer;
 use crate::object::{CallArgs, Class, ObjectData};
 use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, PropertyDescriptor, StrId, Value};
@@ -543,10 +542,7 @@ impl Vm {
         let realm = record(self, module).realm;
         let global_env = self.realm_of(realm).global_env;
         let si = Self::module_scope_index(&code);
-        let env = self.heap.alloc_env(Environment::declarative(
-            Some((code.clone(), si)),
-            Some(global_env),
-        ));
+        let env = self.heap.alloc_declarative(Some((code.clone(), si)), Some(global_env));
         record_mut(self, module).env = Some(env);
         // Imports.
         for (i, imp) in info.imports.iter().enumerate() {

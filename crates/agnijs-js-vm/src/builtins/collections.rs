@@ -144,39 +144,20 @@ impl FinRegData {
 
 // ---- weak processing (called by the collector) -------------------------------------------
 
-/// Ephemeron pass: values of weak maps whose keys survived marking are
-/// live too. Returns a tracer holding the values to mark; the collector
-/// loops until a pass adds nothing.
-pub fn ephemeron_values(vm: &Vm, t: &mut Tracer) {
-    for (i, o) in vm.heap.objects.iter() {
-        if !vm.heap.objects.is_marked(i) {
-            continue;
-        }
-        if let Class::WeakMap(m) = &o.class {
-            for (k, v) in m.entries.iter().flatten() {
-                if vm.is_value_marked(*k) && !vm.is_value_marked(*v) {
-                    t.value(*v);
-                }
-            }
-        }
-    }
-}
-
 /// Clear weak references whose targets died in this collection: weak
 /// collection entries, WeakRef targets, and FinalizationRegistry cells
-/// (whose cleanup callbacks are queued as host-drained jobs).
-pub fn process_weak(vm: &mut Vm) {
+/// (whose cleanup callbacks are queued as host-drained jobs). `weak` lists
+/// the marked weak containers; the collector records them while marking
+/// (ephemeron values were marked there too), so no arena scan is needed.
+pub fn process_weak(vm: &mut Vm, weak: &[ObjId]) {
     let mut weak_colls: Vec<ObjId> = Vec::new();
     let mut weak_refs: Vec<ObjId> = Vec::new();
     let mut registries: Vec<ObjId> = Vec::new();
-    for (i, o) in vm.heap.objects.iter() {
-        if !vm.heap.objects.is_marked(i) {
-            continue;
-        }
-        match &o.class {
-            Class::WeakMap(_) | Class::WeakSet(_) => weak_colls.push(ObjId(i)),
-            Class::WeakRef(_) => weak_refs.push(ObjId(i)),
-            Class::FinalizationRegistry(_) => registries.push(ObjId(i)),
+    for &o in weak {
+        match &vm.heap.obj(o).class {
+            Class::WeakMap(_) | Class::WeakSet(_) => weak_colls.push(o),
+            Class::WeakRef(_) => weak_refs.push(o),
+            Class::FinalizationRegistry(_) => registries.push(o),
             _ => {}
         }
     }
