@@ -8,6 +8,13 @@ test/built-ins/Atomics/wait/ | Atomics.wait tests block the thread or need $262.
 test/built-ins/Atomics/waitAsync/ | Atomics.waitAsync tests need $262.agent and a timer-driven host
 
 # Known failures with a tracked cause. Remove each line when its test passes.
+# Spec section 11 condition 1 targets zero exceptions: the rules above are
+# scope decisions, but the ones below are failures the engine owns, so
+# against that target condition 1 holds only partially until they are gone.
+# The six lone-surrogate rules are TASK-100.15. The intl402 rules are ICU4X
+# data gaps, one post-ES2025 test missing its feature flag, and one test
+# expectation at odds with current CLDR; intl402 is reported separately
+# from the gate (spec section 11).
 # Source text reaches the parser as UTF-8, so a lone surrogate in eval'd
 # source (built with String.fromCharCode) is replaced before the lexer sees
 # it. Parser follow-up: lex UTF-16 (or WTF-8) source. Matching and literal

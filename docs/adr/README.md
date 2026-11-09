@@ -1,6 +1,6 @@
 # Architecture decision records
 
-ADR numbers are shared with the Gable repository, where the engine began; they were kept when the engine moved (TASK-100.12), so the sequence has gaps. The ADRs that concern Gable alone stay in [the Gable repository](https://github.com/jcannon98188/gable/tree/main/docs/adr), including ADR 0004 (Gable Native owns its JavaScript engine) and the adoption ADR that records Gable depending on this repository.
+ADR numbers are shared with the Gable repository, where the engine began; they were kept when the engine moved (TASK-100.12), so the sequence has gaps. The ADRs that concern Gable alone stay in [the Gable repository](https://github.com/jcannon98188/gable/tree/main/docs/adr), including ADR 0004 (Gable's decision to own a JavaScript engine) and the adoption ADR that records Gable depending on this repository.
 
 Crate names in these records use the current `agnijs-*` names; where a record says "the Gable engine" it means this engine under its former working name.
 

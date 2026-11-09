@@ -466,3 +466,42 @@ fn script_parsed_reports_functions_and_detaching_stops_pausing() {
     run(&mut *d, realm, "quiet.js", "debugger; 1;");
     assert!(client.pauses().is_empty());
 }
+
+/// Detaches from inside its first callback, as an embedder's client may.
+struct DetachingClient {
+    calls: RefCell<u32>,
+}
+
+impl DebugClient for DetachingClient {
+    fn script_parsed(&self, d: &mut dyn Debuggee, _script: &ScriptInfo) {
+        *self.calls.borrow_mut() += 1;
+        d.detach();
+    }
+    fn paused(&self, d: &mut dyn Debuggee, _pause: &PauseInfo) -> ResumeAction {
+        *self.calls.borrow_mut() += 1;
+        d.detach();
+        ResumeAction::Continue
+    }
+}
+
+#[test]
+fn a_client_detaching_inside_a_callback_does_not_panic_the_engine() {
+    // While attach replays the scripts the engine already holds: the
+    // client detaches on the first, and the replay must stop quietly.
+    let mut d = agnijs_js_vm::make_debuggee(TestHost::new());
+    let realm = d.engine().main_realm();
+    run(&mut *d, realm, "a.js", "1");
+    run(&mut *d, realm, "b.js", "2");
+    let client = Rc::new(DetachingClient { calls: RefCell::new(0) });
+    d.attach(client.clone());
+    assert!(!d.is_attached());
+    assert_eq!(*client.calls.borrow(), 1);
+    // While paused.
+    let fresh = Rc::new(DetachingClient { calls: RefCell::new(0) });
+    let mut d = agnijs_js_vm::make_debuggee(TestHost::new());
+    let realm = d.engine().main_realm();
+    d.attach(fresh.clone());
+    let v = run(&mut *d, realm, "", "debugger; [1, 2].map(x => x * 2).join()");
+    assert_eq!(v, Value::string("2,4"));
+    assert!(!d.is_attached());
+}

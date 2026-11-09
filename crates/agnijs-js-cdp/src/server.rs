@@ -14,9 +14,17 @@ use agnijs_js_debugger::PauseRequester;
 use std::io::{self, BufRead, BufReader, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::Duration;
+
+/// Lock a mutex, recovering it if a thread panicked while holding it. The
+/// guarded values (an optional socket and an optional pause flag) have no
+/// invariant a panic could break, and this server runs inside a host that
+/// must never see a panic escape from the debugging endpoint.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 enum Event {
     Message(String),
@@ -78,7 +86,7 @@ impl CdpServer {
 
 impl Transport for CdpServer {
     fn send(&self, message: &str) {
-        let mut writer = self.shared.writer.lock().unwrap();
+        let mut writer = lock(&self.shared.writer);
         if let Some(stream) = writer.as_mut() {
             if ws::write_frame(stream, ws::OP_TEXT, message.as_bytes(), None).is_err() {
                 *writer = None;
@@ -111,7 +119,7 @@ impl Transport for CdpServer {
     }
 
     fn set_pause_requester(&self, requester: PauseRequester) {
-        *self.shared.requester.lock().unwrap() = Some(requester);
+        *lock(&self.shared.requester) = Some(requester);
     }
 }
 
@@ -201,7 +209,7 @@ fn serve_connection(stream: TcpStream, shared: &Shared, tx: &Sender<Event>) {
         return;
     }
     {
-        let mut writer = shared.writer.lock().unwrap();
+        let mut writer = lock(&shared.writer);
         if writer.is_some() {
             // One client at a time.
             drop(writer);
@@ -222,7 +230,7 @@ fn serve_connection(stream: TcpStream, shared: &Shared, tx: &Sender<Event>) {
                     break;
                 };
                 if is_pause_request(&text) {
-                    if let Some(r) = shared.requester.lock().unwrap().as_ref() {
+                    if let Some(r) = lock(&shared.requester).as_ref() {
                         r.request();
                     }
                 }
@@ -231,20 +239,20 @@ fn serve_connection(stream: TcpStream, shared: &Shared, tx: &Sender<Event>) {
                 }
             }
             ws::OP_PING => {
-                if let Some(w) = shared.writer.lock().unwrap().as_mut() {
+                if let Some(w) = lock(&shared.writer).as_mut() {
                     let _ = ws::write_frame(w, ws::OP_PONG, &frame.payload, None);
                 }
             }
             ws::OP_PONG => {}
             _ => {
-                if let Some(w) = shared.writer.lock().unwrap().as_mut() {
+                if let Some(w) = lock(&shared.writer).as_mut() {
                     let _ = ws::write_frame(w, ws::OP_CLOSE, &frame.payload, None);
                 }
                 break;
             }
         }
     }
-    *shared.writer.lock().unwrap() = None;
+    *lock(&shared.writer) = None;
     let _ = tx.send(Event::Disconnected);
 }
 

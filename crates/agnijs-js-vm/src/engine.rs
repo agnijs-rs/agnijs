@@ -3,9 +3,9 @@
 //!
 //! Bytecode container (ADR 0010): the shared `AGJS` container with the
 //! `agnijs-bc-3` tag around a kind byte and the serialised code tree, so
-//! loading precompiled code skips parsing and compiling. The M2
-//! source-payload container (`GBLC`, `agnijs-bc-1`) still loads for one
-//! release.
+//! loading precompiled code skips parsing and compiling. Any other container,
+//! including the M2 source-payload container, is rejected; the host
+//! recompiles from source.
 
 use crate::object::{CallArgs, Class, HostObjectData, NativeData, NativeKind, ObjectData};
 use crate::realm::Intrinsic;
@@ -24,12 +24,6 @@ use std::rc::Rc;
 /// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
 /// constant pool or the serialiser's layout changes it.
 pub const FORMAT: &str = "agnijs-bc-3";
-
-/// The M2 container (ADR 0010): `GBLC` magic, `agnijs-bc-1`, a kind byte, the
-/// name and the source text, recompiled on load. Still accepted for one
-/// release so caches written before M7 keep loading; never produced.
-pub const LEGACY_MAGIC: &[u8; 4] = b"GBLC";
-pub const LEGACY_FORMAT: &str = "agnijs-bc-1";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;
@@ -63,9 +57,6 @@ pub fn encode_bytecode(module: bool, code: &CodeBlock) -> Vec<u8> {
 }
 
 pub fn decode_bytecode(bytes: &[u8], _want_module: bool) -> Result<Decoded, Error> {
-    if bytes.starts_with(LEGACY_MAGIC) {
-        return decode_legacy(bytes);
-    }
     let payload = api::bytecode::unwrap(FORMAT, bytes)?;
     if payload.len() < 9 {
         return Err(Error::BytecodeCorrupt("truncated payload header".into()));
@@ -85,56 +76,6 @@ pub fn decode_bytecode(bytes: &[u8], _want_module: bool) -> Result<Decoded, Erro
         (KIND_SCRIPT | KIND_MODULE, k) => Err(Error::BytecodeCorrupt(format!(
             "kind byte {kind} does not match a {k:?} code block"
         ))),
-        _ => Err(Error::BytecodeCorrupt("unknown code kind".into())),
-    }
-}
-
-fn decode_legacy(bytes: &[u8]) -> Result<Decoded, Error> {
-    const FORMAT: &str = LEGACY_FORMAT;
-    let vlen = FORMAT.len();
-    if bytes.len() < 4 + vlen {
-        return Err(Error::BytecodeCorrupt("truncated header".into()));
-    }
-    let found = String::from_utf8_lossy(&bytes[4..4 + vlen]).to_string();
-    if found != FORMAT {
-        return Err(Error::BytecodeMismatch {
-            expected: FORMAT.to_string(),
-            found,
-        });
-    }
-    let mut pos = 4 + vlen;
-    let kind = *bytes
-        .get(pos)
-        .ok_or_else(|| Error::BytecodeCorrupt("missing kind".into()))?;
-    pos += 1;
-    let read_str = |pos: &mut usize| -> Result<String, Error> {
-        let len_bytes: [u8; 4] = bytes
-            .get(*pos..*pos + 4)
-            .ok_or_else(|| Error::BytecodeCorrupt("truncated length".into()))?
-            .try_into()
-            .unwrap();
-        let len = u32::from_le_bytes(len_bytes) as usize;
-        *pos += 4;
-        let s = bytes
-            .get(*pos..*pos + len)
-            .ok_or_else(|| Error::BytecodeCorrupt("truncated payload".into()))?;
-        *pos += len;
-        String::from_utf8(s.to_vec())
-            .map_err(|_| Error::BytecodeCorrupt("payload is not UTF-8".into()))
-    };
-    let name = read_str(&mut pos)?;
-    let source = read_str(&mut pos)?;
-    match kind {
-        KIND_SCRIPT => {
-            let code = agnijs_js_compiler::compile_script(&source, &name)
-                .map_err(|e| Error::BytecodeCorrupt(e.message))?;
-            Ok(Decoded::Script(code))
-        }
-        KIND_MODULE => {
-            let code = agnijs_js_compiler::compile_module(&source, &name)
-                .map_err(|e| Error::BytecodeCorrupt(e.message))?;
-            Ok(Decoded::Module(code))
-        }
         _ => Err(Error::BytecodeCorrupt("unknown code kind".into())),
     }
 }

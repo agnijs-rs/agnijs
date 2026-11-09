@@ -1,6 +1,6 @@
 # AgniJS engine: specification
 
-The spec for the work of building the **AgniJS engine** (the Gable engine until TASK-100.12 renamed it): the JavaScript engine Gable owns, written in Rust, that the Gable Native **Host runtime** embeds. It consolidates the decisions made in the Gable Native design map (TASK-99): architecture (TASK-99.6), engine prior art (TASK-99.10) and engine design (TASK-99.11), plus the four implementation-shape decisions made when this spec was written. Rationale for owning an engine is in [ADR 0004](adr/0004-gable-native-owns-its-javascript-engine-in-rust.md). Terms (Host runtime, Engine interface, AgniJS engine) are defined in `GLOSSARY.md`.
+The spec for the work of building the **AgniJS engine** (the Gable engine until TASK-100.12 renamed it): an embeddable JavaScript engine written in Rust. It began inside Gable, whose **Host runtime** is its first embedder, and this spec consolidates the decisions made in Gable's design map (TASK-99): architecture (TASK-99.6), engine prior art (TASK-99.10) and engine design (TASK-99.11), plus the four implementation-shape decisions made when this spec was written. Gable's rationale for owning an engine is ADR 0004 in [the Gable repository](https://github.com/jcannon98188/gable/tree/main/docs/adr). Terms (Host runtime, Engine interface, AgniJS engine) are defined in `GLOSSARY.md`.
 
 The implementation tasks are children of the Backlog task "Gable JS engine" and follow the milestones at the end of this document.
 
@@ -43,7 +43,7 @@ Dual representation: one-byte (Latin-1) and two-byte (UTF-16 code units) strings
 
 - Precise, non-moving mark-sweep on a single thread with size-class allocation.
 - Embedder values are rooted through a scoped root stack: host code holds values only inside a root scope or through an explicit persistent handle.
-- Incremental slices, scheduled by the host between Gable flushes so collection does not interrupt a frame.
+- Incremental slices, scheduled by the host between its own tasks (for Gable, between flushes) so collection does not interrupt a frame.
 - `WeakRef` and `FinalizationRegistry` are supported; finalization callbacks run as host tasks, never during collection.
 - Module records are heap objects and are collected when unreachable (needed for HMR).
 - The heap interface hides the collector's strategy so a generational or moving collector can follow.
@@ -52,25 +52,25 @@ Dual representation: one-byte (Latin-1) and two-byte (UTF-16 code units) strings
 
 ## 6. Regular expressions
 
-ECMAScript regex semantics (backtracking, lookbehind, named groups, the `v` flag, Unicode property escapes, Annex B legacy syntax) differ from Rust's `regex` crate. A Gable regex engine lives in its own crate behind a seam.
+ECMAScript regex semantics (backtracking, lookbehind, named groups, the `v` flag, Unicode property escapes, Annex B legacy syntax) differ from Rust's `regex` crate. The engine's regex support lives in its own crate behind a seam.
 
 The first task of that crate is an evaluation of `regress` (the ES-compliant Rust regex crate Boa uses) against the relevant test262 tests (`built-ins/RegExp`, `language/literals/regexp`, `annexB`) and the performance of pathological patterns. If it passes, adopt it behind the seam; otherwise write our own engine. The decision is recorded as a short ADR.
 
 ## 7. Engine interface
 
-The Gable-owned boundary the Host runtime codes against. It is satisfied by the AgniJS engine and by the adopted interim engine (a QuickJS-NG adapter first). It lives in its own crate, with a conformance test kit that both adapters must pass.
+The boundary every embedder codes against (Gable's Host runtime was the first). It is satisfied by the AgniJS engine and by the adopted interim engine (a QuickJS-NG adapter first). It lives in its own crate, with a conformance test kit that both adapters must pass.
 
 Required capabilities:
 
 - Evaluate scripts and modules. A module loader hook resolves static imports from the app bundle and dynamic `import()`.
-- A host-driven job queue: the engine enqueues promise jobs and the host runs them after every host task (a Gable flush ends with a microtask checkpoint).
-- A promise-rejection tracker (`HostPromiseRejectionTracker`) routed to the Gable error handler.
+- A host-driven job queue: the engine enqueues promise jobs and the host runs them after every host task (for example, a Gable flush ends with a microtask checkpoint).
+- A promise-rejection tracker (`HostPromiseRejectionTracker`) routed to the host.
 - Host-supplied timers: the engine has no event loop and no clock-driven callbacks of its own.
 - Interrupt and memory limits.
 - Realm creation.
 - Bytecode load and save.
 - Host classes with trace hooks, and host functions callable from JS.
-- Renderer node handles are plain integers (never GC references), so the retained node tree lives in Rust and JS holds integer handles.
+- Host-side handles (such as a retained native node tree's nodes) can be plain integers, never GC references, so that state lives in Rust and JS holds integer handles.
 - A hook for `import.meta` (HMR needs `import.meta.hot` provided by the host).
 - Module re-loading under a new specifier, so a changed module can be evaluated again while the old record is collected once unreachable. The engine has no hot-update primitive: HMR logic lives in JavaScript.
 - Source positions per bytecode offset and script source retrieval, for the debugger and for source-mapped exceptions.
@@ -82,7 +82,7 @@ The Rust API shapes (traits, handle types, error types) are the implementing age
 Provided by the host layer, never the engine:
 
 - The WinterCG baseline: `console`, `setTimeout`, `setInterval`, `queueMicrotask`, `URL`, `URLSearchParams`, `fetch`, `AbortController`, `AbortSignal`, `TextEncoder`, `TextDecoder`, `performance`, `structuredClone`, `crypto.getRandomValues`.
-- Plus `globalThis`, `self`, `EventTarget`, `Event`, `CustomEvent`, `MessageChannel` and a small `navigator` (`userAgent` identifying Gable Native, `language`, `languages`, `onLine`, `hardwareConcurrency`).
+- Plus `globalThis`, `self`, `EventTarget`, `Event`, `CustomEvent`, `MessageChannel` and a small `navigator` (`userAgent` identifying the host, `language`, `languages`, `onLine`, `hardwareConcurrency`).
 - `window`, `document` and `location` are not defined by default: they would imply a second node tree behind the Renderer, DOM-scale size, and browser-detection libraries misfire on them. An opt-in DOM-compat package is future work (fog on the design map) and is not part of this spec.
 
 The engine crate itself contains no host globals beyond the ECMAScript standard library (and `console` hooks supplied through the engine interface). Host globals are implemented in the host-runtime effort, not here; this spec only requires the engine interface to be sufficient for them.
@@ -90,7 +90,7 @@ The engine crate itself contains no host globals beyond the ECMAScript standard 
 ## 9. Debugging
 
 - A debugger interface in the engine: source positions per bytecode offset, breakpoints, stepping, frame and scope inspection, async stacks, script source.
-- A separate Gable-owned adapter to the Chrome DevTools Protocol in its own crate.
+- A separate adapter to the Chrome DevTools Protocol in its own crate, independent of any embedder.
 - First version covers: console, source-mapped exceptions, breakpoints, stepping and `evaluate`. Profiler and heap profiler later.
 - The interim engine has no inspector; interim debugging is handled by the dev-loop work (TASK-99.13), not here.
 

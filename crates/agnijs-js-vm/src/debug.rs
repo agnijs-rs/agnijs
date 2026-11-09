@@ -196,11 +196,18 @@ impl Vm {
         self.register_script(code.clone(), kind, realm);
     }
 
-    fn register_script(&mut self, code: Rc<CodeBlock>, kind: ScriptKind, realm: RealmId) -> ScriptId {
+    /// `None` when no client is attached. Client callbacks may detach, so
+    /// every caller that has called out to the client checks again.
+    fn register_script(
+        &mut self,
+        code: Rc<CodeBlock>,
+        kind: ScriptKind,
+        realm: RealmId,
+    ) -> Option<ScriptId> {
         let key = Rc::as_ptr(&code.source) as usize;
-        let d = self.debug.as_deref_mut().expect("debugger attached");
+        let d = self.debug.as_deref_mut()?;
         if let Some(id) = d.by_source.get(&key) {
-            return *id;
+            return Some(*id);
         }
         let id = ScriptId(d.scripts.len() as u32);
         d.scripts.push(ScriptRecord::new(id, code, kind, realm));
@@ -223,14 +230,14 @@ impl Vm {
         let info = d.scripts[id.0 as usize].info.clone();
         let client = d.client.clone();
         client.script_parsed(self, &info);
-        id
+        Some(id)
     }
 
     /// The script of a code block, registering it when first met.
-    fn script_of(&mut self, code: &Rc<CodeBlock>) -> ScriptId {
+    fn script_of(&mut self, code: &Rc<CodeBlock>) -> Option<ScriptId> {
         let key = Rc::as_ptr(&code.source) as usize;
         if let Some(id) = self.debug.as_deref().and_then(|d| d.by_source.get(&key)) {
-            return *id;
+            return Some(*id);
         }
         let kind = match code.kind {
             agnijs_js_compiler::bytecode::CodeKind::Module => ScriptKind::Module,
@@ -241,15 +248,17 @@ impl Vm {
         self.register_script(code.clone(), kind, realm)
     }
 
-    fn location_of(&mut self, code: &Rc<CodeBlock>, pc: usize) -> Location {
-        let script = self.script_of(code);
-        let d = self.debug.as_deref().unwrap();
+    /// `None` when the client detached (possibly while registering the
+    /// script).
+    fn location_of(&mut self, code: &Rc<CodeBlock>, pc: usize) -> Option<Location> {
+        let script = self.script_of(code)?;
+        let d = self.debug.as_deref()?;
         let (line, column) = d.scripts[script.0 as usize].position(source_offset(code, pc));
-        Location {
+        Some(Location {
             script,
             line,
             column,
-        }
+        })
     }
 
     // ---- the dispatch-loop hook -------------------------------------------------------------
@@ -315,7 +324,8 @@ impl Vm {
             let pass = match cond {
                 None => true,
                 Some(c) => {
-                    self.dbg().unwrap().in_pause = true;
+                    let Some(d) = self.dbg() else { break };
+                    d.in_pause = true;
                     let fi = self.frames.len() - 1;
                     let r = self.eval_in_frame(fi, true, &c);
                     if let Some(d) = self.dbg() {
@@ -343,7 +353,7 @@ impl Vm {
     fn debug_pause(&mut self, reason: PauseReason, top_at_pc: bool) {
         let frames = self.collect_frames(top_at_pc);
         let depth = self.frames.len();
-        let d = self.dbg().unwrap();
+        let Some(d) = self.dbg() else { return };
         d.in_pause = true;
         d.step = None;
         d.paused_frames = Some(frames.clone());
@@ -373,7 +383,7 @@ impl Vm {
             return;
         }
         let stack = self.capture_stack(64, false);
-        let d = self.dbg().unwrap();
+        let Some(d) = self.dbg() else { return };
         d.exception = Some((v, stack));
         let mode = d.pause_on_exceptions;
         if mode == PauseOnExceptions::None {
@@ -420,7 +430,8 @@ impl Vm {
             text,
             stack,
         };
-        let client = self.dbg().unwrap().client.clone();
+        let Some(d) = self.dbg() else { return };
+        let client = d.client.clone();
         client.exception_thrown(self, &event);
     }
 
@@ -449,7 +460,7 @@ impl Vm {
         let description = d.next_async_description.take().unwrap_or("Promise.then");
         let limit = d.async_depth as usize;
         let frames = self.capture_stack(limit, false);
-        let d = self.debug.as_deref().unwrap();
+        let d = self.debug.as_deref()?;
         if frames.is_empty() {
             return d.current_async.clone();
         }
@@ -500,7 +511,7 @@ impl Vm {
             }
             let pc = self.frame_pc(fi, top_at_pc);
             let code = self.frames[fi].code.clone();
-            let loc = self.location_of(&code, pc);
+            let Some(loc) = self.location_of(&code, pc) else { break };
             out.push(StackFrameInfo {
                 function_name: function_name(&self.frames[fi]),
                 script: Some(loc.script),
@@ -517,7 +528,7 @@ impl Vm {
         for fi in (0..self.frames.len()).rev() {
             let pc = self.frame_pc(fi, top_at_pc);
             let code = self.frames[fi].code.clone();
-            let location = self.location_of(&code, pc);
+            let Some(location) = self.location_of(&code, pc) else { break };
             let this = self.frames[fi].this;
             let this = self.to_api_value(this);
             let scopes = self.frame_scopes(fi, pc);

@@ -5,6 +5,7 @@
 
 use agnijs_engine_api::conformance::TestHost;
 use agnijs_engine_api::{bytecode, Engine, Error, ModuleSource, PromiseState, RealmId, Value};
+use agnijs_js_vm::engine::FORMAT;
 use std::rc::Rc;
 
 fn engine() -> (Rc<TestHost>, Box<dyn Engine>, RealmId) {
@@ -31,9 +32,11 @@ fn eval(e: &mut dyn Engine, realm: RealmId, src: &str) -> Value {
 #[test]
 fn the_engine_names_its_bytecode_format_and_uses_the_shared_container() {
     let (_host, mut e, realm) = engine();
-    assert_eq!(e.info().bytecode_format, "agnijs-bc-3");
+    // Pins the tag on purpose: bumping it must be a visible change (ADR 0010).
+    assert_eq!(FORMAT, "agnijs-bc-3");
+    assert_eq!(e.info().bytecode_format, FORMAT);
     let bytes = e.compile_script(realm, "a.js", "1 + 1").unwrap();
-    assert!(bytecode::unwrap("agnijs-bc-3", &bytes).is_ok());
+    assert!(bytecode::unwrap(FORMAT, &bytes).is_ok());
 }
 
 const PROGRAM: &str = r#"
@@ -143,7 +146,7 @@ fn another_engines_bytecode_is_a_version_mismatch() {
     let foreign = bytecode::wrap("quickjs-ng-0.16", b"\x02\x00");
     match e.eval_bytecode(realm, &foreign) {
         Err(Error::BytecodeMismatch { expected, found }) => {
-            assert_eq!(expected, "agnijs-bc-3");
+            assert_eq!(expected, FORMAT);
             assert_eq!(found, "quickjs-ng-0.16");
         }
         other => panic!("{other:?}"),
@@ -163,7 +166,7 @@ fn another_engines_bytecode_is_a_version_mismatch() {
 fn a_future_format_of_this_engine_is_a_version_mismatch() {
     let (_host, mut e, realm) = engine();
     let bytes = e.compile_script(realm, "a.js", "1").unwrap();
-    let payload = bytecode::unwrap("agnijs-bc-3", &bytes).unwrap().to_vec();
+    let payload = bytecode::unwrap(FORMAT, &bytes).unwrap().to_vec();
     let newer = bytecode::wrap("agnijs-bc-4", &payload);
     assert!(matches!(
         e.eval_bytecode(realm, &newer),
@@ -171,34 +174,23 @@ fn a_future_format_of_this_engine_is_a_version_mismatch() {
     ));
 }
 
-/// The M2 container (ADR 0010): `GBLC`, `agnijs-bc-1`, kind, then the name
-/// and source text with u32 lengths.
-fn legacy_container(module: bool, name: &str, source: &str) -> Vec<u8> {
-    let mut out = b"GBLCagnijs-bc-1".to_vec();
-    out.push(if module { 2 } else { 1 });
-    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-    out.extend_from_slice(name.as_bytes());
-    out.extend_from_slice(&(source.len() as u32).to_le_bytes());
-    out.extend_from_slice(source.as_bytes());
-    out
-}
-
+/// The M2 source-payload container (ADR 0010): a 4-byte magic, `agnijs-bc-1`,
+/// kind, then the name and source text with u32 lengths. Its loader was
+/// removed (no build ever wrote it under the `agnijs-bc-1` tag), so it is
+/// refused like any other foreign container.
 #[test]
-fn source_payload_containers_from_before_m7_still_load() {
+fn source_payload_containers_from_before_m7_are_refused() {
     let (_host, mut e, realm) = engine();
-    let v = e
-        .eval_bytecode(
-            realm,
-            &legacy_container(false, "old.js", "'legacy:' + (40 + 2)"),
-        )
-        .unwrap();
-    assert_eq!(v, Value::string("legacy:42"));
-    let mut other_tag = legacy_container(false, "old.js", "1");
-    other_tag[13] = b'9'; // agnijs-bc-9
+    let mut old = b"GBLCagnijs-bc-1\x01".to_vec(); // magic, tag, script kind
+    for s in ["old.js", "globalThis.ran = true"] {
+        old.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        old.extend_from_slice(s.as_bytes());
+    }
     assert!(matches!(
-        e.eval_bytecode(realm, &other_tag),
+        e.eval_bytecode(realm, &old),
         Err(Error::BytecodeMismatch { .. })
     ));
+    assert_eq!(eval(&mut *e, realm, "typeof ran"), Value::string("undefined"));
 }
 
 #[test]
@@ -211,7 +203,7 @@ fn a_corrupt_payload_is_refused_without_running() {
             "globalThis.ran = true; [1, 2].map(x => x * 2)",
         )
         .unwrap();
-    let header = bytes.len() - bytecode::unwrap("agnijs-bc-3", &bytes).unwrap().len();
+    let header = bytes.len() - bytecode::unwrap(FORMAT, &bytes).unwrap().len();
     // Truncated.
     for cut in [header, header + 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(

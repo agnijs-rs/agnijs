@@ -19,6 +19,6 @@ The engine was built inside the Gable repository as `native/engine` under workin
 | Prose | "the Gable engine" | "the AgniJS engine" |
 | Repository URL | `github.com/jcannon98188/gable` | `github.com/agnijs-rs/agnijs` |
 
-Unchanged on purpose: `LEGACY_MAGIC` (`GBLC`), the identifier of the pre-container bytecode format that the loader still recognises and rejects; Gable-side names (`gable-engine-harness`, `gable-harness`, `@@gable-test` protocol lines) which belong to the Gable repository; and the Gable vocabulary that `agnijs-js-test262/tests/boundary.rs` forbids in engine sources.
+The pre-container M2 bytecode (`GBLC` magic, `gable-bc-1` tag) was not renamed: the rename made its loader accept only `agnijs-bc-1`, a tag no build ever wrote, so the loader was removed and such bytes are refused as a format mismatch (ADR 0010). Unchanged on purpose: Gable-side names (`gable-engine-harness`, `gable-harness`, `@@gable-test` protocol lines) which belong to the Gable repository; and the Gable vocabulary that `agnijs-js-test262/tests/boundary.rs` forbids in engine sources.
 
 ADR numbers are shared with the Gable repository and kept. ADRs 0006 to 0017 moved here; 0001 to 0004 and 0018 (Gable adopts AgniJS) stay there.
