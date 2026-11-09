@@ -7,17 +7,18 @@
 
 use crate::error::{Result, SyntaxError};
 use crate::span::Span;
+use std::borrow::Cow;
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum TokenKind {
+pub enum TokenKind<'s> {
     Eof,
     /// IdentifierName, including reserved words. `escaped` is set when the
     /// name contained a Unicode escape (such a name can never be a keyword).
     Ident {
-        name: Box<str>,
+        name: Cow<'s, str>,
         escaped: bool,
     },
-    PrivateName(Box<str>),
+    PrivateName(Cow<'s, str>),
     Number {
         value: f64,
         kind: NumberKind,
@@ -121,8 +122,8 @@ pub enum Punct {
 }
 
 #[derive(Clone, Debug)]
-pub struct Token {
-    pub kind: TokenKind,
+pub struct Token<'s> {
+    pub kind: TokenKind<'s>,
     pub span: Span,
     /// A line terminator appeared between the previous token and this one.
     pub newline_before: bool,
@@ -296,7 +297,7 @@ impl<'s> Lexer<'s> {
 
     /// Lex the next token. `/` is lexed as division; the parser calls
     /// [`Lexer::rescan_regexp`] when it expects an expression.
-    pub fn next_token(&mut self) -> Result<Token> {
+    pub fn next_token(&mut self) -> Result<Token<'s>> {
         let newline_before = self.skip_trivia()?;
         let start = self.pos;
         let Some(c) = self.peek() else {
@@ -447,17 +448,35 @@ impl<'s> Lexer<'s> {
         Ok(punct)
     }
 
-    /// Returns (name, had_escape).
-    fn lex_identifier_name(&mut self) -> Result<(Box<str>, bool)> {
+    /// Returns (name, had_escape). A name without escapes borrows the
+    /// source; only an escaped name is built up in a `String`.
+    fn lex_identifier_name(&mut self) -> Result<(Cow<'s, str>, bool)> {
         let start = self.pos;
-        let mut name = String::new();
-        let mut escaped = false;
+        // Set (to the decoded name so far) once an escape is seen.
+        let mut owned: Option<String> = None;
         let mut first = true;
         loop {
+            // ASCII fast path: `$`, `_`, letters and (after the first
+            // character) digits.
+            if let Some(&b) = self.bytes.get(self.pos) {
+                if b.is_ascii_alphabetic() || b == b'_' || b == b'$' || (!first && b.is_ascii_digit())
+                {
+                    self.pos += 1;
+                    if let Some(name) = owned.as_mut() {
+                        name.push(b as char);
+                    }
+                    first = false;
+                    continue;
+                }
+                if b.is_ascii() && b != b'\\' {
+                    break;
+                }
+            }
             let Some(c) = self.peek() else { break };
             let ch = if c == '\\' {
-                escaped = true;
                 let esc_start = self.pos;
+                let src = self.src;
+                owned.get_or_insert_with(|| src[start..esc_start].to_string());
                 self.pos += 1;
                 if !self.eat('u') {
                     return self.err("invalid Unicode escape sequence", esc_start);
@@ -487,13 +506,18 @@ impl<'s> Lexer<'s> {
                 self.pos += c.len_utf8();
                 c
             };
-            name.push(ch);
+            if let Some(name) = owned.as_mut() {
+                name.push(ch);
+            }
             first = false;
         }
-        if name.is_empty() {
+        if self.pos == start {
             return self.err("unexpected character", start);
         }
-        Ok((name.into_boxed_str(), escaped))
+        Ok(match owned {
+            Some(name) => (Cow::Owned(name), true),
+            None => (Cow::Borrowed(&self.src[start..self.pos]), false),
+        })
     }
 
     /// After `\u`: `{HexDigits}` or four hex digits. Returns the code point.
@@ -532,7 +556,7 @@ impl<'s> Lexer<'s> {
         }
     }
 
-    fn lex_number(&mut self) -> Result<TokenKind> {
+    fn lex_number(&mut self) -> Result<TokenKind<'s>> {
         let start = self.pos;
         let mut kind = NumberKind::Decimal;
         let mut is_bigint = false;
@@ -608,7 +632,9 @@ impl<'s> Lexer<'s> {
                 return self.err("invalid BigInt literal", start);
             }
         } else {
-            let mut text = String::new();
+            // The literal is scanned (and validated) in place; its text is
+            // the source slice, minus any separators.
+            let lit_start = self.pos;
             let mut saw_dot = false;
             let mut saw_exp = false;
             if self.peek_byte() != Some(b'.') {
@@ -618,21 +644,27 @@ impl<'s> Lexer<'s> {
                         self.pos + 1,
                     );
                 }
-                text.push_str(&self.lex_digits(10, start)?);
+                self.scan_digits(10, start, None)?;
             }
             if self.peek_byte() == Some(b'.') {
                 saw_dot = true;
                 self.pos += 1;
-                text.push('.');
                 if self.peek_byte() == Some(b'_') {
                     return self.err("numeric separator not allowed here", self.pos);
                 }
-                text.push_str(&self.lex_digits(10, start)?);
+                self.scan_digits(10, start, None)?;
             }
             if matches!(self.peek(), Some('e' | 'E')) {
                 saw_exp = true;
-                text.push_str(&self.lex_exponent(start)?);
+                self.scan_exponent(start, None)?;
             }
+            let src = self.src;
+            let raw = &src[lit_start..self.pos];
+            let text: Cow<'s, str> = if raw.contains('_') {
+                Cow::Owned(raw.replace('_', ""))
+            } else {
+                Cow::Borrowed(raw)
+            };
             if self.peek() == Some('n') {
                 if saw_dot || saw_exp {
                     return self.err("invalid BigInt literal", start);
@@ -640,22 +672,18 @@ impl<'s> Lexer<'s> {
                 self.pos += 1;
                 self.check_after_number(start)?;
                 let trimmed = text.trim_start_matches('0');
-                let dec = if trimmed.is_empty() {
-                    "0".to_string()
-                } else {
-                    trimmed.to_string()
-                };
-                return Ok(TokenKind::BigInt(dec.into_boxed_str()));
+                let dec = if trimmed.is_empty() { "0" } else { trimmed };
+                return Ok(TokenKind::BigInt(dec.into()));
             }
             if text == "." {
                 return self.err("invalid number literal", start);
             }
-            let t = if text.starts_with('.') {
-                format!("0{text}")
+            value = if text.starts_with('.') {
+                format!("0{text}").parse::<f64>()
             } else {
-                text
-            };
-            value = t.parse::<f64>().unwrap_or(f64::NAN);
+                text.parse::<f64>()
+            }
+            .unwrap_or(f64::NAN);
         }
         self.check_after_number(start)?;
         Ok(TokenKind::Number { value, kind })
@@ -665,6 +693,13 @@ impl<'s> Lexer<'s> {
     /// doubled). Returns the digits without separators.
     fn lex_digits(&mut self, radix: u32, start: usize) -> Result<String> {
         let mut out = String::new();
+        self.scan_digits(radix, start, Some(&mut out))?;
+        Ok(out)
+    }
+
+    /// Scan digits in `radix` with `_` separators (not leading, trailing
+    /// or doubled), appending them without separators to `out` if given.
+    fn scan_digits(&mut self, radix: u32, start: usize, mut out: Option<&mut String>) -> Result<()> {
         let mut last_sep = false;
         let mut any = false;
         loop {
@@ -678,7 +713,9 @@ impl<'s> Lexer<'s> {
                 continue;
             }
             if c.is_digit(radix) {
-                out.push(c);
+                if let Some(out) = out.as_mut() {
+                    out.push(c);
+                }
                 any = true;
                 last_sep = false;
                 self.pos += 1;
@@ -689,22 +726,34 @@ impl<'s> Lexer<'s> {
         if last_sep {
             return self.err("numeric separator not allowed at the end", start);
         }
-        Ok(out)
+        Ok(())
     }
 
     fn lex_exponent(&mut self, start: usize) -> Result<String> {
-        let mut text = String::from("e");
+        let mut text = String::new();
+        self.scan_exponent(start, Some(&mut text))?;
+        Ok(text)
+    }
+
+    /// Scan an exponent part (`e`, an optional sign, digits), appending it
+    /// with a lower-case `e` and without separators to `out` if given.
+    fn scan_exponent(&mut self, start: usize, mut out: Option<&mut String>) -> Result<()> {
         self.pos += 1;
+        if let Some(out) = out.as_mut() {
+            out.push('e');
+        }
         if let Some(c @ ('+' | '-')) = self.peek() {
-            text.push(c);
+            if let Some(out) = out.as_mut() {
+                out.push(c);
+            }
             self.pos += 1;
         }
-        let digits = self.lex_digits(10, start)?;
-        if digits.is_empty() {
+        let digits_start = self.pos;
+        self.scan_digits(10, start, out)?;
+        if self.pos == digits_start {
             return self.err("missing exponent digits", start);
         }
-        text.push_str(&digits);
-        Ok(text)
+        Ok(())
     }
 
     fn check_after_number(&mut self, start: usize) -> Result<()> {
@@ -718,9 +767,26 @@ impl<'s> Lexer<'s> {
         Ok(())
     }
 
-    fn lex_string(&mut self, quote: char) -> Result<TokenKind> {
+    fn lex_string(&mut self, quote: char) -> Result<TokenKind<'s>> {
         let start = self.pos;
         self.pos += 1;
+        // Fast path: an ASCII string without escapes or line breaks is
+        // its source bytes, widened.
+        let q = quote as u8;
+        let body = &self.bytes[self.pos..];
+        if let Some(len) = body
+            .iter()
+            .position(|&b| b == q || b == b'\\' || b == b'\n' || b == b'\r' || !b.is_ascii())
+        {
+            if body[len] == q {
+                let value: Box<[u16]> = body[..len].iter().map(|&b| b as u16).collect();
+                self.pos += len + 1;
+                return Ok(TokenKind::String {
+                    value,
+                    legacy_octal: false,
+                });
+            }
+        }
         let mut value: Vec<u16> = Vec::new();
         let mut legacy_octal = false;
         loop {
@@ -734,11 +800,11 @@ impl<'s> Lexer<'s> {
                 '\\' => {
                     let esc_start = self.pos - 1;
                     match self.lex_escape(esc_start, false)? {
-                        Escape::Units(units) => value.extend(units),
+                        Escape::Units(units) => value.extend_from_slice(units.as_slice()),
                         Escape::LineContinuation => {}
-                        Escape::LegacyOctal(units) => {
+                        Escape::LegacyOctal(unit) => {
                             legacy_octal = true;
-                            value.extend(units);
+                            value.push(unit);
                         }
                         Escape::Invalid => return self.err("invalid escape sequence", esc_start),
                     }
@@ -762,7 +828,7 @@ impl<'s> Lexer<'s> {
         let Some(c) = self.bump() else {
             return self.err("unterminated escape", esc_start);
         };
-        let unit = |u: u16| Escape::Units(vec![u]);
+        let unit = |u: u16| Escape::Units(Units::one(u));
         Ok(match c {
             'n' => unit(0x0A),
             't' => unit(0x09),
@@ -792,13 +858,13 @@ impl<'s> Lexer<'s> {
                         }
                     }
                 }
-                Escape::LegacyOctal(vec![v as u16])
+                Escape::LegacyOctal(v as u16)
             }
             '8' | '9' => {
                 if in_template {
                     return Ok(Escape::Invalid);
                 }
-                Escape::LegacyOctal(vec![c as u16])
+                Escape::LegacyOctal(c as u16)
             }
             'x' => {
                 let mut v = 0u32;
@@ -815,15 +881,15 @@ impl<'s> Lexer<'s> {
                 let save = self.pos;
                 match self.lex_unicode_escape_body(esc_start) {
                     Ok(cp) => {
-                        let mut units = Vec::new();
-                        if cp <= 0xFFFF {
-                            units.push(cp as u16);
+                        Escape::Units(if cp <= 0xFFFF {
+                            Units::one(cp as u16)
                         } else {
                             let c = cp - 0x10000;
-                            units.push(0xD800 + (c >> 10) as u16);
-                            units.push(0xDC00 + (c & 0x3FF) as u16);
-                        }
-                        Escape::Units(units)
+                            Units {
+                                buf: [0xD800 + (c >> 10) as u16, 0xDC00 + (c & 0x3FF) as u16],
+                                len: 2,
+                            }
+                        })
                     }
                     Err(_) => {
                         self.pos = save;
@@ -833,14 +899,15 @@ impl<'s> Lexer<'s> {
             }
             c => {
                 let mut buf = [0u16; 2];
-                Escape::Units(c.encode_utf16(&mut buf).to_vec())
+                let len = c.encode_utf16(&mut buf).len() as u8;
+                Escape::Units(Units { buf, len })
             }
         })
     }
 
     /// Lex a template span after the opening `` ` `` or the `}` that ends a
     /// substitution. Stops after `${` or the closing backtick.
-    fn lex_template_part(&mut self, start: usize) -> Result<TokenKind> {
+    fn lex_template_part(&mut self, start: usize) -> Result<TokenKind<'s>> {
         let mut cooked: Option<Vec<u16>> = Some(Vec::new());
         let mut raw = String::new();
         loop {
@@ -870,7 +937,7 @@ impl<'s> Lexer<'s> {
                     match self.lex_escape(esc_start, true)? {
                         Escape::Units(u) => {
                             if let Some(ck) = cooked.as_mut() {
-                                ck.extend(u);
+                                ck.extend_from_slice(u.as_slice());
                             }
                         }
                         Escape::LineContinuation => {}
@@ -906,7 +973,7 @@ impl<'s> Lexer<'s> {
 
     /// The parser saw `}` while inside a template substitution: rescan from
     /// just after the brace as a template continuation.
-    pub fn rescan_template_continuation(&mut self, rbrace: &Token) -> Result<Token> {
+    pub fn rescan_template_continuation(&mut self, rbrace: &Token<'s>) -> Result<Token<'s>> {
         let start = rbrace.span.start as usize;
         self.pos = start + 1;
         let kind = self.lex_template_part(start)?;
@@ -919,7 +986,7 @@ impl<'s> Lexer<'s> {
 
     /// The parser saw `/` or `/=` where an expression is expected: rescan
     /// as a regular expression literal.
-    pub fn rescan_regexp(&mut self, slash: &Token) -> Result<Token> {
+    pub fn rescan_regexp(&mut self, slash: &Token<'s>) -> Result<Token<'s>> {
         let start = slash.span.start as usize;
         self.pos = start + 1;
         let mut in_class = false;
@@ -965,10 +1032,26 @@ impl<'s> Lexer<'s> {
     }
 }
 
+/// The one or two UTF-16 code units an escape stands for.
+struct Units {
+    buf: [u16; 2],
+    len: u8,
+}
+
+impl Units {
+    fn one(u: u16) -> Units {
+        Units { buf: [u, 0], len: 1 }
+    }
+
+    fn as_slice(&self) -> &[u16] {
+        &self.buf[..self.len as usize]
+    }
+}
+
 enum Escape {
-    Units(Vec<u16>),
+    Units(Units),
     LineContinuation,
-    LegacyOctal(Vec<u16>),
+    LegacyOctal(u16),
     Invalid,
 }
 
@@ -1012,7 +1095,7 @@ pub fn radix_to_decimal(digits: &str, radix: u32) -> String {
 mod tests {
     use super::*;
 
-    fn lex_all(src: &str) -> Vec<TokenKind> {
+    fn lex_all(src: &str) -> Vec<TokenKind<'_>> {
         let mut lx = Lexer::new(src, false);
         let mut out = Vec::new();
         loop {
@@ -1064,6 +1147,64 @@ mod tests {
             radix_to_decimal("10000000000000000000000", 16),
             "309485009821345068724781056"
         );
+    }
+
+    /// The lexer's fast paths (ASCII identifiers, separator-free decimals,
+    /// escape-free strings) and its slow paths agree.
+    #[test]
+    fn fast_and_slow_paths_agree() {
+        let toks = lex_all("abc a\\u0062c caf\u{e9} \u{e9}t\u{e9} a$_1 _ $");
+        let names: Vec<(&str, bool)> = toks
+            .iter()
+            .map(|t| match t {
+                TokenKind::Ident { name, escaped } => (&**name, *escaped),
+                _ => panic!("not an identifier: {t:?}"),
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("abc", false),
+                ("abc", true),
+                ("caf\u{e9}", false),
+                ("\u{e9}t\u{e9}", false),
+                ("a$_1", false),
+                ("_", false),
+                ("$", false)
+            ]
+        );
+        let toks = lex_all("5. 1e+5 1E-2 .5e1 1_0.0_1e1_0 0 0.0 123456789012345678901 1e400 0e0");
+        let values: Vec<f64> = toks
+            .iter()
+            .map(|t| match t {
+                TokenKind::Number { value, kind: NumberKind::Decimal } => *value,
+                _ => panic!("not a decimal: {t:?}"),
+            })
+            .collect();
+        assert_eq!(
+            values,
+            [5.0, 1e5, 1e-2, 5.0, 10.01e10, 0.0, 0.0, 123456789012345678901.0, f64::INFINITY, 0.0]
+        );
+        assert!(matches!(&lex_all("1_000n")[0], TokenKind::BigInt(d) if &**d == "1000"));
+        assert!(matches!(&lex_all("0n")[0], TokenKind::BigInt(d) if &**d == "0"));
+        for bad in ["1e", "1e+", "1._5", "1_.5", "1.5_", "1e_5", "0_1", "5.n", "1e5n"] {
+            assert!(Lexer::new(bad, false).next_token().is_err(), "{bad} should not lex");
+        }
+        let units = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let toks = lex_all("'plain' \"caf\u{e9}\" 'a\\'b' \"\\u{1F600}\\x41\" ''");
+        let strings: Vec<Vec<u16>> = toks
+            .iter()
+            .map(|t| match t {
+                TokenKind::String { value, .. } => value.to_vec(),
+                _ => panic!("not a string: {t:?}"),
+            })
+            .collect();
+        assert_eq!(
+            strings,
+            [units("plain"), units("caf\u{e9}"), units("a'b"), units("\u{1F600}A"), vec![]]
+        );
+        assert!(Lexer::new("'abc", false).next_token().is_err());
+        assert!(Lexer::new("'ab\nc'", false).next_token().is_err());
     }
 
     #[test]

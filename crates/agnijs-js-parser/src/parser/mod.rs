@@ -75,7 +75,7 @@ struct Label {
 
 pub struct Parser<'s> {
     lexer: Lexer<'s>,
-    tok: Token,
+    tok: Token<'s>,
     /// End offset of the previous token (for spans).
     prev_end: u32,
     pub(crate) ctx: FnCtx,
@@ -171,7 +171,7 @@ impl<'s> Parser<'s> {
         self.err(msg, self.tok.span)
     }
 
-    pub(crate) fn advance(&mut self) -> Result<Token> {
+    pub(crate) fn advance(&mut self) -> Result<Token<'s>> {
         let next = self.lexer.next_token()?;
         self.prev_end = self.tok.span.end;
         Ok(std::mem::replace(&mut self.tok, next))
@@ -235,18 +235,18 @@ impl<'s> Parser<'s> {
     }
 
     /// Look at the token after the current one without consuming anything.
-    pub(crate) fn peek(&mut self) -> Result<Token> {
+    pub(crate) fn peek(&mut self) -> Result<Token<'s>> {
         let state = self.lexer.state();
         let t = self.lexer.next_token();
         self.lexer.restore(state);
         t
     }
 
-    pub(crate) fn snapshot(&self) -> (LexerState, Token, u32) {
+    pub(crate) fn snapshot(&self) -> (LexerState, Token<'s>, u32) {
         (self.lexer.state(), self.tok.clone(), self.prev_end)
     }
 
-    pub(crate) fn rewind(&mut self, s: (LexerState, Token, u32)) {
+    pub(crate) fn rewind(&mut self, s: (LexerState, Token<'s>, u32)) {
         self.lexer.restore(s.0);
         self.tok = s.1;
         self.prev_end = s.2;

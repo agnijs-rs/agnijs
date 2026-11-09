@@ -1,9 +1,11 @@
 ---
 id: TASK-100.26
 title: 'Parser and compiler: cut allocation in the front end'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-09T03:18:00Z'
+updated_date: '2026-11-09T17:04:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -36,3 +38,15 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #3 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #4 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Measure: compile-source and bytecode-load (bench child), ui-bundle-startup (gable-harness startup, path-patched), winprof allocator attribution, and a counting-allocator tool for front-end allocation counts and peak heap.
+2. Equivalence oracle before refactoring: dump every test262 file (and the Gable bench bundles) compiled as script and module, recording the error message and span or a hash of the code tree's Debug print and serialised bytes; diff after each slice. Lexer fast-path unit tests.
+3. Lexer: borrow unescaped identifier names from the source (Cow), scan decimal literals and escape-free strings without intermediate Strings, no Vec per escape.
+4. Parser: intern names in one set with a fast hasher; fast hasher for scope maps.
+5. Compiler: fast hasher for analysis and compiler maps; cut per-node allocations the profile shows (emit, bound_names, resolve, static_name).
+6. Check the release profile (LTO/codegen-units) on compile-source.
+7. Re-measure with alternated binaries; test262 (both modes, intl402), RegExp suites, parser tests, gc-stress subset, Gable suites.
+<!-- SECTION:PLAN:END -->
