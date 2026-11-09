@@ -21,6 +21,9 @@
 //! `Debugger.evaluateOnCallFrame`, `Runtime.getProperties` and
 //! `Runtime.callFunctionOn`.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod server;
 pub mod ws;
 

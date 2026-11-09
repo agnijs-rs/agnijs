@@ -7,6 +7,9 @@
 //! `SyntaxError`s with locations. Covers ES2025 plus Annex B, minus
 //! `IsHTMLDDA` (which is a runtime concept anyway).
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod ast;
 pub mod error;
 pub mod lexer;

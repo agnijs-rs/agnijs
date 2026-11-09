@@ -6,6 +6,9 @@
 //! run it against UTF-16 code units from a start index. The engine behind
 //! the seam is `regress` (ADR 0013); nothing outside this crate names it.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod syntax;
 
 #[cfg(feature = "linear")]

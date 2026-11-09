@@ -4,6 +4,9 @@
 //! dynamically created functions (`Function(...)`). The output is a tree
 //! of [`CodeBlock`]s; the VM owns execution.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod analysis;
 pub mod bytecode;
 mod compile;

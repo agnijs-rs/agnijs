@@ -6,6 +6,9 @@
 //! object shapes and calls into this crate; nothing in here knows about JS
 //! values, so the ICU4X version can move without touching the VM.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub(crate) mod provider;
 pub mod tables;
 pub mod decimal;

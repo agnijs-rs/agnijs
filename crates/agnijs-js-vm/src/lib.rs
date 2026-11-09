@@ -5,6 +5,9 @@
 //! used: heap values are arena indices (`value::ObjId` and friends) and the
 //! collector is a precise mark-sweep over those arenas (see `heap.rs`).
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod bigint;
 pub mod builtins;
 pub mod convert;

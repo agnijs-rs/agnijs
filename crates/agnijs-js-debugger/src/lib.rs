@@ -22,6 +22,9 @@
 //!
 //! See `docs/js-engine-spec.md` section 9 and ADR 0017.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod source_map;
 
 pub use agnijs_engine_api::{ConsoleLevel, Engine, Error, RealmId, Value};

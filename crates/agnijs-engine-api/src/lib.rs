@@ -11,6 +11,9 @@
 //!   persistent, reference-counted roots with no lifetime parameter.
 //! - [`conformance`]: the kit every implementation must pass.
 
+// ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
+#![forbid(unsafe_code)]
+
 pub mod conformance;
 pub mod engine;
 pub mod error;
