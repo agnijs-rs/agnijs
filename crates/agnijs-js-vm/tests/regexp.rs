@@ -132,3 +132,57 @@ fn the_host_picks_the_matcher_per_engine_at_creation() {
     Vm::create_realm(&mut auto);
     assert_eq!(auto.regex_mode, agnijs_js_regex::MatcherMode::Auto);
 }
+
+/// Run `f` on a thread with the default 2 MB stack.
+fn on_default_stack(f: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(f).unwrap().join().unwrap();
+}
+
+#[test]
+fn deeply_nested_patterns_are_syntax_errors_not_stack_overflows() {
+    // TASK-100.34: 100,000 levels, far past the regex nesting limit.
+    on_default_stack(|| {
+        let deep = 100_000;
+        let open = "(?:".repeat(deep);
+        let close = ")".repeat(deep);
+        // A literal is an early error of the script.
+        let mut vm = Vm::new(TestHost::new());
+        Vm::create_realm(&mut vm);
+        let realm = vm.main_realm();
+        let err = vm.eval_script(realm, "literal.js", &format!("/{open}a{close}/")).unwrap_err();
+        let exc = err.exception().expect("a thrown SyntaxError");
+        assert_eq!(exc.name, "SyntaxError");
+        // `new RegExp` throws a catchable SyntaxError, for groups,
+        // lookarounds and v-mode classes alike.
+        let src = format!(
+            "var n = {deep}, out = [];
+             for (var [o, c, f] of [['(', ')', ''], ['(?<=', ')', ''], ['(?!', ')', 'u'], ['[', ']', 'v']]) {{
+               try {{ new RegExp(o.repeat(n) + 'a' + c.repeat(n), f); out.push('compiled'); }}
+               catch (e) {{ out.push(e instanceof SyntaxError); }}
+             }}
+             out.join()"
+        );
+        assert_eq!(vm.eval_script(realm, "ctor.js", &src).unwrap(), Value::string("true,true,true,true"));
+    });
+}
+
+#[test]
+fn patterns_nested_to_the_limit_run_from_source_and_from_bytecode() {
+    on_default_stack(|| {
+        let depth = agnijs_js_regex::syntax::MAX_NESTING;
+        let src = format!(
+            "[/{}a{}/.exec('xa').length, new RegExp('(?:'.repeat({half}) + '['.repeat({half}) + 'a' + ']'.repeat({half}) + ')'.repeat({half}), 'v').test('a')].join()",
+            "(".repeat(depth),
+            ")".repeat(depth),
+            half = depth / 2,
+        );
+        assert_eq!(run(false, &src), Value::string(&format!("{},true", depth + 1)));
+        let host = TestHost::new();
+        let mut compiler = agnijs_js_vm::make_engine(host.clone());
+        let realm = compiler.main_realm();
+        let bytes = compiler.compile_script(realm, "deep.js", &src).unwrap();
+        let mut e = agnijs_js_vm::make_engine(TestHost::new());
+        let realm = e.main_realm();
+        assert_eq!(e.eval_bytecode(realm, &bytes).unwrap(), Value::string(&format!("{},true", depth + 1)));
+    });
+}

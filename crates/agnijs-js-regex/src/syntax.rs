@@ -11,6 +11,17 @@
 
 use std::collections::HashSet;
 
+/// How deeply groups, lookarounds and character classes may nest, all
+/// counted together (TASK-100.34). Every pass over a pattern (this check,
+/// the parser, both compilers and the analyses between them) recurses once
+/// per level, so a deeper pattern is a SyntaxError rather than a stack
+/// overflow. At this depth the deepest pass needs about 340 KB of stack in
+/// a release build and 1.3 MB in a debug one, within the 2 MB a spawned
+/// thread gets by default. Real patterns nest a few levels deep.
+pub const MAX_NESTING: usize = 256;
+
+const TOO_DEEP: &str = "regular expression nested too deeply";
+
 /// Validate a regular expression literal. `pattern` is the literal's body
 /// (between the slashes), `flags` its flag string.
 pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
@@ -81,6 +92,7 @@ pub fn validate_units(pattern: &[u16], unicode: bool, sets: bool) -> Result<(), 
         named: unicode_mode || !names.is_empty(),
         ngroups,
         names,
+        depth: 0,
     };
     let visible = HashSet::new();
     p.disjunction(&visible)?;
@@ -149,6 +161,8 @@ struct P {
     /// Raw group names as written (without escape decoding); decoded names
     /// are added as groups are parsed.
     names: HashSet<String>,
+    /// Groups, lookarounds and classes open at the cursor.
+    depth: usize,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -187,6 +201,20 @@ impl P {
     }
     fn err<T>(&self, m: impl Into<String>) -> Result<T, String> {
         Err(m.into())
+    }
+
+    /// Enter one level of nesting, which the caller leaves with
+    /// [`P::leave`] (an error ends the whole check, so it need not).
+    fn enter(&mut self) -> Result<(), String> {
+        if self.depth >= MAX_NESTING {
+            return self.err(TOO_DEEP);
+        }
+        self.depth += 1;
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     // ---- disjunction / alternative / term ---------------------------------
@@ -236,10 +264,12 @@ impl P {
             let lookbehind = self.at_str("(?<=") || self.at_str("(?<!");
             if lookahead || lookbehind {
                 self.i += if lookahead { 3 } else { 4 };
+                self.enter()?;
                 let names = self.disjunction(visible)?;
                 if !self.eat(')') {
                     return self.err("unterminated group");
                 }
+                self.leave();
                 self.declare_all(names, visible, declared);
                 // Annex B: lookaheads may be quantified in non-unicode mode.
                 if lookahead && !self.u {
@@ -394,6 +424,7 @@ impl P {
         declared: &mut HashSet<String>,
     ) -> Result<(), String> {
         self.i += 1; // (
+        self.enter()?;
         if self.eat('?') {
             if self.eat(':') {
                 let names = self.disjunction(visible)?;
@@ -451,6 +482,7 @@ impl P {
         if !self.eat(')') {
             return self.err("unterminated group");
         }
+        self.leave();
         Ok(())
     }
 
@@ -831,6 +863,13 @@ impl P {
     // ---- character classes -------------------------------------------------
 
     fn class(&mut self) -> Result<(), String> {
+        self.enter()?;
+        self.class_body()?;
+        self.leave();
+        Ok(())
+    }
+
+    fn class_body(&mut self) -> Result<(), String> {
         self.i += 1; // [
         if self.v {
             let negated = self.eat('^');
@@ -982,6 +1021,7 @@ impl P {
         };
         if c == u('[') {
             self.i += 1;
+            self.enter()?;
             let negated = self.eat('^');
             let strings = self.class_set_expression()?;
             if negated && strings {
@@ -990,6 +1030,7 @@ impl P {
             if !self.eat(']') {
                 return self.err("unterminated character class");
             }
+            self.leave();
             return Ok((strings, None));
         }
         if c == u('\\') {

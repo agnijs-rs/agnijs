@@ -15,6 +15,12 @@
 //!   pattern behind an empty `(?:)`, which disables the index-0 shortcut
 //!   (TASK-100.30). Quantifiers nest three deep here: the backtracking
 //!   matcher guards empty iterations, so `(?:(_|)+){2}K` finishes.
+//! - [`matchers_agree_on_deeply_nested_patterns`]: the same comparison
+//!   (plus a program loaded from its bytes) on patterns wrapped in groups,
+//!   lookarounds and `v`-mode classes up to and past
+//!   `syntax::MAX_NESTING`, on a 2 MB stack; past the limit every entry
+//!   point must report a syntax error (TASK-100.34). It runs a tenth of the
+//!   case count.
 //! - [`backtracking_agrees_with_regress`]: the backtracking matcher against
 //!   `regress`, the matcher it replaced, kept as a test-only reference
 //!   (`tests/reference`). The generator keeps regress's limits here (two
@@ -693,6 +699,118 @@ fn programs_survive_serialization_and_corruption() {
         "{valid} programs round trip; {corrupted} corrupted copies, {loaded} loads of them, {} run, {unbudgeted} not run (no step budget)",
         loaded - unbudgeted
     );
+}
+
+/// Wrappers for one level of nesting around a fuzzed pattern: they keep
+/// backtracking polynomial however deep they go (no unbounded quantifier,
+/// which nested would be exponential on a failing input).
+const NESTING: &[(&str, &str)] = &[
+    ("(", ")"),
+    ("(?:", ")"),
+    ("(?:", ")?"),
+    ("(", ")??"),
+    ("(?:b|", ")"),
+    ("(?:", "|c)"),
+    ("(?i:", ")"),
+    ("(?-s:", ")"),
+    ("(?=", ")"),
+    ("(?!", ")"),
+    ("(?<=", ")"),
+    ("(?<!", ")"),
+];
+
+/// A random pattern nested in random wrappers, some of them deep, some
+/// past [`syntax::MAX_NESTING`]; in `v` mode the pattern sometimes begins
+/// with a nested class.
+fn deep_case(rng: &mut Rng) -> (String, String, usize) {
+    let (inner, flags) = random_case(rng, 2, false);
+    let limit = agnijs_js_regex::syntax::MAX_NESTING;
+    let mut depth = match rng.below(10) {
+        0..=5 => 1 + rng.below(40),
+        6..=8 => limit - 8 + rng.below(12),
+        _ => limit + rng.below(limit * 4),
+    };
+    let mut pattern = inner;
+    if flags.ends_with('v') && rng.chance(40) {
+        let k = 1 + rng.below(depth);
+        let item = rng.pick(&["a", "[ab]", "\\q{ab|c}", "[^[ab]]", "[\\w--[a]]", "\\d"]);
+        pattern = format!("{}{item}{}{pattern}", "[".repeat(k), "]".repeat(k));
+        depth -= k.min(depth - 1);
+    }
+    // Without lookaround half the time, so that many stay eligible for the
+    // linear matcher.
+    let wrappers = if rng.chance(50) { NESTING } else { &NESTING[..8] };
+    for _ in 0..depth {
+        let (open, close) = wrappers[rng.below(wrappers.len())];
+        pattern = format!("{open}{pattern}{close}");
+    }
+    (pattern, flags, depth)
+}
+
+/// The matchers agree on deeply nested patterns as on shallow ones, and a
+/// pattern nested past the limit is a syntax error from every entry point
+/// (TASK-100.34). Runs on an explicit 2 MB stack, the default for a spawned
+/// thread.
+#[test]
+fn matchers_agree_on_deeply_nested_patterns() {
+    std::thread::Builder::new()
+        .stack_size(2 * 1024 * 1024)
+        .spawn(deeply_nested_patterns)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn deeply_nested_patterns() {
+    let (cases, mut rng, trace) = settings();
+    let cases = cases.div_ceil(10);
+    let watchdog = Watchdog::start();
+    let (mut valid, mut eligible, mut too_deep, mut invalid, mut deepest) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    while valid < cases {
+        let (pattern, flags_s, _) = deep_case(&mut rng);
+        let p = u(&pattern);
+        let flags = Flags::parse(&u(&flags_s)).unwrap();
+        watchdog.case(&pattern, &flags_s);
+        if trace {
+            eprintln!("/{}/{flags_s}", pattern.escape_debug());
+        }
+        let back = match Regex::compile_with(&p, &flags, MatcherMode::BacktrackingOnly) {
+            Ok(back) => back,
+            Err(e) => {
+                if e.contains("nested too deeply") {
+                    too_deep += 1;
+                    assert!(agnijs_js_regex::syntax::validate_units(&p, flags.unicode, flags.unicode_sets).is_err());
+                    for mode in [MatcherMode::LinearWhenEligible, MatcherMode::Auto] {
+                        assert!(Regex::compile_with(&p, &flags, mode).is_err(), "/{}/{flags_s}", pattern.escape_debug());
+                    }
+                } else {
+                    invalid += 1;
+                }
+                continue;
+            }
+        };
+        valid += 1;
+        deepest = deepest.max(pattern.matches('(').count());
+        let lin = Regex::compile_with(&p, &flags, MatcherMode::LinearWhenEligible).unwrap();
+        let auto = Regex::compile_with(&p, &flags, MatcherMode::Auto).unwrap();
+        let loaded = Regex::from_program_bytes(&back.program_bytes(), MatcherMode::BacktrackingOnly).unwrap();
+        let is_eligible = lin.linear_eligibility().is_ok();
+        eligible += is_eligible as usize;
+        for _ in 0..INPUTS_PER_PATTERN / 2 {
+            let input = random_input(&mut rng);
+            let a = outcomes(&back, &input, &flags);
+            if is_eligible {
+                compare(("backtracking", &a), ("linear", &outcomes(&lin, &input, &flags)), &pattern, &flags_s, &input);
+            }
+            compare(("backtracking", &a), ("auto", &outcomes(&auto, &input, &flags)), &pattern, &flags_s, &input);
+            compare(("compiled", &a), ("loaded", &outcomes(&loaded, &input, &flags)), &pattern, &flags_s, &input);
+        }
+    }
+    println!(
+        "{valid} deeply nested patterns (up to {deepest} open parentheses), {eligible} eligible, {too_deep} too deep, {invalid} otherwise invalid"
+    );
+    assert!(too_deep > 0, "the generator should also nest past the limit");
+    assert!(eligible > 0, "the generator should also produce eligible patterns");
 }
 
 /// Fail with the reproduction at the first differing outcome.

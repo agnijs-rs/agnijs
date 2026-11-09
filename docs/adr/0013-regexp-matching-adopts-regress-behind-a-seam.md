@@ -227,6 +227,12 @@ The differential test skips patterns that hit a known divergence and reports the
 
 The `regress`-era column is the commit before TASK-100.31's matcher (it already had the new tables). One regression remains: forced backtracking on the catastrophic `/(a+)+$/` takes 255.6 ms where `regress` took 116.0 ms. Every loop iteration writes its counter, start position and captures through the undo stack. `Auto` never runs this pattern on the backtracker, so only hosts that choose `BacktrackingOnly` see it, and the pattern is exponential on either engine.
 
-### Known limit: deeply nested patterns
+### Nesting limit (TASK-100.34)
 
-The pattern validator (`syntax::validate`) and the tree compiler recurse on group nesting. On a 2 MB thread, about 2,100 nested groups overflow the validator and about 1,500 overflow the compiler; matching is not affected. Neither has a depth limit yet, and the engine has no shared depth guard to give them one.
+The pattern validator (`syntax::validate`), the parser, both compilers and the tree analyses between them recurse once per level of nesting. Without a limit, a pattern nested about 400 levels deep (debug build) or about 1,500 (release) overflowed a 2 MB thread, so an untrusted `new RegExp` could crash the process.
+
+- **The limit.** Groups of every kind, lookarounds and character classes (nested ones in `v` mode) count together. More than `syntax::MAX_NESTING` (256) open at once is a `SyntaxError` ("regular expression nested too deeply"). The validator runs first for literals, `new RegExp` and precompilation, so the later passes only ever see bounded trees.
+- **Stack use at the limit.** The deepest pass then needs about 340 KB in release and about 1.3 MB in debug, within a spawned thread's default 2 MB. Real patterns nest a few levels; generated ones (tries of words) a few dozen.
+- **Why not iterative passes.** There are about ten recursive walks: the validator, the parser, `nullable`, the anchoring and ambiguity analyses, two code generators and the tree's drop. Rewriting them all with explicit stacks would cost far more than a limit no real pattern reaches. V8 and SpiderMonkey also bound regexp recursion, there by a stack check.
+- **Loaded programs.** Programs loaded from bytes are flat. Verification and both matchers use explicit stacks, so a program nested 100,000 lookarounds deep loads and runs.
+- **Tests.** `tests/nesting.rs` covers every kind of nesting at the limit (compiles, matches and round-trips in all three matcher modes), one past it, and 100,000 levels past it, on an explicit 2 MB stack. `matchers_agree_on_deeply_nested_patterns` in `tests/differential.rs` fuzzes patterns nested up to and past the limit. The VM tests cover literals, `new RegExp` and precompiled bytecode.
