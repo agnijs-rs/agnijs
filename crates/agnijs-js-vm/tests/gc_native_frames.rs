@@ -166,6 +166,8 @@ fn garbage_made_at_module_top_level_is_collected_while_the_module_runs() {
     );
     let mut vm = Vm::new(host);
     Vm::create_realm(&mut vm);
+    // A pacing test, not a stress test: 300k collections would take minutes.
+    vm.heap.stress = false;
     let global = vm.realm().global;
     let fo = vm.new_native("liveObjects", 0, live_objects);
     vm.define_raw_str(global, "liveObjects", VmValue::Object(fo), Attrs::METHOD);
