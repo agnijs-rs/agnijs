@@ -18,6 +18,7 @@ use crate::string::{Repr, StringData, Units};
 use crate::symbol::SymbolData;
 use crate::value::{BigId, EnvId, ObjId, ShapeId, StrId, SymId};
 use hashbrown::HashTable;
+use std::collections::HashSet;
 
 /// A slot arena with a free list and mark bits.
 pub struct Arena<T> {
@@ -222,6 +223,15 @@ pub struct Heap {
     /// alive as roots, so `s[i]`, `charAt` and `fromCharCode` do not
     /// allocate for Latin-1 characters.
     pub single_chars: Vec<Option<StrId>>,
+    /// The prototype epoch (TASK-100.20): inline-cache entries for a
+    /// property found on a prototype hold while it is unchanged. It moves
+    /// when a *watched* object (one some entry looked through, see
+    /// `ObjectData::watched`) changes its keys, attributes or prototype, or
+    /// dies. It saturates; once there, no prototype entry is recorded.
+    pub proto_epoch: u32,
+    /// Atoms pinned for the property keys of code-block names, kept alive
+    /// as roots so the keys can be computed once per block (TASK-100.20).
+    pub pinned: HashSet<StrId>,
 }
 
 impl Default for Heap {
@@ -254,6 +264,32 @@ impl Heap {
             stress_tick: 0,
             memory_limit: None,
             single_chars: vec![None; 256],
+            proto_epoch: 1,
+            pinned: HashSet::new(),
+        }
+    }
+
+    /// Invalidate every prototype inline-cache entry.
+    #[inline]
+    pub fn bump_proto_epoch(&mut self) {
+        self.proto_epoch = self.proto_epoch.saturating_add(1);
+    }
+
+    /// Note a change to `obj`'s keys, attributes or prototype.
+    #[inline]
+    pub fn note_structure_change(&mut self, obj: ObjId) {
+        if self.obj(obj).watched {
+            self.bump_proto_epoch();
+        }
+    }
+
+    /// Set `obj`'s prototype (the only way prototypes change after
+    /// creation, so inline caches see it).
+    pub fn set_proto(&mut self, obj: ObjId, proto: Option<ObjId>) {
+        let o = self.obj_mut(obj);
+        if o.proto != proto {
+            o.proto = proto;
+            self.note_structure_change(obj);
         }
     }
 

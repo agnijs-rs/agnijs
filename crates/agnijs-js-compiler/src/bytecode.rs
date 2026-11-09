@@ -836,27 +836,150 @@ pub struct SourceText {
 pub type IcIdx = u16;
 pub const NO_IC: IcIdx = u16::MAX;
 
-/// A monomorphic inline cache for a named property access: the receiver
-/// shape it was recorded for and where the property lives. `holder` is
-/// `NO_HOLDER` for an own property, otherwise the prototype object (by id)
-/// that held it, whose shape must still be `holder_shape`. The VM owns the
-/// meaning of the ids; the compiler only allocates the slots.
+/// One recorded case of a named property access site (ADR 0012, ADR 0019
+/// J4): plain data at fixed offsets, so a compiled tier can test it
+/// inline. The VM owns the meaning of the ids; the compiler only sizes the
+/// table.
+///
+/// - `kind`: what was found (the `KIND_*` constants).
+/// - `shape`: the receiver shape the case applies to (object receivers).
+/// - `proto`: the receiver's prototype at fill time (prototype kinds), or
+///   the realm's `String.prototype` (string kinds).
+/// - `holder`: the object holding the property (prototype kinds).
+/// - `slot`: the property's slot in the holder (or receiver).
+/// - `epoch`: the VM's prototype epoch at fill time (prototype kinds).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IcEntry {
+    pub kind: u8,
+    /// `FLAG_*` bits.
+    pub flags: u8,
+    pub _reserved: [u8; 2],
     pub shape: u32,
+    pub proto: u32,
     pub holder: u32,
-    pub holder_shape: u32,
     pub slot: u32,
+    pub epoch: u32,
 }
 
 impl IcEntry {
-    pub const NO_HOLDER: u32 = u32::MAX;
+    /// No case recorded.
+    pub const KIND_EMPTY: u8 = 0;
+    /// An own data property of the receiver.
+    pub const KIND_OWN_DATA: u8 = 1;
+    /// A data property of an object on the receiver's prototype chain.
+    pub const KIND_PROTO_DATA: u8 = 2;
+    /// An own accessor of the receiver.
+    pub const KIND_OWN_ACCESSOR: u8 = 3;
+    /// An accessor on the receiver's prototype chain.
+    pub const KIND_PROTO_ACCESSOR: u8 = 4;
+    /// `length` of an array receiver.
+    pub const KIND_ARRAY_LENGTH: u8 = 5;
+    /// `length` of a string primitive.
+    pub const KIND_STRING_LENGTH: u8 = 6;
+    /// A data property found from a string primitive through
+    /// `String.prototype` (a method, usually).
+    pub const KIND_STRING_PROTO_DATA: u8 = 7;
+    /// The site saw more receivers than it has entries; it stays generic.
+    /// Only ever in entry 0.
+    pub const KIND_MEGAMORPHIC: u8 = 0xFF;
+
+    /// The key is `length`: the entry never applies to receivers whose
+    /// `length` is exotic (arrays, String objects).
+    pub const FLAG_LENGTH: u8 = 1;
+
     pub const EMPTY: IcEntry = IcEntry {
+        kind: Self::KIND_EMPTY,
+        flags: 0,
+        _reserved: [0; 2],
         shape: u32::MAX,
+        proto: u32::MAX,
         holder: u32::MAX,
-        holder_shape: u32::MAX,
         slot: u32::MAX,
+        epoch: 0,
     };
+}
+
+/// Entries per inline-cache site: a site with more distinct receivers than
+/// this goes megamorphic.
+pub const IC_ENTRIES: usize = 4;
+
+/// An inline-cache site: up to [`IC_ENTRIES`] cases, filled from the front.
+#[derive(Debug)]
+pub struct IcSite {
+    pub entries: [Cell<IcEntry>; IC_ENTRIES],
+}
+
+/// The state of an [`IcSite`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IcState {
+    Empty,
+    Monomorphic,
+    Polymorphic,
+    Megamorphic,
+}
+
+impl IcSite {
+    pub fn new() -> IcSite {
+        IcSite {
+            entries: std::array::from_fn(|_| Cell::new(IcEntry::EMPTY)),
+        }
+    }
+
+    pub fn state(&self) -> IcState {
+        let first = self.entries[0].get().kind;
+        if first == IcEntry::KIND_MEGAMORPHIC {
+            return IcState::Megamorphic;
+        }
+        match self
+            .entries
+            .iter()
+            .filter(|e| e.get().kind != IcEntry::KIND_EMPTY)
+            .count()
+        {
+            0 => IcState::Empty,
+            1 => IcState::Monomorphic,
+            _ => IcState::Polymorphic,
+        }
+    }
+}
+
+impl Default for IcSite {
+    fn default() -> Self {
+        IcSite::new()
+    }
+}
+
+/// A string constant as the VM last materialised it: the string's id and
+/// the collection count it is valid for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ConstString {
+    pub id: u32,
+    pub epoch: u64,
+}
+
+impl ConstString {
+    pub const EMPTY: ConstString = ConstString {
+        id: u32::MAX,
+        epoch: u64::MAX,
+    };
+}
+
+/// A block's run-time feedback (ADR 0019 J4): inline caches, the property
+/// keys of its names and its materialised string constants. Allocated by
+/// the first VM that runs the block, which owns it (`owner`); another VM
+/// running the same block uses no feedback. Never serialised: a loaded
+/// block starts with none.
+#[derive(Debug)]
+pub struct Feedback {
+    pub owner: u32,
+    /// One per GetNamed / SetNamed site, indexed by [`IcIdx`].
+    pub ic: Box<[IcSite]>,
+    /// The VM's encoding of each name's property key (0: not yet
+    /// computed), indexed by [`NameIdx`].
+    pub name_keys: Box<[Cell<u64>]>,
+    /// String constants, indexed by constant index.
+    pub strings: Box<[Cell<ConstString>]>,
 }
 
 /// A cached global binding for one name of a block ([`CodeBlock::globals`],
@@ -920,8 +1043,10 @@ pub struct CodeBlock {
     pub span: Span,
     /// Module metadata (module code only).
     pub module: Option<Rc<ModuleInfo>>,
-    /// Inline caches, one per GetNamed / SetNamed site; filled by the VM.
-    pub ic: Box<[Cell<IcEntry>]>,
+    /// Number of inline-cache sites (GetNamed / SetNamed).
+    pub ic_count: u16,
+    /// Run-time feedback, allocated on first use (see [`Self::feedback`]).
+    pub feedback: OnceCell<Feedback>,
     /// Global-binding cache, one entry per name; filled by the VM and
     /// allocated on the block's first global access (see [`Self::globals`]).
     pub globals: OnceCell<Box<[Cell<GlobalEntry>]>>,
@@ -940,6 +1065,36 @@ impl CodeBlock {
                 .map(|_| Cell::new(GlobalEntry::EMPTY))
                 .collect()
         })
+    }
+
+    /// The block's feedback when it belongs to VM `owner`, allocating it
+    /// for `owner` if no VM has run the block yet.
+    #[inline]
+    pub fn feedback(&self, owner: u32) -> Option<&Feedback> {
+        let f = self.feedback.get_or_init(|| Feedback {
+            owner,
+            ic: (0..self.ic_count).map(|_| IcSite::new()).collect(),
+            name_keys: self.names.iter().map(|_| Cell::new(0)).collect(),
+            strings: self
+                .constants
+                .iter()
+                .map(|_| Cell::new(ConstString::EMPTY))
+                .collect(),
+        });
+        if f.owner == owner {
+            Some(f)
+        } else {
+            None
+        }
+    }
+
+    /// The feedback if it exists and belongs to `owner` (never allocates).
+    #[inline]
+    pub fn feedback_if(&self, owner: u32) -> Option<&Feedback> {
+        match self.feedback.get() {
+            Some(f) if f.owner == owner => Some(f),
+            _ => None,
+        }
     }
 }
 

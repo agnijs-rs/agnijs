@@ -315,6 +315,9 @@ impl Vm {
         for s in self.heap.single_chars.iter().flatten() {
             roots.str(*s);
         }
+        for s in &self.heap.pinned {
+            roots.str(*s);
+        }
         for h in self.handles.iter() {
             roots.value(*h);
         }
@@ -436,7 +439,13 @@ impl Vm {
 
         // ---- sweep ----
         self.heap.prune_intern_table();
-        self.heap.objects.sweep(|_, _| {});
+        // A dead watched object's id may be reused by an object an inline
+        // cache would mistake for it.
+        let mut watched_died = false;
+        self.heap.objects.sweep(|_, o| watched_died |= o.watched);
+        if watched_died {
+            self.heap.bump_proto_epoch();
+        }
         self.heap.strings.sweep(|_, _| {});
         self.heap.symbols.sweep(|_, _| {});
         self.heap.bigints.sweep(|_, _| {});

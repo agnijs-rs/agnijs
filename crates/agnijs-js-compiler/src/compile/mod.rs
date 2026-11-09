@@ -1215,9 +1215,8 @@ impl<'a> Compiler<'a> {
             source: self.source.clone(),
             span: fs.span,
             module: fs.module.map(Rc::new),
-            ic: (0..fs.ic_count)
-                .map(|_| std::cell::Cell::new(IcEntry::EMPTY))
-                .collect(),
+            ic_count: fs.ic_count,
+            feedback: std::cell::OnceCell::new(),
             globals: std::cell::OnceCell::new(),
             debug: DebugInfo {
                 statements: fs.statements,

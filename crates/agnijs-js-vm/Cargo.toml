@@ -15,6 +15,9 @@ linear-regex = ["agnijs-js-regex/linear"]
 # Counts dispatched instructions in `Vm::instr_count` (TASK-100.18). For
 # the instruction-count tests only; it adds a store per instruction.
 instr-count = []
+# Counts inline-cache hits, misses and fills in `Vm::ic_stats`
+# (TASK-100.20). For measurement only.
+ic-stats = []
 
 [dependencies]
 agnijs-engine-api.workspace = true

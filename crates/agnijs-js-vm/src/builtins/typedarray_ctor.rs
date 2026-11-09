@@ -293,7 +293,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
         let name = kind_name(kind);
         let kproto = vm.new_object_with_proto(Some(proto));
         let kctor = super::install_ctor(vm, realm, name, 3, typed_array_constructor, kproto, ci, pi);
-        vm.heap.obj_mut(kctor).proto = Some(ctor);
+        vm.heap.set_proto(kctor, Some(ctor));
         vm.set_native_slot(kctor, 0, Value::Number(kind_tag(kind) as f64));
         let bpe = Value::Number(kind.size() as f64);
         vm.define_raw_str(kctor, "BYTES_PER_ELEMENT", bpe, Attrs::NONE);

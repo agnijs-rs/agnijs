@@ -78,7 +78,7 @@ fn install_function_kind(
     proto_intrinsic: Intrinsic,
 ) {
     let ctor = vm.new_native_ctor(name, 1, f);
-    vm.heap.obj_mut(ctor).proto = Some(function_ctor);
+    vm.heap.set_proto(ctor, Some(function_ctor));
     let proto = vm.new_object_with_proto(Some(function_proto));
     vm.realm_mut().set_intrinsic(ctor_intrinsic, ctor);
     vm.realm_mut().set_intrinsic(proto_intrinsic, proto);

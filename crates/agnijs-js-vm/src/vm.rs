@@ -355,9 +355,22 @@ pub struct Vm {
     /// Reused buffer for the argument list of an inlined
     /// `Function.prototype.apply` (TASK-100.19).
     pub(crate) arg_scratch: Vec<Value>,
+    /// This VM's claim on a code block's run-time feedback
+    /// (`CodeBlock::feedback`): ids, shapes and keys in it are this VM's.
+    pub(crate) feedback_owner: u32,
+    /// Inline-cache counters (feature `ic-stats`).
+    #[cfg(feature = "ic-stats")]
+    pub ic_stats: crate::interp::ic::IcStats,
     /// Instructions dispatched by `Vm::run` (feature `instr-count`).
     #[cfg(feature = "instr-count")]
     pub instr_count: u64,
+}
+
+/// A distinct, non-zero feedback owner per VM.
+fn next_feedback_owner() -> u32 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 impl Vm {
@@ -409,6 +422,9 @@ impl Vm {
             debug: None,
             debug_hot: false,
             arg_scratch: Vec::new(),
+            feedback_owner: next_feedback_owner(),
+            #[cfg(feature = "ic-stats")]
+            ic_stats: Default::default(),
             #[cfg(feature = "instr-count")]
             instr_count: 0,
         };

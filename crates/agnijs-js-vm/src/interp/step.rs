@@ -4,20 +4,67 @@ use super::{Args, ConstructKind, Flow, RunOutcome};
 use crate::convert::{bin_arith, Hint};
 use crate::object::{Class, FieldKey, ObjectData};
 use crate::symbol::{PrivateElement, SymbolData, SymbolKind};
-use crate::value::{Attrs, PropKey, PropSlot, Property, PropertyDescriptor, Value};
+use super::ic::{ic_stat, IcGet};
+use crate::value::{Attrs, PropKey, PropSlot, Property, PropertyDescriptor, StrId, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
 use agnijs_js_compiler::bytecode::{
-    BinOp, CodeBlock, Constant, ErrorKind, Instr, NamePrefix, PrivateKind, RESUME_RETURN,
-    RESUME_THROW,
+    BinOp, CodeBlock, ConstString, Constant, ErrorKind, Instr, NamePrefix, PrivateKind,
+    RESUME_RETURN, RESUME_THROW,
 };
 use std::rc::Rc;
+
+/// String constants up to this many code units load as atoms.
+const ATOM_CONSTANT_MAX: usize = 32;
+
+/// A name's property key as stored in `Feedback::name_keys` (0: not yet
+/// computed). Names are never symbols.
+fn encode_name_key(k: PropKey) -> u64 {
+    match k {
+        PropKey::Index(i) => (1 << 32) | i as u64,
+        PropKey::Str(s) => (2 << 32) | s.0 as u64,
+        PropKey::Sym(_) => 0,
+    }
+}
+
+#[inline]
+fn decode_name_key(v: u64) -> Option<PropKey> {
+    let low = v as u32;
+    match v >> 32 {
+        1 => Some(PropKey::Index(low)),
+        2 => Some(PropKey::Str(StrId(low))),
+        _ => None,
+    }
+}
 
 impl Vm {
     #[inline]
     pub(crate) fn constant_value(&mut self, code: &CodeBlock, idx: u32) -> Value {
         match &code.constants[idx as usize] {
             Constant::Number(n) => Value::Number(*n),
-            Constant::String(s) => Value::String(self.heap.alloc_str_utf16(s.to_vec())),
+            Constant::String(s) => {
+                // One string per constant until the next collection (when
+                // it may have died): an atom when short, so using it as a
+                // property key (`super.m`, `o['k']`) hashes nothing.
+                let epoch = self.gc_count;
+                let cell = code
+                    .feedback(self.feedback_owner)
+                    .map(|f| &f.strings[idx as usize]);
+                if let Some(c) = cell {
+                    let e = c.get();
+                    if e.epoch == epoch {
+                        return Value::String(StrId(e.id));
+                    }
+                }
+                let id = if s.len() <= ATOM_CONSTANT_MAX {
+                    self.heap.atom_utf16(s)
+                } else {
+                    self.heap.alloc_str_utf16(s.to_vec())
+                };
+                if let Some(c) = cell {
+                    c.set(ConstString { id: id.0, epoch });
+                }
+                Value::String(id)
+            }
             Constant::BigInt(text) => {
                 let b = crate::bigint::parse_literal(text);
                 Value::BigInt(self.heap.alloc_bigint(crate::bigint::BigIntData(b)))
@@ -35,10 +82,28 @@ impl Vm {
         }
     }
 
+    /// The property key of name `idx`: computed (and its atom pinned) the
+    /// first time the block needs it, then read from the block's feedback,
+    /// so a cache miss hashes nothing (TASK-100.20).
     #[inline]
     pub(crate) fn name_key(&mut self, code: &CodeBlock, idx: u32) -> PropKey {
+        let cell = code
+            .feedback(self.feedback_owner)
+            .map(|f| &f.name_keys[idx as usize]);
+        if let Some(c) = cell {
+            if let Some(k) = decode_name_key(c.get()) {
+                return k;
+            }
+        }
         let name: &str = &code.names[idx as usize];
-        self.key(name)
+        let key = self.key(name);
+        if let Some(c) = cell {
+            if let PropKey::Str(s) = key {
+                self.heap.pinned.insert(s);
+            }
+            c.set(encode_name_key(key));
+        }
+        key
     }
 
     #[inline]
@@ -267,15 +332,39 @@ impl Vm {
             // ---- property access ----
             Instr::GetNamed { obj, name, ic } => {
                 let o = reg!(obj);
-                if let Value::Object(oid) = o {
-                    if let Some(v) = self.ic_get(code, ic, oid) {
+                match self.ic_get(code, ic, o) {
+                    Some(IcGet::Value(v)) => {
+                        ic_stat!(self, get_hits);
                         set_acc!(v);
                         return Ok(Flow::Next);
                     }
+                    Some(IcGet::Getter(g)) => {
+                        // A cached accessor: call the getter, as a frame in
+                        // this loop when it is bytecode.
+                        ic_stat!(self, get_hits);
+                        if let Some(gf) = self.inlinable_callee(g) {
+                            self.push_function_frame(
+                                gf,
+                                o,
+                                Args::Slice(&[]),
+                                Value::Undefined,
+                                ConstructKind::None,
+                                false,
+                            )?;
+                            return Ok(Flow::Reload);
+                        }
+                        let v = self.call_value(g, o, &[])?;
+                        set_acc!(v);
+                        return Ok(Flow::Next);
+                    }
+                    None => ic_stat!(self, get_misses),
                 }
                 let key = self.name_key(code, name);
+                if matches!(o, Value::String(_)) {
+                    self.ic_fill_get(code, ic, o, key);
+                }
                 if let Value::Object(oid) = o {
-                    self.ic_fill_get(code, ic, oid, key);
+                    self.ic_fill_get(code, ic, o, key);
                     // An ordinary lookup reads the value directly, and a
                     // bytecode getter runs as a frame in this loop.
                     match self.ordinary_get(oid, key) {
@@ -311,9 +400,30 @@ impl Vm {
                 let v = acc!();
                 if let Value::Object(oid) = o {
                     if self.ic_set(code, ic, oid, v) {
+                        ic_stat!(self, set_hits);
+                        return Ok(Flow::Next);
+                    }
+                    if let Some(s) = self.ic_setter(code, ic, oid) {
+                        // A cached accessor: call the setter; the
+                        // accumulator keeps the assigned value.
+                        ic_stat!(self, set_hits);
+                        if let Some(sf) = self.inlinable_callee(s) {
+                            self.push_function_frame(
+                                sf,
+                                o,
+                                Args::Slice(&[v]),
+                                Value::Undefined,
+                                ConstructKind::None,
+                                false,
+                            )?;
+                            self.frames.last_mut().unwrap().discard_result = true;
+                            return Ok(Flow::Reload);
+                        }
+                        self.call_value(s, o, &[v])?;
                         return Ok(Flow::Next);
                     }
                 }
+                ic_stat!(self, set_misses);
                 let key = self.name_key(code, name);
                 if let Value::Object(oid) = o {
                     self.ic_fill_set(code, ic, oid, key);
@@ -343,6 +453,7 @@ impl Vm {
             Instr::GetKeyed { obj, key } => {
                 let o = reg!(obj);
                 let k = reg!(key);
+                ic_stat!(self, keyed_misses);
                 if o.is_nullish() {
                     let ks = self.display_key_value(k)?;
                     let msg = format!(
@@ -359,6 +470,7 @@ impl Vm {
             Instr::SetKeyed { obj, key, strict } => {
                 let o = reg!(obj);
                 let k = reg!(key);
+                ic_stat!(self, keyed_misses);
                 if o.is_nullish() {
                     let ks = self.display_key_value(k)?;
                     let msg = format!(
@@ -543,10 +655,10 @@ impl Vm {
                     .expect("SetPrototypeLiteral on a non-object");
                 match acc!() {
                     Value::Object(p) => {
-                        self.heap.obj_mut(o).proto = Some(p);
+                        self.heap.set_proto(o, Some(p));
                     }
                     Value::Null => {
-                        self.heap.obj_mut(o).proto = None;
+                        self.heap.set_proto(o, None);
                     }
                     _ => {}
                 }

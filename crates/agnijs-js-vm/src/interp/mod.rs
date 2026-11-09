@@ -285,6 +285,14 @@ impl Vm {
                 Instr::LdaInt(i) => acc = Value::Number(i as f64),
                 Instr::LdaConst(c) => match code.constants[c as usize] {
                     Constant::Number(n) => acc = Value::Number(n),
+                    // A string constant already materialised since the
+                    // last collection.
+                    Constant::String(_) => match code.feedback_if(self.feedback_owner) {
+                        Some(f) if f.strings[c as usize].get().epoch == self.gc_count => {
+                            acc = Value::String(crate::value::StrId(f.strings[c as usize].get().id))
+                        }
+                        _ => slow!(instr),
+                    },
                     _ => slow!(instr),
                 },
                 Instr::Ldar(r) => acc = reg!(r),
@@ -322,20 +330,36 @@ impl Vm {
                 }
 
                 // ---- property access: inline-cache hits ----
-                Instr::GetNamed { obj, ic, .. } => match reg!(obj) {
-                    Value::Object(oid) => match self.ic_get(&code, ic, oid) {
-                        Some(v) => acc = v,
-                        None => slow!(instr),
-                    },
+                Instr::GetNamed { obj, ic, .. } => match self.ic_get(&code, ic, reg!(obj)) {
+                    Some(ic::IcGet::Value(v)) => {
+                        ic::ic_stat!(self, get_hits);
+                        acc = v
+                    }
+                    // Accessor hits and misses.
                     _ => slow!(instr),
                 },
                 Instr::SetNamed { obj, ic, .. } => {
                     let o = reg!(obj);
                     match o {
-                        Value::Object(oid) if self.ic_set(&code, ic, oid, acc) => {}
+                        Value::Object(oid) if self.ic_set(&code, ic, oid, acc) => {
+                            ic::ic_stat!(self, set_hits);
+                        }
                         _ => slow!(instr),
                     }
                 }
+
+                // ---- keyed access: dense elements ----
+                Instr::GetKeyed { obj, key } => match (reg!(obj), reg!(key)) {
+                    (Value::Object(oid), Value::Number(n)) => match self.keyed_get_fast(oid, n) {
+                        Some(v) => acc = v,
+                        None => slow!(instr),
+                    },
+                    _ => slow!(instr),
+                },
+                Instr::SetKeyed { obj, key, .. } => match (reg!(obj), reg!(key)) {
+                    (Value::Object(oid), Value::Number(n)) if self.keyed_set_fast(oid, n, acc) => {}
+                    _ => slow!(instr),
+                },
 
                 // ---- operators on numbers ----
                 Instr::Add(r) => match (reg!(r), acc) {

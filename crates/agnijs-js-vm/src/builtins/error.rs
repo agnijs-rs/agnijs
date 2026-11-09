@@ -54,7 +54,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
             ty.constructor(),
             ty.prototype(),
         );
-        vm.heap.obj_mut(ctor).proto = Some(error_ctor);
+        vm.heap.set_proto(ctor, Some(error_ctor));
         let name = vm.str(ty.name());
         vm.define_raw_str(proto, "name", name, Attrs::METHOD);
         vm.define_raw_str(proto, "message", empty, Attrs::METHOD);

@@ -149,19 +149,31 @@ fn the_source_text_is_stored_once_and_shared_by_nested_functions() {
 #[test]
 fn inline_caches_start_empty_after_decode() {
     let code = compile_script("var o = { a: 1 }; o.a; o.a = 2;", "ic.js").unwrap();
-    // Pretend the VM filled a cache before the tree was saved.
-    code.ic[0].set(agnijs_js_compiler::IcEntry {
+    // Pretend the VM filled the feedback before the tree was saved.
+    let fb = code.feedback(1).unwrap();
+    fb.ic[0].entries[0].set(agnijs_js_compiler::IcEntry {
+        kind: agnijs_js_compiler::IcEntry::KIND_OWN_DATA,
+        flags: 0,
+        _reserved: [0; 2],
         shape: 7,
-        holder: 1,
-        holder_shape: 2,
+        proto: 1,
+        holder: 2,
         slot: 3,
+        epoch: 4,
     });
+    fb.name_keys[0].set(99);
     let back = decode(&encode(&code)).unwrap();
-    assert_eq!(back.ic.len(), code.ic.len());
-    assert!(back
+    assert_eq!(back.ic_count, code.ic_count);
+    // Pre-interned names and caches are run-time state: a loaded block
+    // starts with none, and whichever VM runs it first allocates them.
+    assert!(back.feedback.get().is_none());
+    let fb = back.feedback(2).unwrap();
+    assert!(fb
         .ic
         .iter()
-        .all(|c| c.get() == agnijs_js_compiler::IcEntry::EMPTY));
+        .all(|s| s.state() == agnijs_js_compiler::IcState::Empty));
+    assert!(fb.name_keys.iter().all(|k| k.get() == 0));
+    assert!(back.feedback(1).is_none(), "feedback belongs to its first VM");
 }
 
 /// The compiler's debug info for `code`, taken out of its section.

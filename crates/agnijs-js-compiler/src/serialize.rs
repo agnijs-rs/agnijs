@@ -43,7 +43,6 @@
 use crate::bytecode::*;
 use agnijs_js_parser::ast::FunctionKind;
 use agnijs_js_parser::span::Span;
-use std::cell::Cell;
 use std::collections::HashMap;
 use std::fmt;
 use std::rc::Rc;
@@ -932,7 +931,7 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
             put_module(w, m);
         }
     }
-    w.len(c.ic.len());
+    w.len(c.ic_count as usize);
     w.len(c.functions.len());
     w.len(c.instrs.len());
     for i in &c.instrs {
@@ -1114,7 +1113,7 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
     if len == 0 {
         return invalid("empty code block");
     }
-    if ic_len > len {
+    if ic_len > len || ic_len >= NO_IC as usize {
         return invalid(format!("{ic_len} inline caches for {len} instructions"));
     }
     let mut v = Verifier {
@@ -1196,7 +1195,8 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         source,
         span,
         module,
-        ic: (0..ic_len).map(|_| Cell::new(IcEntry::EMPTY)).collect(),
+        ic_count: ic_len as u16,
+        feedback: std::cell::OnceCell::new(),
         globals: std::cell::OnceCell::new(),
         debug,
     }))

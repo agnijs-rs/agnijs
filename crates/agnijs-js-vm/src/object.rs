@@ -363,6 +363,10 @@ pub struct ObjectData {
     pub dict: Option<Box<IndexMap<PropKey, Property>>>,
     pub elements: Elements,
     pub extensible: bool,
+    /// An inline-cache entry looked through or into this object on a
+    /// prototype chain: changes to its keys, attributes or prototype, and
+    /// its death, move `Heap::proto_epoch` (TASK-100.20). Never cleared.
+    pub watched: bool,
     pub class: Class,
 }
 
@@ -375,6 +379,7 @@ impl ObjectData {
             dict: None,
             elements: Elements::Dense(Vec::new()),
             extensible: true,
+            watched: false,
             class,
         }
     }
@@ -509,6 +514,10 @@ impl Heap {
         if o.dict.is_some() {
             return;
         }
+        if o.watched {
+            self.bump_proto_epoch();
+        }
+        let o = self.obj(obj);
         let mut dict = IndexMap::with_capacity(o.slots.len() + 8);
         for (i, (k, attrs)) in self.shape_keys(o.shape).iter().enumerate() {
             dict.insert(
@@ -618,6 +627,7 @@ impl Heap {
                 self.note_growth(grown);
             }
             _ => {
+                self.note_structure_change(obj);
                 let o = self.obj(obj);
                 if o.dict.is_none() && o.slots.len() >= DICT_THRESHOLD {
                     self.make_dictionary(obj);
@@ -660,6 +670,7 @@ impl Heap {
                 }
             }
             _ => {
+                self.note_structure_change(obj);
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     d.insert(key, prop);
@@ -736,6 +747,7 @@ impl Heap {
                 }
             }
             _ => {
+                self.note_structure_change(obj);
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     return d.shift_remove(&key).is_some();

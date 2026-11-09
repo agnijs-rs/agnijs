@@ -15,7 +15,7 @@ pub fn function_prototype_call(_vm: &mut Vm, _a: &CallArgs) -> JsResult<Value> {
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let proto = vm.intrinsic(Intrinsic::FunctionPrototype);
     let object_proto = vm.intrinsic(Intrinsic::ObjectPrototype);
-    vm.heap.obj_mut(proto).proto = Some(object_proto);
+    vm.heap.set_proto(proto, Some(object_proto));
     let ctor = super::install_ctor(
         vm,
         realm,
@@ -98,7 +98,7 @@ pub fn create_dynamic_function(
     let proto = vm.get_prototype_from_constructor(new_target, fallback)?;
     let global_env = vm.realm().global_env;
     let f = vm.create_function(code, Some(global_env), None);
-    vm.heap.obj_mut(f).proto = Some(proto);
+    vm.heap.set_proto(f, Some(proto));
     Ok(Value::Object(f))
 }
 

@@ -625,7 +625,7 @@ impl Vm {
         let env = self.frames[fi].env;
         let module = self.frames[fi].module;
         let f = self.create_function(code, env, module);
-        self.heap.obj_mut(f).proto = Some(ctor_parent);
+        self.heap.set_proto(f, Some(ctor_parent));
         if let Some(fd) = self.heap.obj_mut(f).function_mut() {
             fd.home_object = Some(proto);
         }

@@ -88,7 +88,7 @@ impl Vm {
             }
             p = self.heap.obj(pp).proto;
         }
-        self.heap.obj_mut(o).proto = proto;
+        self.heap.set_proto(o, proto);
         true
     }
 
