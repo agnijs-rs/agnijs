@@ -41,6 +41,27 @@ fn uncaptured_bindings_stay_in_registers() {
 }
 
 #[test]
+fn module_block_scoped_bindings_stay_in_registers() {
+    // A module's top-level bindings live in the module environment (the host
+    // creates it), but a loop variable nobody captures is a register, so the
+    // loop neither pushes nor copies an environment per iteration.
+    let cb = compile_module(
+        "let s = 0; for (let i = 0; i < 10; i++) s += i; export { s };",
+        "m",
+    )
+    .unwrap();
+    assert!(!cb.instrs.iter().any(|i| matches!(i, Instr::PushEnv(_))));
+    assert!(!cb.instrs.iter().any(|i| matches!(i, Instr::CopyEnv)));
+    // Captured by a closure, it is back in an environment copied per iteration.
+    let cb = compile_module(
+        "export const fs = []; for (let i = 0; i < 3; i++) fs.push(() => i);",
+        "m",
+    )
+    .unwrap();
+    assert!(cb.instrs.iter().any(|i| matches!(i, Instr::CopyEnv)));
+}
+
+#[test]
 fn compiles_control_flow() {
     script("for (let i = 0; i < 3; i++) { if (i == 1) continue; if (i == 2) break; }");
     script("l: for (const k in o) { for (const v of a) { if (v) continue l; else break l; } }");

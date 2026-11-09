@@ -1127,8 +1127,12 @@ impl<'a> Compiler<'a> {
         analysis: Rc<FnAnalysis>,
         span: Span,
     ) {
-        let poisoned =
-            analysis.has_eval_inside || kind == CodeKind::Module || kind == CodeKind::Eval;
+        // A module's top-level bindings are forced into the module
+        // environment by `compile_module` itself (they are exports and live
+        // imports); its nested block scopes follow the capture analysis like
+        // any function's, so `for (let i ...)` at module level does not copy
+        // an environment per iteration (TASK-100.17).
+        let poisoned = analysis.has_eval_inside || kind == CodeKind::Eval;
         self.fns.push(FnState {
             ic_count: 0,
             kind,
