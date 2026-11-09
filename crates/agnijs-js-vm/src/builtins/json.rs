@@ -2,11 +2,11 @@
 
 use crate::object::{CallArgs, Class};
 use crate::realm::Intrinsic;
-use crate::string::StrBuilder;
+use crate::string::{StrBuilder, Units};
 use crate::value::{Attrs, ObjId, PropKey, StrId, Value};
 use crate::vm::{JsResult, Vm};
 use agnijs_engine_api::RealmId;
-use agnijs_js_parser::number::to_js_string;
+use agnijs_js_parser::number::{format_js_number, NUMBER_BUF_LEN};
 
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let json = vm.new_object();
@@ -22,15 +22,47 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
 
 /// Parse JSON text given as a Rust string (JSON modules).
 pub fn parse_json_text(vm: &mut Vm, text: &str) -> JsResult<Value> {
+    if text.is_ascii() {
+        return parse_units(vm, text.as_bytes());
+    }
     let units: Vec<u16> = text.encode_utf16().collect();
     parse_units(vm, &units)
 }
 
-fn parse_units(vm: &mut Vm, units: &[u16]) -> JsResult<Value> {
+/// A code unit of JSON text. The parser runs over a string's own one-byte
+/// or two-byte storage, so one-byte text is never widened.
+trait Unit: Copy {
+    fn u(self) -> u16;
+    fn units(s: &[Self]) -> Units<'_>;
+}
+
+impl Unit for u8 {
+    #[inline]
+    fn u(self) -> u16 {
+        self as u16
+    }
+    fn units(s: &[u8]) -> Units<'_> {
+        Units::One(s)
+    }
+}
+
+impl Unit for u16 {
+    #[inline]
+    fn u(self) -> u16 {
+        self
+    }
+    fn units(s: &[u16]) -> Units<'_> {
+        Units::Two(s)
+    }
+}
+
+fn parse_units<T: Unit>(vm: &mut Vm, units: &[T]) -> JsResult<Value> {
     let mut p = Parser {
         units,
         pos: 0,
         depth: 0,
+        items: Vec::new(),
+        scratch: Vec::new(),
     };
     p.skip_ws();
     let v = p.parse_value(vm)?;
@@ -41,17 +73,31 @@ fn parse_units(vm: &mut Vm, units: &[u16]) -> JsResult<Value> {
     Ok(v)
 }
 
-struct Parser<'a> {
-    units: &'a [u16],
+struct Parser<'a, T: Unit> {
+    units: &'a [T],
     pos: usize,
     depth: u32,
+    /// The elements of the arrays being parsed, innermost last (one
+    /// buffer for the whole parse; each array takes its run at the end).
+    items: Vec<Value>,
+    /// The content of the current string when it has escapes.
+    scratch: Vec<u16>,
 }
 
 const MAX_JSON_DEPTH: u32 = 5000;
 
-impl<'a> Parser<'a> {
+/// Where a parsed string's content is.
+enum Content {
+    /// `units[start..end]` of the text, which had no escapes.
+    Text(usize, usize),
+    /// The parser's scratch buffer.
+    Scratch,
+}
+
+impl<'a, T: Unit> Parser<'a, T> {
+    #[inline]
     fn peek(&self) -> Option<u16> {
-        self.units.get(self.pos).copied()
+        self.units.get(self.pos).map(|c| c.u())
     }
 
     fn skip_ws(&mut self) {
@@ -64,7 +110,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn fail<T>(&self, vm: &mut Vm, msg: &str) -> JsResult<T> {
+    fn fail<R>(&self, vm: &mut Vm, msg: &str) -> JsResult<R> {
         vm.syntax_error(&format!("JSON.parse: {msg} at position {}", self.pos))
     }
 
@@ -84,7 +130,10 @@ impl<'a> Parser<'a> {
             Some(0x7B) => self.parse_object(vm),
             Some(0x5B) => self.parse_array(vm),
             Some(0x22) => {
-                let s = self.parse_string(vm)?;
+                let s = match self.parse_string(vm)? {
+                    Content::Text(a, b) => vm.heap.alloc_str_units(T::units(&self.units[a..b])),
+                    Content::Scratch => vm.heap.alloc_str_u16(&self.scratch),
+                };
                 Ok(Value::String(s))
             }
             Some(0x74) => {
@@ -104,57 +153,99 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn parse_number(&mut self, vm: &mut Vm) -> JsResult<Value> {
-        let start = self.pos;
-        if self.peek() == Some(0x2D) {
+    fn skip_digits(&mut self) {
+        while matches!(self.peek(), Some(c) if (0x30..=0x39).contains(&c)) {
             self.pos += 1;
         }
+    }
+
+    fn parse_number(&mut self, vm: &mut Vm) -> JsResult<Value> {
+        let start = self.pos;
+        let negative = self.peek() == Some(0x2D);
+        if negative {
+            self.pos += 1;
+        }
+        let int_start = self.pos;
         match self.peek() {
             Some(0x30) => {
                 self.pos += 1;
             }
-            Some(c) if (0x31..=0x39).contains(&c) => {
-                while matches!(self.peek(), Some(c) if (0x30..=0x39).contains(&c)) {
-                    self.pos += 1;
-                }
-            }
+            Some(c) if (0x31..=0x39).contains(&c) => self.skip_digits(),
             _ => return self.fail(vm, "No number after minus sign"),
         }
+        let int_end = self.pos;
+        let mut plain = true;
         if self.peek() == Some(0x2E) {
+            plain = false;
             self.pos += 1;
             let ds = self.pos;
-            while matches!(self.peek(), Some(c) if (0x30..=0x39).contains(&c)) {
-                self.pos += 1;
-            }
+            self.skip_digits();
             if self.pos == ds {
                 return self.fail(vm, "Unterminated fractional number");
             }
         }
         if matches!(self.peek(), Some(0x65) | Some(0x45)) {
+            plain = false;
             self.pos += 1;
             if matches!(self.peek(), Some(0x2B) | Some(0x2D)) {
                 self.pos += 1;
             }
             let ds = self.pos;
-            while matches!(self.peek(), Some(c) if (0x30..=0x39).contains(&c)) {
-                self.pos += 1;
-            }
+            self.skip_digits();
             if self.pos == ds {
                 return self.fail(vm, "Exponent part is missing a number");
             }
         }
-        let text: String = self.units[start..self.pos]
-            .iter()
-            .map(|&u| u as u8 as char)
-            .collect();
-        let n: f64 = text.parse().unwrap_or(f64::NAN);
+        // An integer of up to 15 digits is exact in an f64.
+        if plain && int_end - int_start <= 15 {
+            let mut v: u64 = 0;
+            for c in &self.units[int_start..int_end] {
+                v = v * 10 + (c.u() - 0x30) as u64;
+            }
+            let n = v as f64;
+            return Ok(Value::Number(if negative { -n } else { n }));
+        }
+        // The text is ASCII digits, signs, '.' and 'e'.
+        let text = &self.units[start..self.pos];
+        let mut buf = [0u8; 64];
+        let n: f64 = if text.len() <= buf.len() {
+            for (b, c) in buf.iter_mut().zip(text) {
+                *b = c.u() as u8;
+            }
+            let s = std::str::from_utf8(&buf[..text.len()]).expect("ASCII");
+            s.parse().unwrap_or(f64::NAN)
+        } else {
+            let s: String = text.iter().map(|c| c.u() as u8 as char).collect();
+            s.parse().unwrap_or(f64::NAN)
+        };
         Ok(Value::Number(n))
     }
 
-    fn parse_string(&mut self, vm: &mut Vm) -> JsResult<StrId> {
+    /// Read a string literal (at its opening quote).
+    fn parse_string(&mut self, vm: &mut Vm) -> JsResult<Content> {
         // Opening quote.
         self.pos += 1;
-        let mut b = StrBuilder::new();
+        let start = self.pos;
+        // The common case: no escapes, so the content is the text itself.
+        loop {
+            let Some(c) = self.peek() else {
+                return self.fail(vm, "Unterminated string");
+            };
+            if c == 0x22 {
+                self.pos += 1;
+                return Ok(Content::Text(start, self.pos - 1));
+            }
+            if c == 0x5C {
+                break;
+            }
+            if c < 0x20 {
+                self.pos += 1;
+                return self.fail(vm, "Bad control character in string literal");
+            }
+            self.pos += 1;
+        }
+        self.scratch.clear();
+        self.scratch.extend(self.units[start..self.pos].iter().map(|c| c.u()));
         loop {
             let Some(c) = self.peek() else {
                 return self.fail(vm, "Unterminated string");
@@ -167,15 +258,15 @@ impl<'a> Parser<'a> {
                         return self.fail(vm, "Unterminated string");
                     };
                     self.pos += 1;
-                    match e {
-                        0x22 => b.push(0x22),
-                        0x5C => b.push(0x5C),
-                        0x2F => b.push(0x2F),
-                        0x62 => b.push(0x08),
-                        0x66 => b.push(0x0C),
-                        0x6E => b.push(0x0A),
-                        0x72 => b.push(0x0D),
-                        0x74 => b.push(0x09),
+                    let u = match e {
+                        0x22 => 0x22,
+                        0x5C => 0x5C,
+                        0x2F => 0x2F,
+                        0x62 => 0x08,
+                        0x66 => 0x0C,
+                        0x6E => 0x0A,
+                        0x72 => 0x0D,
+                        0x74 => 0x09,
                         0x75 => {
                             let mut v: u32 = 0;
                             for _ in 0..4 {
@@ -191,16 +282,34 @@ impl<'a> Parser<'a> {
                                 v = (v << 4) | d as u32;
                                 self.pos += 1;
                             }
-                            b.push(v as u16);
+                            v as u16
                         }
                         _ => return self.fail(vm, "Bad escaped character"),
-                    }
+                    };
+                    self.scratch.push(u);
                 }
                 c if c < 0x20 => return self.fail(vm, "Bad control character in string literal"),
-                c => b.push(c),
+                c => self.scratch.push(c),
             }
         }
-        Ok(vm.heap.alloc_str_utf16(b.finish()))
+        Ok(Content::Scratch)
+    }
+
+    /// A property name: an index key, or the atom with the name's content
+    /// (allocated only the first time a name is seen).
+    fn parse_key(&mut self, vm: &mut Vm) -> JsResult<PropKey> {
+        let units = match self.parse_string(vm)? {
+            Content::Text(a, b) => T::units(&self.units[a..b]),
+            Content::Scratch => Units::Two(&self.scratch),
+        };
+        let index = match units {
+            Units::One(b) => PropKey::index_from_bytes(b),
+            Units::Two(w) => PropKey::index_from_units(w),
+        };
+        Ok(match index {
+            Some(i) => PropKey::Index(i),
+            None => PropKey::Str(vm.heap.atom_units(units)),
+        })
     }
 
     fn parse_array(&mut self, vm: &mut Vm) -> JsResult<Value> {
@@ -210,7 +319,7 @@ impl<'a> Parser<'a> {
             return Err(vm.throw_range("Maximum call stack size exceeded"));
         }
         let mark = vm.root_mark();
-        let mut items = Vec::new();
+        let first = self.items.len();
         self.skip_ws();
         if self.peek() == Some(0x5D) {
             self.pos += 1;
@@ -219,7 +328,7 @@ impl<'a> Parser<'a> {
                 self.skip_ws();
                 let v = self.parse_value(vm)?;
                 vm.root(v);
-                items.push(v);
+                self.items.push(v);
                 self.skip_ws();
                 match self.peek() {
                     Some(0x2C) => {
@@ -233,6 +342,7 @@ impl<'a> Parser<'a> {
                 }
             }
         }
+        let items: Vec<Value> = self.items.drain(first..).collect();
         vm.pop_roots(mark);
         self.depth -= 1;
         Ok(Value::Object(vm.new_array(items)))
@@ -256,8 +366,7 @@ impl<'a> Parser<'a> {
                 if self.peek() != Some(0x22) {
                     return self.fail(vm, "Expected property name");
                 }
-                let key = self.parse_string(vm)?;
-                let key = vm.key_from_str(key);
+                let key = self.parse_key(vm)?;
                 self.skip_ws();
                 if self.peek() != Some(0x3A) {
                     return self.fail(vm, "Expected ':' after property name");
@@ -287,8 +396,18 @@ impl<'a> Parser<'a> {
 
 fn json_parse(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let text = vm.to_string(a.arg(0))?;
-    let units = vm.heap.units(text).to_vec();
-    let unfiltered = parse_units(vm, &units)?;
+    // A copy of the text in its own storage width: the parser allocates
+    // into the heap while it reads.
+    let unfiltered = match vm.heap.units(text) {
+        Units::One(b) => {
+            let b = b.to_vec();
+            parse_units(vm, &b)?
+        }
+        Units::Two(u) => {
+            let u = u.to_vec();
+            parse_units(vm, &u)?
+        }
+    };
     let reviver = a.arg(1);
     if vm.is_callable(reviver) {
         let root = vm.new_object();
@@ -317,9 +436,8 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value) -> JsR
                 i += 1.0;
             }
         } else {
-            let keys = vm.enumerable_own_properties(o, 0)?;
+            let keys = vm.enumerable_own_keys(o)?;
             for k in keys {
-                let k = vm.to_property_key(k)?;
                 let new_el = internalize(vm, o, k, reviver)?;
                 if new_el.is_undefined() {
                     vm.delete_property(o, k)?;
@@ -464,13 +582,14 @@ fn serialize_property(
             Ok(true)
         }
         Value::String(s) => {
-            let u = vm.heap.units(s).to_vec();
-            quote_json_string(&u, out);
+            let u = vm.heap.units(s);
+            quote_json_string(u, out);
             Ok(true)
         }
         Value::Number(n) => {
             if n.is_finite() {
-                out.push_str(&to_js_string(n));
+                let mut buf = [0u8; NUMBER_BUF_LEN];
+                out.push_bytes(format_js_number(n, &mut buf).as_bytes());
             } else {
                 out.push_str("null");
             }
@@ -490,35 +609,90 @@ fn serialize_property(
 }
 
 /// QuoteJSONString.
-pub fn quote_json_string(units: &[u16], out: &mut StrBuilder) {
+pub fn quote_json_string(units: Units<'_>, out: &mut StrBuilder) {
     out.push(0x22);
-    let mut i = 0;
-    while i < units.len() {
-        let c = units[i];
-        match c {
-            0x08 => out.push_str("\\b"),
-            0x09 => out.push_str("\\t"),
-            0x0A => out.push_str("\\n"),
-            0x0C => out.push_str("\\f"),
-            0x0D => out.push_str("\\r"),
-            0x22 => out.push_str("\\\""),
-            0x5C => out.push_str("\\\\"),
-            c if c < 0x20 => out.push_str(&format!("\\u{c:04x}")),
-            0xD800..=0xDBFF => {
-                if i + 1 < units.len() && (0xDC00..=0xDFFF).contains(&units[i + 1]) {
-                    out.push(c);
-                    out.push(units[i + 1]);
-                    i += 1;
-                } else {
-                    out.push_str(&format!("\\u{c:04x}"));
+    match units {
+        Units::One(b) => {
+            // Runs of characters that need no escape are copied whole.
+            let mut run = 0;
+            for (i, &c) in b.iter().enumerate() {
+                if c < 0x20 || c == 0x22 || c == 0x5C {
+                    out.push_bytes(&b[run..i]);
+                    push_escape(c as u16, out);
+                    run = i + 1;
                 }
             }
-            0xDC00..=0xDFFF => out.push_str(&format!("\\u{c:04x}")),
-            c => out.push(c),
+            out.push_bytes(&b[run..]);
         }
-        i += 1;
+        Units::Two(u) => {
+            let mut run = 0;
+            let mut i = 0;
+            while i < u.len() {
+                let c = u[i];
+                let plain = match c {
+                    0x22 | 0x5C => false,
+                    c if c < 0x20 => false,
+                    0xD800..=0xDBFF if i + 1 < u.len() && (0xDC00..=0xDFFF).contains(&u[i + 1]) => {
+                        // A surrogate pair stays as it is.
+                        i += 2;
+                        continue;
+                    }
+                    0xD800..=0xDFFF => false,
+                    _ => true,
+                };
+                if !plain {
+                    out.push_slice(&u[run..i]);
+                    push_escape(c, out);
+                    run = i + 1;
+                }
+                i += 1;
+            }
+            out.push_slice(&u[run..]);
+        }
     }
     out.push(0x22);
+}
+
+/// The escape QuoteJSONString writes for `c`: a short form, or `\uXXXX`
+/// for other control characters and lone surrogates.
+fn push_escape(c: u16, out: &mut StrBuilder) {
+    let short: &[u8] = match c {
+        0x08 => b"\\b",
+        0x09 => b"\\t",
+        0x0A => b"\\n",
+        0x0C => b"\\f",
+        0x0D => b"\\r",
+        0x22 => b"\\\"",
+        0x5C => b"\\\\",
+        _ => b"",
+    };
+    if !short.is_empty() {
+        out.push_bytes(short);
+        return;
+    }
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    out.push_bytes(&[
+        b'\\',
+        b'u',
+        HEX[(c >> 12) as usize & 0xF],
+        HEX[(c >> 8) as usize & 0xF],
+        HEX[(c >> 4) as usize & 0xF],
+        HEX[c as usize & 0xF],
+    ]);
+}
+
+/// A property name as QuoteJSONString writes it.
+fn quote_key(vm: &mut Vm, k: PropKey, out: &mut StrBuilder) {
+    match k {
+        PropKey::Index(i) => {
+            let mut buf = [0u8; NUMBER_BUF_LEN];
+            out.push(0x22);
+            out.push_bytes(format_js_number(i as f64, &mut buf).as_bytes());
+            out.push(0x22);
+        }
+        PropKey::Str(s) => quote_json_string(vm.heap.units(s), out),
+        PropKey::Sym(_) => unreachable!("JSON keys are strings"),
+    }
 }
 
 fn enter(vm: &mut Vm, st: &mut Stringify, o: ObjId) -> JsResult<Vec<u16>> {
@@ -546,36 +720,31 @@ fn serialize_object(
     let stepback = enter(vm, st, o)?;
     let keys: Vec<PropKey> = match &st.property_list {
         Some(list) => list.clone(),
-        None => {
-            let vals = vm.enumerable_own_properties(o, 0)?;
-            let mut ks = Vec::with_capacity(vals.len());
-            for v in vals {
-                ks.push(vm.to_property_key(v)?);
-            }
-            ks
-        }
+        None => vm.enumerable_own_keys(o)?,
     };
     out.push(0x7B);
     let mut any = false;
     for k in keys {
-        let mut part = StrBuilder::new();
-        if serialize_property(vm, st, k, o, &mut part)? {
-            if any {
-                out.push(0x2C);
-            }
-            if !st.gap.is_empty() {
-                out.push(0x0A);
-                out.push_slice(&st.indent);
-            }
-            let ks = vm.key_to_string(k);
-            let ku = vm.heap.units(ks).to_vec();
-            quote_json_string(&ku, out);
-            out.push(0x3A);
-            if !st.gap.is_empty() {
-                out.push(0x20);
-            }
-            out.push_slice(&part.finish());
+        // The member is written in place and taken back if the value turns
+        // out to be undefined; writing to `out` is not observable, so this
+        // is the same as serializing the value first.
+        let mark = out.len();
+        if any {
+            out.push(0x2C);
+        }
+        if !st.gap.is_empty() {
+            out.push(0x0A);
+            out.push_slice(&st.indent);
+        }
+        quote_key(vm, k, out);
+        out.push(0x3A);
+        if !st.gap.is_empty() {
+            out.push(0x20);
+        }
+        if serialize_property(vm, st, k, o, out)? {
             any = true;
+        } else {
+            out.truncate(mark);
         }
     }
     if any && !st.gap.is_empty() {

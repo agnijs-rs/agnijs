@@ -320,13 +320,9 @@ impl Vm {
     }
 
     pub fn number_to_string(&mut self, n: f64) -> StrId {
-        if n.fract() == 0.0 && n.abs() < 1e9 && !(n == 0.0 && n.is_sign_negative()) {
-            // Small integers: cheap path.
-            let s = (n as i64).to_string();
-            return self.heap.alloc_str(&s);
-        }
-        let s = agnijs_js_parser::number::to_js_string(n);
-        self.heap.alloc_str(&s)
+        let mut buf = [0u8; agnijs_js_parser::number::NUMBER_BUF_LEN];
+        let text = agnijs_js_parser::number::format_js_number(n, &mut buf);
+        self.heap.alloc_str_latin1(text.as_bytes().to_vec())
     }
 
     /// ToString, returning a Rust string.
@@ -747,7 +743,7 @@ impl Vm {
 
     /// Build a JS string from UTF-16 units.
     pub fn string_from_builder(&mut self, b: StrBuilder) -> Value {
-        Value::String(self.heap.alloc_str_utf16(b.finish()))
+        Value::String(self.heap.alloc_str_builder(b))
     }
 
     /// Trim JS whitespace from a string value's units.

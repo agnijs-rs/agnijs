@@ -1580,9 +1580,32 @@ impl Vm {
     }
 
     /// EnumerableOwnProperties(O, kind) where kind is keys (0), values (1), entries (2).
+    /// EnumerableOwnProperties(O, key) as property keys rather than
+    /// strings: the same [[OwnPropertyKeys]] and [[GetOwnProperty]] calls,
+    /// without materialising a string for each index key.
+    pub fn enumerable_own_keys(&mut self, o: ObjId) -> JsResult<Vec<PropKey>> {
+        let mut keys = self.own_property_keys(o)?;
+        let mut kept = 0;
+        for i in 0..keys.len() {
+            let k = keys[i];
+            if matches!(k, PropKey::Sym(_)) {
+                continue;
+            }
+            let Some(p) = self.own_property(o, k)? else {
+                continue;
+            };
+            if p.attrs.enumerable() {
+                keys[kept] = k;
+                kept += 1;
+            }
+        }
+        keys.truncate(kept);
+        Ok(keys)
+    }
+
     pub fn enumerable_own_properties(&mut self, o: ObjId, kind: u8) -> JsResult<Vec<Value>> {
         let keys = self.own_property_keys(o)?;
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(keys.len());
         for k in keys {
             if matches!(k, PropKey::Sym(_)) {
                 continue;

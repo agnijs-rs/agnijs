@@ -111,8 +111,25 @@ fn this_string_value(vm: &mut Vm, v: Value) -> JsResult<StrId> {
 }
 
 fn substring_value(vm: &mut Vm, s: StrId, start: usize, end: usize) -> Value {
-    let u = vm.heap.units(s).slice(start, end).to_vec();
-    vm.str_from_units(u)
+    Value::String(vm.heap.substring(s, start, end))
+}
+
+/// The code units of two strings at once, without copying either.
+fn units_pair(vm: &mut Vm, a: StrId, b: StrId) -> (Units<'_>, Units<'_>) {
+    vm.heap.flatten(a);
+    vm.heap.flatten(b);
+    (vm.heap.units_flat(a), vm.heap.units_flat(b))
+}
+
+/// Run `f` with `vals` rooted, popping the roots on every path.
+fn rooted<T>(vm: &mut Vm, vals: &[Value], f: impl FnOnce(&mut Vm) -> JsResult<T>) -> JsResult<T> {
+    let mark = vm.root_mark();
+    for &v in vals {
+        vm.root(v);
+    }
+    let r = f(vm);
+    vm.pop_roots(mark);
+    r
 }
 
 fn is_regexp(vm: &mut Vm, v: Value) -> JsResult<bool> {
@@ -277,9 +294,8 @@ fn proto_ends_with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return Ok(Value::Bool(false));
     }
     let start = end - search_len;
-    let su = units_of(vm, search);
-    let hay = vm.heap.units(s);
-    Ok(Value::Bool(hay.slice(start, end).eq_units(&su)))
+    let (hay, su) = units_pair(vm, s, search);
+    Ok(Value::Bool(hay.slice(start, end).eq(&su)))
 }
 
 fn proto_starts_with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -300,11 +316,8 @@ fn proto_starts_with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if search_len + start > len {
         return Ok(Value::Bool(false));
     }
-    let su = units_of(vm, search);
-    let hay = vm.heap.units(s);
-    Ok(Value::Bool(
-        hay.slice(start, start + search_len).eq_units(&su),
-    ))
+    let (hay, su) = units_pair(vm, s, search);
+    Ok(Value::Bool(hay.slice(start, start + search_len).eq(&su)))
 }
 
 fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -317,10 +330,8 @@ fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let search = vm.to_string(a.arg(0))?;
     let len = vm.heap.str_len(s);
     let pos = vm.to_integer_or_infinity(a.arg(1))?.clamp(0.0, len as f64) as usize;
-    let su = units_of(vm, search);
-    vm.heap.flatten(s);
-    let hay = vm.heap.units_flat(s);
-    Ok(Value::Bool(hay.index_of(&Units::Two(&su), pos).is_some()))
+    let (hay, su) = units_pair(vm, s, search);
+    Ok(Value::Bool(hay.index_of(&su, pos).is_some()))
 }
 
 fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -328,10 +339,8 @@ fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let search = vm.to_string(a.arg(0))?;
     let len = vm.heap.str_len(s);
     let pos = vm.to_integer_or_infinity(a.arg(1))?.clamp(0.0, len as f64) as usize;
-    let su = units_of(vm, search);
-    vm.heap.flatten(s);
-    let hay = vm.heap.units_flat(s);
-    Ok(Value::Number(match hay.index_of(&Units::Two(&su), pos) {
+    let (hay, su) = units_pair(vm, s, search);
+    Ok(Value::Number(match hay.index_of(&su, pos) {
         Some(i) => i as f64,
         None => -1.0,
     }))
@@ -353,11 +362,9 @@ fn proto_last_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return Ok(Value::Number(-1.0));
     }
     let from = start.min(len - search_len);
-    let su = units_of(vm, search);
-    vm.heap.flatten(s);
-    let hay = vm.heap.units_flat(s);
+    let (hay, su) = units_pair(vm, s, search);
     Ok(Value::Number(
-        match hay.last_index_of(&Units::Two(&su), from) {
+        match hay.last_index_of(&su, from) {
             Some(i) => i as f64,
             None => -1.0,
         },
@@ -639,57 +646,73 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     Ok(vm.str_from_units(out))
 }
 
-/// GetSubstitution(matched, str, position, captures, namedCaptures, replacementTemplate).
+/// GetSubstitution(matched, str, position, captures, namedCaptures,
+/// replacementTemplate), appended to `out`. The strings are heap handles,
+/// read again after each step that can run code; nothing is copied but
+/// the result.
+#[allow(clippy::too_many_arguments)]
 pub fn get_substitution(
     vm: &mut Vm,
-    matched: &[u16],
-    s: &[u16],
+    matched: StrId,
+    s: StrId,
     position: usize,
     captures: &[Value],
     named: Value,
-    template: &[u16],
-) -> JsResult<Vec<u16>> {
-    let mut result = Vec::with_capacity(template.len());
+    template: StrId,
+    out: &mut StrBuilder,
+) -> JsResult<()> {
+    vm.heap.flatten(matched);
+    vm.heap.flatten(s);
+    vm.heap.flatten(template);
     let m = captures.len();
-    let tail_pos = (position + matched.len()).min(s.len());
+    let s_len = vm.heap.str_len(s);
+    let tail_pos = (position + vm.heap.str_len(matched)).min(s_len);
+    let t_len = vm.heap.str_len(template);
     let mut i = 0;
-    while i < template.len() {
-        let c = template[i];
-        if c != b'$' as u16 || i + 1 >= template.len() {
-            result.push(c);
+    while i < t_len {
+        let t = vm.heap.units_flat(template);
+        // The text up to the next `$` is copied whole.
+        let next = (i..t_len).find(|&k| t.at(k) == 0x24).unwrap_or(t_len);
+        if next > i {
+            out.push_units(&t.slice(i, next));
+            i = next;
+            continue;
+        }
+        if i + 1 >= t_len {
+            out.push(0x24);
             i += 1;
             continue;
         }
-        let n = template[i + 1];
+        let n = t.at(i + 1);
+        let n2 = t.get(i + 2);
         match n {
             0x24 => {
-                result.push(0x24);
+                out.push(0x24);
                 i += 2;
             }
             0x26 => {
-                result.extend_from_slice(matched);
+                out.push_units(&vm.heap.units_flat(matched));
                 i += 2;
             }
             0x60 => {
-                result.extend_from_slice(&s[..position.min(s.len())]);
+                out.push_units(&vm.heap.units_flat(s).slice(0, position.min(s_len)));
                 i += 2;
             }
             0x27 => {
-                result.extend_from_slice(&s[tail_pos..]);
+                out.push_units(&vm.heap.units_flat(s).slice(tail_pos, s_len));
                 i += 2;
             }
             0x30..=0x39 => {
                 let d1 = (n - 0x30) as usize;
-                let two = if i + 2 < template.len() && (0x30..=0x39).contains(&template[i + 2]) {
-                    Some(d1 * 10 + (template[i + 2] - 0x30) as usize)
-                } else {
-                    None
+                let two = match n2 {
+                    Some(d) if (0x30..=0x39).contains(&d) => Some(d1 * 10 + (d - 0x30) as usize),
+                    _ => None,
                 };
                 let (index, consumed) = match two {
                     Some(t) if t >= 1 && t <= m => (t, 3),
                     _ if d1 >= 1 && d1 <= m => (d1, 2),
                     _ => {
-                        result.push(0x24);
+                        out.push(0x24);
                         i += 1;
                         continue;
                     }
@@ -697,46 +720,76 @@ pub fn get_substitution(
                 let cap = captures[index - 1];
                 if !cap.is_undefined() {
                     let cs = vm.to_string(cap)?;
-                    let cu = vm.heap.units(cs);
-                    result.extend(cu.iter());
+                    out.push_units(&vm.heap.units(cs));
                 }
                 i += consumed;
             }
             0x3C => {
-                if named.is_undefined() {
-                    result.push(0x24);
-                    result.push(0x3C);
-                    i += 2;
+                let gt = if named.is_undefined() {
+                    None
                 } else {
-                    let rest = &template[i + 2..];
-                    match rest.iter().position(|&u| u == 0x3E) {
-                        None => {
-                            result.push(0x24);
-                            result.push(0x3C);
-                            i += 2;
-                        }
-                        Some(gt) => {
-                            let group_name = &rest[..gt];
-                            let key_str = vm.heap.alloc_str_utf16(group_name.to_vec());
-                            let key = vm.key_from_str(key_str);
+                    (i + 2..t_len).find(|&k| t.at(k) == 0x3E)
+                };
+                match gt {
+                    None => {
+                        out.push(0x24);
+                        out.push(0x3C);
+                        i += 2;
+                    }
+                    Some(gt) => {
+                        let key_str = vm.heap.substring(template, i + 2, gt);
+                        let key = vm.key_from_str(key_str);
+                        let capture = rooted(vm, &[Value::String(matched), Value::String(s), Value::String(template)], |vm| {
                             let capture = vm.get_value(named, key)?;
-                            if !capture.is_undefined() {
-                                let cs = vm.to_string(capture)?;
-                                let cu = vm.heap.units(cs);
-                                result.extend(cu.iter());
+                            if capture.is_undefined() {
+                                Ok(None)
+                            } else {
+                                vm.to_string(capture).map(Some)
                             }
-                            i += 2 + gt + 1;
+                        })?;
+                        if let Some(cs) = capture {
+                            out.push_units(&vm.heap.units(cs));
                         }
+                        vm.heap.flatten(template);
+                        i = gt + 1;
                     }
                 }
             }
             _ => {
-                result.push(0x24);
+                out.push(0x24);
                 i += 1;
             }
         }
     }
-    Ok(result)
+    Ok(())
+}
+
+/// The replacement for one match of a string search: the callback's
+/// result or the expanded template, appended to `out`.
+fn string_replacement(
+    vm: &mut Vm,
+    s: StrId,
+    search: StrId,
+    pos: usize,
+    replace_value: Value,
+    template: Option<StrId>,
+    out: &mut StrBuilder,
+) -> JsResult<()> {
+    match template {
+        Some(t) => get_substitution(vm, search, s, pos, &[], Value::Undefined, t, out),
+        None => {
+            let rs = rooted(vm, &[Value::String(s), Value::String(search)], |vm| {
+                let r = vm.call_value(
+                    replace_value,
+                    Value::Undefined,
+                    &[Value::String(search), Value::Number(pos as f64), Value::String(s)],
+                )?;
+                vm.to_string(r)
+            })?;
+            out.push_units(&vm.heap.units(rs));
+            Ok(())
+        }
+    }
 }
 
 fn proto_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -754,34 +807,25 @@ fn proto_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = vm.to_string(a.this)?;
     let search = vm.to_string(search_value)?;
     let functional = vm.is_callable(replace_value);
-    let replace_str = if functional {
+    let template = if functional {
         None
     } else {
         Some(vm.to_string(replace_value)?)
     };
-    let su = units_of(vm, s);
-    let searchu = units_of(vm, search);
-    let Some(pos) = Units::Two(&su).index_of(&Units::Two(&searchu), 0) else {
+    let found = {
+        let (hay, needle) = units_pair(vm, s, search);
+        hay.index_of(&needle, 0)
+    };
+    let Some(pos) = found else {
         return Ok(Value::String(s));
     };
-    let replacement: Vec<u16> = if functional {
-        let m = vm.str_from_units(searchu.clone());
-        let r = vm.call_value(
-            replace_value,
-            Value::Undefined,
-            &[m, Value::Number(pos as f64), Value::String(s)],
-        )?;
-        let rs = vm.to_string(r)?;
-        units_of(vm, rs)
-    } else {
-        let t = units_of(vm, replace_str.unwrap());
-        get_substitution(vm, &searchu, &su, pos, &[], Value::Undefined, &t)?
-    };
-    let mut out = Vec::with_capacity(su.len() + replacement.len());
-    out.extend_from_slice(&su[..pos]);
-    out.extend_from_slice(&replacement);
-    out.extend_from_slice(&su[pos + searchu.len()..]);
-    Ok(vm.str_from_units(out))
+    let s_len = vm.heap.str_len(s);
+    let end = pos + vm.heap.str_len(search);
+    let mut out = StrBuilder::with_capacity(s_len + 16);
+    out.push_units(&vm.heap.units_flat(s).slice(0, pos));
+    string_replacement(vm, s, search, pos, replace_value, template, &mut out)?;
+    out.push_units(&vm.heap.units(s).slice(end, s_len));
+    Ok(vm.string_from_builder(out))
 }
 
 fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -801,8 +845,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 return vm.type_error("replaceAll must be called with a global RegExp");
             }
             let fs = vm.to_string(flags)?;
-            let fu = units_of(vm, fs);
-            if !fu.contains(&(b'g' as u16)) {
+            if !vm.heap.units(fs).iter().any(|c| c == b'g' as u16) {
                 return vm.type_error("replaceAll must be called with a global RegExp");
             }
         }
@@ -814,60 +857,41 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = vm.to_string(a.this)?;
     let search = vm.to_string(search_value)?;
     let functional = vm.is_callable(replace_value);
-    let replace_str = if functional {
+    let template = if functional {
         None
     } else {
         Some(vm.to_string(replace_value)?)
     };
-    let su = units_of(vm, s);
-    let searchu = units_of(vm, search);
-    let search_len = searchu.len();
+    let search_len = vm.heap.str_len(search);
+    let s_len = vm.heap.str_len(s);
     let advance = search_len.max(1);
     let mut positions = Vec::new();
-    let hay = Units::Two(&su);
-    let needle = Units::Two(&searchu);
-    let mut pos = hay.index_of(&needle, 0);
-    while let Some(p) = pos {
-        positions.push(p);
-        pos = if p + advance > su.len() {
-            None
-        } else {
-            hay.index_of(&needle, p + advance)
-        };
+    {
+        let (hay, needle) = units_pair(vm, s, search);
+        let mut pos = hay.index_of(&needle, 0);
+        while let Some(p) = pos {
+            positions.push(p);
+            pos = if p + advance > s_len {
+                None
+            } else {
+                hay.index_of(&needle, p + advance)
+            };
+        }
     }
-    let template = replace_str.map(|r| units_of(vm, r));
+    if positions.is_empty() {
+        return Ok(Value::String(s));
+    }
     let mut end_of_last = 0;
-    let mut out = Vec::with_capacity(su.len());
+    let mut out = StrBuilder::with_capacity(s_len + 16);
     for p in positions {
-        let preserved = &su[end_of_last..p];
-        let replacement: Vec<u16> = if functional {
-            let m = vm.str_from_units(searchu.clone());
-            let r = vm.call_value(
-                replace_value,
-                Value::Undefined,
-                &[m, Value::Number(p as f64), Value::String(s)],
-            )?;
-            let rs = vm.to_string(r)?;
-            units_of(vm, rs)
-        } else {
-            get_substitution(
-                vm,
-                &searchu,
-                &su,
-                p,
-                &[],
-                Value::Undefined,
-                template.as_ref().unwrap(),
-            )?
-        };
-        out.extend_from_slice(preserved);
-        out.extend_from_slice(&replacement);
+        out.push_units(&vm.heap.units(s).slice(end_of_last, p));
+        string_replacement(vm, s, search, p, replace_value, template, &mut out)?;
         end_of_last = p + search_len;
     }
-    if end_of_last < su.len() {
-        out.extend_from_slice(&su[end_of_last..]);
+    if end_of_last < s_len {
+        out.push_units(&vm.heap.units(s).slice(end_of_last, s_len));
     }
-    Ok(vm.str_from_units(out))
+    Ok(vm.string_from_builder(out))
 }
 
 fn proto_slice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -920,36 +944,39 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if separator.is_undefined() {
         return Ok(Value::Object(vm.new_array(vec![Value::String(s)])));
     }
-    let su = units_of(vm, s);
-    let ru = units_of(vm, r);
-    if su.is_empty() {
-        if !ru.is_empty() {
+    let s_len = vm.heap.str_len(s);
+    let r_len = vm.heap.str_len(r);
+    if s_len == 0 {
+        if r_len != 0 {
             return Ok(Value::Object(vm.new_array(vec![Value::String(s)])));
         }
         return Ok(Value::Object(vm.new_array(Vec::new())));
     }
-    let mut parts = Vec::new();
-    if ru.is_empty() {
-        for &c in su.iter().take(lim as usize) {
-            parts.push(vm.str_from_units(vec![c]));
+    if r_len == 0 {
+        let n = s_len.min(lim as usize);
+        let mut parts = Vec::with_capacity(n);
+        vm.heap.flatten(s);
+        for i in 0..n {
+            let unit = vm.heap.units_flat(s).at(i);
+            parts.push(Value::String(vm.heap.char_str(unit)));
         }
         return Ok(Value::Object(vm.new_array(parts)));
     }
-    let hay = Units::Two(&su);
-    let needle = Units::Two(&ru);
+    let mut parts = Vec::new();
     let mut i = 0;
-    let mut j = hay.index_of(&needle, 0);
-    while let Some(jj) = j {
-        let piece = vm.str_from_units(su[i..jj].to_vec());
-        parts.push(piece);
+    loop {
+        let j = {
+            let (hay, needle) = units_pair(vm, s, r);
+            hay.index_of(&needle, i)
+        };
+        let Some(j) = j else { break };
+        parts.push(Value::String(vm.heap.substring(s, i, j)));
         if parts.len() as u32 >= lim {
             return Ok(Value::Object(vm.new_array(parts)));
         }
-        i = jj + ru.len();
-        j = hay.index_of(&needle, i);
+        i = j + r_len;
     }
-    let piece = vm.str_from_units(su[i..].to_vec());
-    parts.push(piece);
+    parts.push(Value::String(vm.heap.substring(s, i, s_len)));
     Ok(Value::Object(vm.new_array(parts)))
 }
 
@@ -993,10 +1020,23 @@ fn proto_substr(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 /// Full Unicode case mapping of UTF-16 units, with the final-sigma rule.
 pub fn case_map(u: &[u16], upper: bool) -> Vec<u16> {
-    let mut out: Vec<u16> = Vec::with_capacity(u.len());
-    let units = Units::Two(u);
+    case_map_units(Units::Two(u), upper).finish()
+}
+
+/// Full Unicode case mapping, with the final-sigma rule.
+pub fn case_map_units(units: Units<'_>, upper: bool) -> StrBuilder {
+    let mut out = StrBuilder::with_capacity(units.len());
+    let len = units.len();
     let mut i = 0;
-    while i < u.len() {
+    while i < len {
+        let u = units.at(i);
+        if u < 0x80 {
+            // ASCII maps to ASCII.
+            let b = u as u8;
+            out.push(if upper { b.to_ascii_uppercase() } else { b.to_ascii_lowercase() } as u16);
+            i += 1;
+            continue;
+        }
         let (cp, n) = units.code_point_at(i);
         let Some(ch) = char::from_u32(cp) else {
             out.push(cp as u16);
@@ -1005,13 +1045,13 @@ pub fn case_map(u: &[u16], upper: bool) -> Vec<u16> {
         };
         if upper {
             for c in ch.to_uppercase() {
-                push_char(&mut out, c);
+                out.push_code_point(c as u32);
             }
         } else if ch == '\u{03A3}' && is_final_sigma(&units, i) {
             out.push(0x03C2);
         } else {
             for c in ch.to_lowercase() {
-                push_char(&mut out, c);
+                out.push_code_point(c as u32);
             }
         }
         i += n;
@@ -1019,9 +1059,53 @@ pub fn case_map(u: &[u16], upper: bool) -> Vec<u16> {
     out
 }
 
-fn push_char(out: &mut Vec<u16>, c: char) {
-    let mut buf = [0u16; 2];
-    out.extend_from_slice(c.encode_utf16(&mut buf));
+/// The Latin-1 case mapping of one byte, or `None` when the mapping
+/// leaves Latin-1 (upper-casing µ, ß and ÿ).
+#[inline]
+fn latin1_case(c: u8, upper: bool) -> Option<u8> {
+    if upper {
+        match c {
+            b'a'..=b'z' => Some(c - 0x20),
+            0xE0..=0xFE if c != 0xF7 => Some(c - 0x20),
+            0xB5 | 0xDF | 0xFF => None,
+            _ => Some(c),
+        }
+    } else {
+        match c {
+            b'A'..=b'Z' => Some(c + 0x20),
+            0xC0..=0xDE if c != 0xD7 => Some(c + 0x20),
+            _ => Some(c),
+        }
+    }
+}
+
+/// toLowerCase / toUpperCase. One-byte text maps byte by byte (the string
+/// itself when nothing changes); other text takes the full mapping.
+fn case_convert(vm: &mut Vm, s: StrId, upper: bool) -> Value {
+    vm.heap.flatten(s);
+    if let Units::One(b) = vm.heap.units_flat(s) {
+        let first = b.iter().position(|&c| latin1_case(c, upper) != Some(c));
+        let Some(first) = first else {
+            return Value::String(s);
+        };
+        let mut out = Vec::with_capacity(b.len());
+        out.extend_from_slice(&b[..first]);
+        let mut ok = true;
+        for &c in &b[first..] {
+            match latin1_case(c, upper) {
+                Some(m) => out.push(m),
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            return Value::String(vm.heap.alloc_str_latin1(out));
+        }
+    }
+    let out = case_map_units(vm.heap.units_flat(s), upper);
+    vm.string_from_builder(out)
 }
 
 fn is_case_ignorable(c: char) -> bool {
@@ -1127,9 +1211,7 @@ fn is_final_sigma(units: &Units<'_>, i: usize) -> bool {
 
 fn proto_to_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "toLowerCase")?;
-    let u = units_of(vm, s);
-    let out = case_map(&u, false);
-    Ok(vm.str_from_units(out))
+    Ok(case_convert(vm, s, false))
 }
 
 /// ECMA-402 TransformCase: the requested locale's case mapping (the host
@@ -1156,9 +1238,7 @@ fn proto_to_locale_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "toUpperCase")?;
-    let u = units_of(vm, s);
-    let out = case_map(&u, true);
-    Ok(vm.str_from_units(out))
+    Ok(case_convert(vm, s, true))
 }
 
 fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1167,8 +1247,11 @@ fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn trim_impl(vm: &mut Vm, a: &CallArgs, start: bool, end: bool, name: &str) -> JsResult<Value> {
     let s = this_str(vm, a, name)?;
-    let out = vm.trim_units(s, start, end);
-    Ok(vm.str_from_units(out))
+    let (from, to) = crate::string::trim_range(&vm.heap.units(s), start, end);
+    if from == to {
+        return Ok(Value::String(vm.names.empty));
+    }
+    Ok(substring_value(vm, s, from, to))
 }
 
 fn proto_trim(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

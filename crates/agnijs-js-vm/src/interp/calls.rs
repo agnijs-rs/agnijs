@@ -157,7 +157,7 @@ impl Vm {
         };
         let this = self.arg_at(args, 0);
         match tag {
-            NativeTag::None => Ok(false),
+            NativeTag::None | NativeTag::RegExpExec => Ok(false),
             NativeTag::FunctionCall => {
                 let rest = args.skip(1);
                 self.push_function_frame(t, this, rest, Value::Undefined, ConstructKind::None, false)?;

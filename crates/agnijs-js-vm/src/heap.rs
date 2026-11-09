@@ -688,8 +688,48 @@ impl Heap {
     pub fn alloc_str_units(&mut self, units: Units<'_>) -> StrId {
         match units {
             Units::One(b) => self.alloc_str_latin1(b.to_vec()),
-            Units::Two(u) => self.alloc_str_utf16(u.to_vec()),
+            Units::Two(u) => self.alloc_str_u16(u),
         }
+    }
+
+    /// A string from borrowed UTF-16 code units: one copy, stored one-byte
+    /// when possible.
+    pub fn alloc_str_u16(&mut self, units: &[u16]) -> StrId {
+        let repr = if units.iter().all(|&u| u <= 0xFF) {
+            Repr::One(units.iter().map(|&u| u as u8).collect())
+        } else {
+            Repr::Two(units.into())
+        };
+        self.alloc_string(StringData::new(repr))
+    }
+
+    /// The string a builder holds, without a conversion copy for one-byte
+    /// content.
+    pub fn alloc_str_builder(&mut self, b: crate::string::StrBuilder) -> StrId {
+        match b {
+            crate::string::StrBuilder::One(bytes) => self.alloc_str_latin1(bytes),
+            crate::string::StrBuilder::Two(units) => self.alloc_str_utf16(units),
+        }
+    }
+
+    /// The code units `start..end` of `id` as a string (the string itself
+    /// when that is all of it).
+    pub fn substring(&mut self, id: StrId, start: usize, end: usize) -> StrId {
+        self.flatten(id);
+        let repr = match &self.strings.get(id.0).repr {
+            _ if start == 0 && end == self.strings.get(id.0).len() => return id,
+            Repr::One(b) => Repr::One(b[start..end].into()),
+            Repr::Two(u) => {
+                let u = &u[start..end];
+                if u.iter().all(|&c| c <= 0xFF) {
+                    Repr::One(u.iter().map(|&c| c as u8).collect())
+                } else {
+                    Repr::Two(u.into())
+                }
+            }
+            Repr::Rope { .. } => unreachable!("flattened above"),
+        };
+        self.alloc_string(StringData::new(repr))
     }
 
     #[inline]
@@ -859,6 +899,26 @@ impl Heap {
             return found;
         }
         let id = self.alloc_str(s);
+        self.strings.get_mut(id.0).set_hash(hash);
+        self.strings.get_mut(id.0).atom = true;
+        let strings = &self.strings;
+        self.intern.insert_unique(hash, id, |&x| {
+            strings.get(x.0).cached_hash().expect("atom without hash")
+        });
+        id
+    }
+
+    /// The atom with this content, allocating only when there is none yet.
+    pub fn atom_units(&mut self, units: Units<'_>) -> StrId {
+        let hash = units.hash();
+        let strings = &self.strings;
+        if let Some(&found) = self.intern.find(hash, |&cand| {
+            let c = strings.get(cand.0);
+            c.len() == units.len() && c.units().eq(&units)
+        }) {
+            return found;
+        }
+        let id = self.alloc_str_units(units);
         self.strings.get_mut(id.0).set_hash(hash);
         self.strings.get_mut(id.0).atom = true;
         let strings = &self.strings;

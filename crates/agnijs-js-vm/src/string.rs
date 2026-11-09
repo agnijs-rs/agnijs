@@ -159,7 +159,26 @@ impl<'a> Units<'a> {
     }
 
     pub fn to_vec(&self) -> Vec<u16> {
-        self.iter().collect()
+        match self {
+            Units::One(b) => b.iter().map(|&c| c as u16).collect(),
+            Units::Two(u) => u.to_vec(),
+        }
+    }
+
+    /// Append these units to `out`, widening one-byte storage.
+    pub fn extend_into(&self, out: &mut Vec<u16>) {
+        match self {
+            Units::One(b) => out.extend(b.iter().map(|&c| c as u16)),
+            Units::Two(u) => out.extend_from_slice(u),
+        }
+    }
+
+    /// Whether every unit fits in one byte (Latin-1), whatever the storage.
+    pub fn fits_one_byte(&self) -> bool {
+        match self {
+            Units::One(_) => true,
+            Units::Two(u) => u.iter().all(|&c| c <= 0xFF),
+        }
     }
 
     pub fn eq(&self, other: &Units<'_>) -> bool {
@@ -244,6 +263,13 @@ impl<'a> Units<'a> {
         if n > len {
             return None;
         }
+        match (self, needle) {
+            (Units::One(h), Units::One(nd)) => return index_of_slice(h, nd, from),
+            (Units::Two(h), Units::Two(nd)) => return index_of_slice(h, nd, from),
+            // A needle with a unit above 0xFF never occurs in one-byte text.
+            (Units::One(_), Units::Two(nd)) if nd.iter().any(|&c| c > 0xFF) => return None,
+            _ => {}
+        }
         let mut i = from;
         while i + n <= len {
             let mut ok = true;
@@ -322,6 +348,26 @@ impl<'a> Units<'a> {
     }
 }
 
+/// The first index at or after `from` where `needle` (not empty) occurs.
+fn index_of_slice<T: Copy + PartialEq>(hay: &[T], needle: &[T], from: usize) -> Option<usize> {
+    let n = needle.len();
+    if from + n > hay.len() {
+        return None;
+    }
+    let first = needle[0];
+    let rest = &needle[1..];
+    let last_start = hay.len() - n;
+    let mut i = from;
+    while i <= last_start {
+        i += hay[i..=last_start].iter().position(|&c| c == first)?;
+        if &hay[i + 1..i + n] == rest {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 pub struct UnitsIter<'a> {
     units: Units<'a>,
     pos: usize,
@@ -359,56 +405,121 @@ impl<'a> DoubleEndedIterator for UnitsIter<'a> {
 
 impl<'a> ExactSizeIterator for UnitsIter<'a> {}
 
-/// Builds a UTF-16 string incrementally, tracking whether it is one-byte.
-#[derive(Default)]
-pub struct StrBuilder {
-    units: Vec<u16>,
+/// Builds a string incrementally. It stores one byte per unit until the
+/// first unit above 0xFF arrives and widens once then, so a Latin-1 result
+/// becomes a heap string without a conversion copy.
+pub enum StrBuilder {
+    One(Vec<u8>),
+    Two(Vec<u16>),
+}
+
+impl Default for StrBuilder {
+    fn default() -> StrBuilder {
+        StrBuilder::new()
+    }
 }
 
 impl StrBuilder {
     pub fn new() -> StrBuilder {
-        StrBuilder { units: Vec::new() }
+        StrBuilder::One(Vec::new())
     }
     pub fn with_capacity(n: usize) -> StrBuilder {
-        StrBuilder {
-            units: Vec::with_capacity(n),
+        StrBuilder::One(Vec::with_capacity(n))
+    }
+    /// Switch to two-byte storage (keeping the content).
+    #[cold]
+    fn widen(&mut self) -> &mut Vec<u16> {
+        if let StrBuilder::One(b) = self {
+            let mut w = Vec::with_capacity(b.capacity().max(b.len() + 8));
+            w.extend(b.iter().map(|&c| c as u16));
+            *self = StrBuilder::Two(w);
+        }
+        match self {
+            StrBuilder::Two(w) => w,
+            StrBuilder::One(_) => unreachable!(),
         }
     }
+    #[inline]
     pub fn push(&mut self, u: u16) {
-        self.units.push(u);
+        match self {
+            StrBuilder::One(b) if u <= 0xFF => b.push(u as u8),
+            StrBuilder::Two(w) => w.push(u),
+            StrBuilder::One(_) => self.widen().push(u),
+        }
+    }
+    /// Append ASCII or Latin-1 bytes.
+    #[inline]
+    pub fn push_bytes(&mut self, s: &[u8]) {
+        match self {
+            StrBuilder::One(b) => b.extend_from_slice(s),
+            StrBuilder::Two(w) => w.extend(s.iter().map(|&c| c as u16)),
+        }
     }
     pub fn push_str(&mut self, s: &str) {
-        self.units.extend(s.encode_utf16());
+        if s.is_ascii() {
+            self.push_bytes(s.as_bytes());
+        } else {
+            for u in s.encode_utf16() {
+                self.push(u);
+            }
+        }
     }
     pub fn push_units(&mut self, u: &Units<'_>) {
         match u {
-            Units::One(b) => self.units.extend(b.iter().map(|&c| c as u16)),
-            Units::Two(w) => self.units.extend_from_slice(w),
+            Units::One(b) => self.push_bytes(b),
+            Units::Two(w) => self.push_slice(w),
         }
     }
     pub fn push_slice(&mut self, u: &[u16]) {
-        self.units.extend_from_slice(u);
+        match self {
+            StrBuilder::One(b) => {
+                if u.iter().all(|&c| c <= 0xFF) {
+                    b.extend(u.iter().map(|&c| c as u8));
+                } else {
+                    self.widen().extend_from_slice(u);
+                }
+            }
+            StrBuilder::Two(w) => w.extend_from_slice(u),
+        }
     }
     pub fn push_code_point(&mut self, cp: u32) {
         if cp < 0x10000 {
-            self.units.push(cp as u16);
+            self.push(cp as u16);
         } else {
             let c = cp - 0x10000;
-            self.units.push(0xD800 + (c >> 10) as u16);
-            self.units.push(0xDC00 + (c & 0x3FF) as u16);
+            let w = self.widen();
+            w.push(0xD800 + (c >> 10) as u16);
+            w.push(0xDC00 + (c & 0x3FF) as u16);
         }
     }
     pub fn len(&self) -> usize {
-        self.units.len()
+        match self {
+            StrBuilder::One(b) => b.len(),
+            StrBuilder::Two(w) => w.len(),
+        }
     }
     pub fn is_empty(&self) -> bool {
-        self.units.is_empty()
+        self.len() == 0
     }
+    /// Drop everything after the first `n` units.
+    pub fn truncate(&mut self, n: usize) {
+        match self {
+            StrBuilder::One(b) => b.truncate(n),
+            StrBuilder::Two(w) => w.truncate(n),
+        }
+    }
+    /// The content as UTF-16 code units.
     pub fn finish(self) -> Vec<u16> {
-        self.units
+        match self {
+            StrBuilder::One(b) => b.iter().map(|&c| c as u16).collect(),
+            StrBuilder::Two(w) => w,
+        }
     }
     pub fn as_units(&self) -> Units<'_> {
-        Units::Two(&self.units)
+        match self {
+            StrBuilder::One(b) => Units::One(b),
+            StrBuilder::Two(w) => Units::Two(w),
+        }
     }
 }
 

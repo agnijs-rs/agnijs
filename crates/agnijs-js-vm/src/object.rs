@@ -262,6 +262,10 @@ pub enum NativeTag {
     FunctionCall,
     /// `Function.prototype.apply`.
     FunctionApply,
+    /// `RegExp.prototype.exec`: the RegExp built-ins that call exec only
+    /// to read the match skip building the result array when exec is this
+    /// one (builtins::regexp).
+    RegExpExec,
 }
 
 pub struct NativeData {

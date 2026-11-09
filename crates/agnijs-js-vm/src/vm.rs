@@ -332,7 +332,10 @@ pub struct Vm {
     /// Host classes by id (`register_host_class`).
     pub host_classes: Vec<agnijs_engine_api::HostClassDef>,
     /// Compiled regular expressions by (pattern, flags); see builtins::regexp.
-    pub regex_cache: HashMap<(Vec<u16>, String), Rc<agnijs_js_regex::Regex>>,
+    pub regex_cache: crate::builtins::regexp::RegexCache,
+    /// The widened input of a RegExp exec over a short one-byte string,
+    /// reused between execs.
+    pub regex_scratch: Vec<u16>,
     /// The matcher policy from [`Host::regex_matcher`], fixed at creation.
     pub regex_mode: agnijs_js_regex::MatcherMode,
     /// The UTF-16 form of the last few long strings RegExp exec ran against,
@@ -427,7 +430,8 @@ impl Vm {
             well_known,
             symbol_registry: HashMap::new(),
             jobs: VecDeque::new(),
-            regex_cache: HashMap::new(),
+            regex_cache: Default::default(),
+            regex_scratch: Vec::new(),
             regex_mode,
             regex_input_cache: Vec::new(),
             engine_id,
@@ -548,7 +552,7 @@ impl Vm {
     /// The string form of a property key (indices become decimal strings).
     pub fn key_to_string(&mut self, key: PropKey) -> StrId {
         match key {
-            PropKey::Index(i) => self.heap.alloc_str(&i.to_string()),
+            PropKey::Index(i) => self.number_to_string(i as f64),
             PropKey::Str(s) => s,
             PropKey::Sym(_) => panic!("key_to_string on a symbol"),
         }
