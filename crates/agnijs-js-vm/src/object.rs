@@ -24,7 +24,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// Past this many named properties an object switches to dictionary mode.
-const DICT_THRESHOLD: usize = 64;
+pub(crate) const DICT_THRESHOLD: usize = 64;
 /// Past this gap beyond the dense length, element writes go sparse.
 const DENSE_GAP: u32 = 4096;
 
@@ -42,6 +42,9 @@ const DENSE_GAP: u32 = 4096;
 pub struct Shape {
     pub table: KeyTableId,
     pub len: u32,
+    /// The first transition off this shape, checked without hashing
+    /// (most shapes have at most one), then any others.
+    first: Option<((PropKey, Attrs), ShapeId)>,
     transitions: HashMap<(PropKey, Attrs), ShapeId>,
     pub parent: Option<ShapeId>,
     /// False for a freed id awaiting reuse (`Heap::sweep_shapes`).
@@ -54,6 +57,7 @@ impl Shape {
         Shape {
             table: KeyTableId(0),
             len: 0,
+            first: None,
             transitions: HashMap::new(),
             parent: None,
             live: true,
@@ -71,8 +75,28 @@ impl Shape {
     /// Forget the transition to `child` (which is being freed), whose
     /// last key is `key`.
     pub(crate) fn unlink(&mut self, key: (PropKey, Attrs), child: ShapeId) {
-        if self.transitions.get(&key) == Some(&child) {
+        if self.first == Some((key, child)) {
+            self.first = None;
+        } else if self.transitions.get(&key) == Some(&child) {
             self.transitions.remove(&key);
+        }
+    }
+
+    /// The shape reached by adding `key`, if that transition exists.
+    #[inline]
+    fn transition(&self, key: (PropKey, Attrs)) -> Option<ShapeId> {
+        match self.first {
+            Some((k, s)) if k == key => Some(s),
+            _ if self.transitions.is_empty() => None,
+            _ => self.transitions.get(&key).copied(),
+        }
+    }
+
+    fn add_transition(&mut self, key: (PropKey, Attrs), child: ShapeId) {
+        if self.first.is_none() {
+            self.first = Some((key, child));
+        } else {
+            self.transitions.insert(key, child);
         }
     }
 
@@ -176,7 +200,8 @@ pub enum Elements {
     /// enumerable, configurable data property.
     Dense(Vec<Value>),
     /// Anything else: sparse indices, non-default attributes, accessors.
-    Sparse(BTreeMap<u32, Property>),
+    /// Boxed: rare, and it keeps `Elements` at the size of a `Vec`.
+    Sparse(Box<BTreeMap<u32, Property>>),
 }
 
 impl Elements {
@@ -346,6 +371,10 @@ pub struct HostObjectData {
 }
 
 /// Internal slots: what makes an object more than a property bag.
+/// `#[repr(u8)]`: the first byte is the tag, numbered in declaration order
+/// (ADR 0019 J5). Variants wider than 16 bytes are boxed, so a `Class` is
+/// 24 bytes.
+#[repr(u8)]
 pub enum Class {
     Ordinary,
     Array(ArrayData),
@@ -380,13 +409,20 @@ pub enum Class {
     Proxy(Box<crate::builtins::proxy::ProxyData>),
     Namespace(Box<crate::modules::NamespaceData>),
     Module(Box<crate::modules::ModuleRecord>),
-    AsyncFromSyncIterator { iterator: Value, next: Value },
+    AsyncFromSyncIterator(Box<IteratorRecord>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpIterState>),
     IteratorHelper(Box<crate::builtins::iterator::HelperState>),
-    WrapForValidIterator { iterator: Value, next: Value },
+    WrapForValidIterator(Box<IteratorRecord>),
     Host(Box<HostObjectData>),
     /// An ECMA-402 service object (`Intl.NumberFormat` and friends).
     Intl(Box<crate::builtins::intl::IntlData>),
+}
+
+/// An iterator and its `next` method.
+#[derive(Clone, Copy, Debug)]
+pub struct IteratorRecord {
+    pub iterator: Value,
+    pub next: Value,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -396,6 +432,26 @@ pub struct ArrayData {
 }
 
 impl Class {
+    /// Whether the payload lives in its own heap block.
+    pub fn is_boxed(&self) -> bool {
+        !matches!(
+            self,
+            Class::Ordinary
+                | Class::Array(_)
+                | Class::Error
+                | Class::Boolean(_)
+                | Class::Number(_)
+                | Class::String(_)
+                | Class::Symbol(_)
+                | Class::BigInt(_)
+                | Class::Arguments(None)
+                | Class::ArrayIterator(_)
+                | Class::StringIterator { .. }
+                | Class::Date(_)
+                | Class::WeakRef(_)
+        )
+    }
+
     pub fn is_callable(&self) -> bool {
         match self {
             Class::Function(_) | Class::Native(_) | Class::Bound(_) => true,
@@ -407,40 +463,162 @@ impl Class {
 
 // ---- object data ------------------------------------------------------------
 
+/// Property slots held inside the object itself; slot `i` is inline when
+/// `i < INLINE_SLOTS` and in the overflow buffer at `i - INLINE_SLOTS`
+/// otherwise (ADR 0019 J5).
+pub const INLINE_SLOTS: usize = 4;
+
+/// An object. The header (shape, slot count, flags, prototype, class) and
+/// the inline slots have a defined layout (`#[repr(C)]`, offsets below) for
+/// the inline-cache hit path a later tier compiles (ADR 0019 J5):
+///
+/// - `shape` at [`ObjectData::OFFSET_SHAPE`], a `u32` shape id;
+/// - `dict` at [`ObjectData::OFFSET_DICT`], non-null in dictionary mode;
+/// - `class` at [`ObjectData::OFFSET_CLASS`], whose first byte is the
+///   class tag (`Class` is `#[repr(u8)]`: tags in declaration order);
+/// - the inline slots at [`ObjectData::OFFSET_INLINE`], [`INLINE_SLOTS`]
+///   contiguous 16-byte [`PropSlot`]s.
+///
+/// Slots past the object's slot count hold `undefined` data, so the
+/// tracer and a reader of a stale slot index never see a dead value.
+#[repr(C)]
 pub struct ObjectData {
-    pub proto: Option<ObjId>,
     pub shape: ShapeId,
-    /// Values of the shape's keys, by slot.
-    pub slots: Vec<PropSlot>,
-    /// Dictionary mode: replaces `shape`/`slots`.
-    pub dict: Option<Box<IndexMap<PropKey, Property>>>,
-    pub elements: Elements,
+    /// Named slots in use (the shape's length; 0 in dictionary mode).
+    nslots: u16,
     pub extensible: bool,
     /// An inline-cache entry looked through or into this object on a
     /// prototype chain: changes to its keys, attributes or prototype, and
     /// its death, move `Heap::proto_epoch` (TASK-100.20). Never cleared.
     pub watched: bool,
+    pub proto: Option<ObjId>,
+    /// Dictionary mode: replaces `shape` and the slots.
+    pub dict: Option<Box<IndexMap<PropKey, Property>>>,
     pub class: Class,
+    /// Values of the shape's first keys, by slot (16-byte aligned within
+    /// the object, so no slot straddles a cache line).
+    inline: [PropSlot; INLINE_SLOTS],
+    pub elements: Elements,
+    /// Values of the shape's keys from [`INLINE_SLOTS`] on.
+    overflow: Vec<PropSlot>,
 }
 
 impl ObjectData {
+    pub const OFFSET_SHAPE: usize = std::mem::offset_of!(ObjectData, shape);
+    pub const OFFSET_DICT: usize = std::mem::offset_of!(ObjectData, dict);
+    pub const OFFSET_CLASS: usize = std::mem::offset_of!(ObjectData, class);
+    pub const OFFSET_INLINE: usize = std::mem::offset_of!(ObjectData, inline);
+
     pub fn new(proto: Option<ObjId>, class: Class) -> ObjectData {
         ObjectData {
-            proto,
             shape: ShapeId(0),
-            slots: Vec::new(),
-            dict: None,
-            elements: Elements::Dense(Vec::new()),
+            nslots: 0,
             extensible: true,
             watched: false,
+            proto,
             class,
+            inline: [PropSlot::UNDEFINED; INLINE_SLOTS],
+            overflow: Vec::new(),
+            dict: None,
+            elements: Elements::Dense(Vec::new()),
         }
     }
 
+    /// Number of shape-described slots in use.
+    #[inline]
+    pub fn slot_count(&self) -> usize {
+        self.nslots as usize
+    }
+
+    /// Slot `i`, which must be below the slot count (an inline index
+    /// past it reads undefined).
+    #[inline]
+    pub fn slot(&self, i: u32) -> Option<&PropSlot> {
+        // An unused inline slot holds undefined data, so only the
+        // overflow needs a bound.
+        let i = i as usize;
+        debug_assert!(i < self.nslots as usize);
+        if i < INLINE_SLOTS {
+            Some(&self.inline[i])
+        } else {
+            self.overflow.get(i - INLINE_SLOTS)
+        }
+    }
+
+    #[inline]
+    pub fn slot_mut(&mut self, i: u32) -> Option<&mut PropSlot> {
+        let i = i as usize;
+        debug_assert!(i < self.nslots as usize);
+        if i < INLINE_SLOTS {
+            Some(&mut self.inline[i])
+        } else {
+            self.overflow.get_mut(i - INLINE_SLOTS)
+        }
+    }
+
+    /// Slot `i`, which the object's shape says it has.
+    #[inline]
+    pub fn slot_at(&self, i: u32) -> PropSlot {
+        *self.slot(i).expect("slot index beyond the object's slots")
+    }
+
+    /// Every slot in use, in slot order.
+    #[inline]
+    pub fn slots(&self) -> impl Iterator<Item = &PropSlot> {
+        let n = (self.nslots as usize).min(INLINE_SLOTS);
+        self.inline[..n].iter().chain(self.overflow.iter())
+    }
+
+    /// Append a slot (the shape grew by one key). The overflow buffer, when
+    /// it is first needed, comes from `pool`. Returns the bytes of new
+    /// storage (none for an inline slot).
+    #[inline]
+    pub(crate) fn push_slot(&mut self, s: PropSlot, pool: &mut crate::heap::BufPool<PropSlot>) -> usize {
+        let i = self.nslots as usize;
+        self.nslots += 1;
+        if i < INLINE_SLOTS {
+            self.inline[i] = s;
+            0
+        } else {
+            if self.overflow.capacity() == 0 {
+                self.overflow = pool.take();
+            }
+            debug_assert_eq!(self.overflow.len(), i - INLINE_SLOTS);
+            self.overflow.push(s);
+            SLOT_BYTES
+        }
+    }
+
+    /// Drop the last slot (the shape went back to its parent).
+    #[inline]
+    pub(crate) fn pop_slot(&mut self) {
+        let n = self.nslots as usize;
+        debug_assert!(n > 0);
+        self.nslots -= 1;
+        if n <= INLINE_SLOTS {
+            self.inline[n - 1] = PropSlot::UNDEFINED;
+        } else {
+            self.overflow.pop();
+        }
+    }
+
+    /// Empty the slots (dictionary mode, or a dead object); returns the
+    /// overflow buffer.
+    #[inline]
+    pub(crate) fn take_slots(&mut self) -> Vec<PropSlot> {
+        let n = (self.nslots as usize).min(INLINE_SLOTS);
+        for s in &mut self.inline[..n] {
+            *s = PropSlot::UNDEFINED;
+        }
+        self.nslots = 0;
+        std::mem::take(&mut self.overflow)
+    }
+
     /// Approximate bytes of the storage that grows after allocation, at the
-    /// sizes the heap counts growth with.
+    /// sizes the heap counts growth with (inline slots are part of the
+    /// object).
     pub fn extra_bytes(&self) -> usize {
-        self.slots.len() * SLOT_BYTES
+        self.overflow.len() * SLOT_BYTES
             + self
                 .dict
                 .as_ref()
@@ -454,6 +632,20 @@ impl ObjectData {
 
     pub fn is_callable(&self) -> bool {
         self.class.is_callable()
+    }
+
+    /// Rust heap blocks this object owns directly: its class payload, its
+    /// overflow slots, its dictionary and its elements (diagnostics and
+    /// tests; the object itself lives in the arena).
+    pub fn owned_blocks(&self) -> usize {
+        let elements = match &self.elements {
+            Elements::Dense(v) => v.capacity() != 0,
+            Elements::Sparse(_) => true,
+        };
+        self.class.is_boxed() as usize
+            + (self.overflow.capacity() != 0) as usize
+            + self.dict.is_some() as usize
+            + elements as usize
     }
 
     pub fn is_array(&self) -> bool {
@@ -503,7 +695,7 @@ impl ObjectData {
     pub fn named_count(&self) -> usize {
         match &self.dict {
             Some(d) => d.len(),
-            None => self.slots.len(),
+            None => self.nslots as usize,
         }
     }
 }
@@ -534,8 +726,8 @@ impl Heap {
     }
 
     /// Transition `shape` by adding `key` with `attrs`.
-    fn shape_add(&mut self, shape: ShapeId, key: PropKey, attrs: Attrs) -> ShapeId {
-        if let Some(&next) = self.shape(shape).transitions.get(&(key, attrs)) {
+    pub(crate) fn shape_add(&mut self, shape: ShapeId, key: PropKey, attrs: Attrs) -> ShapeId {
+        if let Some(next) = self.shape(shape).transition((key, attrs)) {
             return next;
         }
         let (mut table, len) = {
@@ -552,13 +744,67 @@ impl Heap {
         let new = Shape {
             table,
             len: len as u32 + 1,
+            first: None,
             transitions: HashMap::new(),
             parent: Some(shape),
             live: true,
         };
         let id = self.alloc_shape(new);
-        self.shape_mut(shape).transitions.insert((key, attrs), id);
+        self.shape_mut(shape).add_transition((key, attrs), id);
         id
+    }
+
+    /// The shape reached from the empty shape by adding `keys` in order.
+    pub(crate) fn shape_with(&mut self, keys: &[(PropKey, Attrs)]) -> ShapeId {
+        keys.iter()
+            .fold(ShapeId(0), |s, &(k, a)| self.shape_add(s, k, a))
+    }
+
+    /// Give a new object, which has no named properties yet, the shape
+    /// `shape` and one slot per key of it.
+    pub(crate) fn init_named(&mut self, obj: ObjId, shape: ShapeId, slots: &[PropSlot]) {
+        debug_assert_eq!(self.shape(shape).len as usize, slots.len());
+        let o = self.objects.get_mut(obj.0);
+        debug_assert!(o.slot_count() == 0 && o.dict.is_none() && o.shape == ShapeId(0));
+        o.shape = shape;
+        let mut grown = 0;
+        for &s in slots {
+            grown += o.push_slot(s, &mut self.slot_pool);
+        }
+        self.note_growth(grown);
+    }
+
+    /// Add a data property `key` with every attribute set to an ordinary
+    /// object when its shape already has that transition, which also means
+    /// the key is absent; `false` (nothing done) otherwise. The common case
+    /// of an object literal's named properties.
+    #[inline]
+    pub(crate) fn add_by_transition(&mut self, obj: ObjId, key: PropKey, v: Value) -> bool {
+        let o = self.obj(obj);
+        if o.dict.is_some()
+            || !o.extensible
+            || o.watched
+            || !matches!(o.class, Class::Ordinary)
+            || matches!(key, PropKey::Index(_))
+        {
+            return false;
+        }
+        let Some(next) = self.shape(o.shape).transition((key, Attrs::ALL)) else {
+            return false;
+        };
+        self.add_with_shape(obj, next, PropSlot::Data(v));
+        true
+    }
+
+    /// Move `obj` (not a dictionary) to `next`, a transition of its shape,
+    /// storing the new property's `slot`.
+    #[inline]
+    pub(crate) fn add_with_shape(&mut self, obj: ObjId, next: ShapeId, slot: PropSlot) {
+        debug_assert_eq!(self.shape(next).parent, Some(self.obj(obj).shape));
+        let o = self.objects.get_mut(obj.0);
+        o.shape = next;
+        let grown = o.push_slot(slot, &mut self.slot_pool);
+        self.note_growth(grown);
     }
 
     /// Switch an object to dictionary mode.
@@ -571,21 +817,22 @@ impl Heap {
             self.bump_proto_epoch();
         }
         let o = self.obj(obj);
-        let mut dict = IndexMap::with_capacity(o.slots.len() + 8);
-        for (i, (k, attrs)) in self.shape_keys(o.shape).iter().enumerate() {
+        let mut dict = IndexMap::with_capacity(o.slot_count() + 8);
+        for ((k, attrs), slot) in self.shape_keys(o.shape).iter().zip(o.slots()) {
             dict.insert(
                 *k,
                 Property {
-                    slot: o.slots[i],
+                    slot: *slot,
                     attrs: *attrs,
                 },
             );
         }
         let grown = dict.len() * DICT_ENTRY_BYTES;
-        let o = self.obj_mut(obj);
+        let o = self.objects.get_mut(obj.0);
         o.dict = Some(Box::new(dict));
-        o.slots = Vec::new();
+        let overflow = o.take_slots();
         o.shape = ShapeId(0);
+        self.slot_pool.give(overflow);
         self.note_growth(grown);
     }
 
@@ -600,7 +847,7 @@ impl Heap {
                 }
             }
             let grown = map.len() * DICT_ENTRY_BYTES;
-            o.elements = Elements::Sparse(map);
+            o.elements = Elements::Sparse(Box::new(map));
             self.note_growth(grown);
         }
     }
@@ -626,7 +873,7 @@ impl Heap {
                 } else {
                     let slot = self.shape_lookup(o.shape, key)?;
                     Some(Property {
-                        slot: o.slots[slot as usize],
+                        slot: o.slot_at(slot),
                         attrs: self.shape_key(o.shape, slot).1,
                     })
                 }
@@ -685,7 +932,7 @@ impl Heap {
             _ => {
                 self.note_structure_change(obj);
                 let o = self.obj(obj);
-                if o.dict.is_none() && o.slots.len() >= DICT_THRESHOLD {
+                if o.dict.is_none() && o.slot_count() >= DICT_THRESHOLD {
                     self.make_dictionary(obj);
                 }
                 let o = self.obj_mut(obj);
@@ -697,11 +944,8 @@ impl Heap {
                     let new_shape = self.shape_add(shape, key, prop.attrs);
                     let o = self.objects.get_mut(obj.0);
                     o.shape = new_shape;
-                    if o.slots.capacity() == 0 {
-                        o.slots = self.slot_pool.take();
-                    }
-                    o.slots.push(prop.slot);
-                    self.note_growth(SLOT_BYTES);
+                    let grown = o.push_slot(prop.slot, &mut self.slot_pool);
+                    self.note_growth(grown);
                 }
             }
         }
@@ -741,7 +985,7 @@ impl Heap {
                     .expect("replace_own_property: missing key");
                 let attrs = self.shape_key(shape, slot).1;
                 if attrs == prop.attrs {
-                    self.obj_mut(obj).slots[slot as usize] = prop.slot;
+                    *self.obj_mut(obj).slot_mut(slot).expect("slot of the shape") = prop.slot;
                 } else {
                     self.make_dictionary(obj);
                     self.obj_mut(obj).dict.as_mut().unwrap().insert(key, prop);
@@ -774,7 +1018,9 @@ impl Heap {
                 }
                 let shape = o.shape;
                 if let Some(slot) = self.shape_lookup(shape, key) {
-                    self.obj_mut(obj).slots[slot as usize] = PropSlot::Data(value);
+                    if let Some(s) = self.obj_mut(obj).slot_mut(slot) {
+                        *s = PropSlot::Data(value);
+                    }
                 }
             }
         }
@@ -821,7 +1067,7 @@ impl Heap {
                 if slot + 1 == sh.len {
                     let parent = sh.parent.expect("non-root shape has a parent");
                     let o = self.obj_mut(obj);
-                    o.slots.pop();
+                    o.pop_slot();
                     o.shape = parent;
                 } else {
                     self.make_dictionary(obj);

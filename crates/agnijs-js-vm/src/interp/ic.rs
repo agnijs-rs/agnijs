@@ -37,7 +37,7 @@
 
 use crate::object::{Class, Elements, ObjectData};
 use crate::realm::Intrinsic;
-use crate::value::{ObjId, PropKey, PropSlot, Value};
+use crate::value::{Attrs, ObjId, PropKey, PropSlot, ShapeId, Value};
 use crate::vm::Vm;
 use agnijs_js_compiler::bytecode::{CodeBlock, Feedback, IcEntry, IcIdx, IcSite, IC_ENTRIES, NO_IC};
 
@@ -135,7 +135,7 @@ fn read_slot(slot: Option<&PropSlot>, accessor: bool) -> Option<IcGet> {
         (PropSlot::Accessor { get, .. }, true) => Some(if get.is_undefined() {
             IcGet::Value(Value::Undefined)
         } else {
-            IcGet::Getter(*get)
+            IcGet::Getter(get.value())
         }),
         _ => None,
     }
@@ -194,7 +194,7 @@ impl Vm {
                         IcEntry::KIND_OWN_DATA | IcEntry::KIND_OWN_ACCESSOR => {
                             if o.shape.0 == e.shape {
                                 return read_slot(
-                                    o.slots.get(e.slot as usize),
+                                    o.slot(e.slot),
                                     e.kind == IcEntry::KIND_OWN_ACCESSOR,
                                 );
                             }
@@ -206,7 +206,7 @@ impl Vm {
                             {
                                 let h = self.heap.obj(ObjId(e.holder));
                                 return read_slot(
-                                    h.slots.get(e.slot as usize),
+                                    h.slot(e.slot),
                                     e.kind == IcEntry::KIND_PROTO_ACCESSOR,
                                 );
                             }
@@ -234,7 +234,7 @@ impl Vm {
                                 && self.intrinsic(Intrinsic::StringPrototype).0 == e.proto
                             {
                                 let h = self.heap.obj(ObjId(e.holder));
-                                return read_slot(h.slots.get(e.slot as usize), false);
+                                return read_slot(h.slot(e.slot), false);
                             }
                         }
                         IcEntry::KIND_EMPTY | IcEntry::KIND_MEGAMORPHIC => return None,
@@ -306,7 +306,7 @@ impl Vm {
         }
         let shape = o.shape;
         if let Some(slot) = self.heap.shape_lookup(shape, key) {
-            let kind = match o.slots.get(slot as usize)? {
+            let kind = match o.slot(slot)? {
                 PropSlot::Data(_) => IcEntry::KIND_OWN_DATA,
                 PropSlot::Accessor { .. } => IcEntry::KIND_OWN_ACCESSOR,
             };
@@ -376,7 +376,7 @@ impl Vm {
                 return None;
             }
             if let Some(slot) = self.heap.shape_lookup(h.shape, key) {
-                let accessor = match h.slots.get(slot as usize)? {
+                let accessor = match h.slot(slot)? {
                     PropSlot::Data(_) => false,
                     PropSlot::Accessor { .. } => true,
                 };
@@ -397,6 +397,35 @@ impl Vm {
             cur = self.heap.obj(cur).proto.expect("chain walked above");
         }
         Some(found)
+    }
+
+    /// Whether no object on the chain from `start` has `key` and each is
+    /// one the cache can look through. Every object on it becomes watched,
+    /// so a later change to any of them moves the prototype epoch.
+    fn chain_lacks(&mut self, start: Option<ObjId>, key: PropKey) -> bool {
+        if self.heap.proto_epoch == u32::MAX {
+            return false;
+        }
+        let mut cur = start;
+        let mut hops = 0;
+        while let Some(c) = cur {
+            let h = self.heap.obj(c);
+            if !chain_ok(h, false) || self.heap.shape_lookup(h.shape, key).is_some() {
+                return false;
+            }
+            hops += 1;
+            if hops > MAX_DEPTH {
+                return false;
+            }
+            cur = h.proto;
+        }
+        let mut cur = start;
+        while let Some(c) = cur {
+            let h = self.heap.obj_mut(c);
+            h.watched = true;
+            cur = h.proto;
+        }
+        true
     }
 
     /// Record `e` in `site`: over an entry for the same receivers or a
@@ -422,6 +451,7 @@ impl Vm {
                 IcEntry::KIND_PROTO_DATA
                     | IcEntry::KIND_PROTO_ACCESSOR
                     | IcEntry::KIND_STRING_PROTO_DATA
+                | IcEntry::KIND_OWN_ADD
             ) && x.epoch != self.heap.proto_epoch
         };
         for c in &site.entries {
@@ -448,14 +478,27 @@ impl Vm {
         let Some(site) = self.ic_site(code, ic) else {
             return false;
         };
+        let proto_epoch = self.heap.proto_epoch;
         let o = self.heap.obj_mut(oid);
         if receiver_ok(o) {
             for c in &site.entries {
                 let e = c.get();
                 match e.kind {
                     IcEntry::KIND_OWN_DATA if o.shape.0 == e.shape => {
-                        if let Some(PropSlot::Data(slot)) = o.slots.get_mut(e.slot as usize) {
+                        if let Some(PropSlot::Data(slot)) = o.slot_mut(e.slot) {
                             *slot = v;
+                            return true;
+                        }
+                        break;
+                    }
+                    IcEntry::KIND_OWN_ADD if o.shape.0 == e.shape => {
+                        if o.proto.map_or(u32::MAX, |p| p.0) == e.proto
+                            && e.epoch == proto_epoch
+                            && o.extensible
+                            && !o.watched
+                        {
+                            self.heap
+                                .add_with_shape(oid, ShapeId(e.holder), PropSlot::Data(v));
                             return true;
                         }
                         break;
@@ -483,19 +526,19 @@ impl Vm {
                 continue;
             }
             let slot = match e.kind {
-                IcEntry::KIND_OWN_ACCESSOR if o.shape.0 == e.shape => o.slots.get(e.slot as usize),
+                IcEntry::KIND_OWN_ACCESSOR if o.shape.0 == e.shape => o.slot(e.slot),
                 IcEntry::KIND_PROTO_ACCESSOR
                     if o.shape.0 == e.shape
                         && o.proto.map(|p| p.0) == Some(e.proto)
                         && e.epoch == self.heap.proto_epoch =>
                 {
-                    self.heap.obj(ObjId(e.holder)).slots.get(e.slot as usize)
+                    self.heap.obj(ObjId(e.holder)).slot(e.slot)
                 }
                 IcEntry::KIND_EMPTY | IcEntry::KIND_MEGAMORPHIC => return None,
                 _ => continue,
             };
             return match slot? {
-                PropSlot::Accessor { set, .. } if !set.is_undefined() => Some(*set),
+                PropSlot::Accessor { set, .. } if !set.is_undefined() => Some(set.value()),
                 _ => None,
             };
         }
@@ -522,8 +565,13 @@ impl Vm {
             return;
         }
         let shape = o.shape;
+        let o_proto = o.proto;
+        let can_add = !is_length
+            && o.extensible
+            && !o.watched
+            && o.slot_count() < crate::object::DICT_THRESHOLD;
         let entry = if let Some(slot) = self.heap.shape_lookup(shape, key) {
-            match o.slots.get(slot as usize) {
+            match o.slot(slot) {
                 Some(PropSlot::Data(_)) if self.heap.shape_key(shape, slot).1.writable() => {
                     IcEntry {
                         kind: IcEntry::KIND_OWN_DATA,
@@ -540,8 +588,20 @@ impl Vm {
                 },
                 _ => return,
             }
+        } else if can_add && self.chain_lacks(o_proto, key) {
+            // The write adds an own property.
+            let proto = o_proto.map_or(u32::MAX, |p| p.0);
+            let next = self.heap.shape_add(shape, key, Attrs::ALL);
+            IcEntry {
+                kind: IcEntry::KIND_OWN_ADD,
+                shape: shape.0,
+                proto,
+                holder: next.0,
+                epoch: self.heap.proto_epoch,
+                ..IcEntry::EMPTY
+            }
         } else {
-            let Some(p1) = o.proto else { return };
+            let Some(p1) = o_proto else { return };
             // Only an inherited accessor: an inherited data property means
             // the write adds an own property.
             match self.describe_chain(p1, key, is_length) {

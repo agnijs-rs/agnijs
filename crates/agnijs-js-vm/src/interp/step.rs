@@ -551,7 +551,9 @@ impl Vm {
                     .expect("DefineOwnNamed on a non-object");
                 let pk = self.name_key(code, name);
                 let v = acc!();
-                self.create_data_property_or_throw(o, pk, v)?;
+                if !self.heap.add_by_transition(o, pk, v) {
+                    self.create_data_property_or_throw(o, pk, v)?;
+                }
             }
             Instr::DefineMethod {
                 obj,
@@ -1567,7 +1569,7 @@ impl Vm {
                     let d = self.private_display(name);
                     return Err(self.throw_type(&format!("'{d}' was defined without a getter")));
                 }
-                self.call_value(get, o, &[])
+                self.call_value(get.value(), o, &[])
             }
         }
     }
@@ -1601,7 +1603,7 @@ impl Vm {
                     let d = self.private_display(name);
                     return Err(self.throw_type(&format!("'{d}' was defined without a setter")));
                 }
-                self.call_value(set, o, &[v])?;
+                self.call_value(set.value(), o, &[v])?;
                 Ok(())
             }
         }

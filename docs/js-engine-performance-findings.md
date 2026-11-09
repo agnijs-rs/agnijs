@@ -281,6 +281,8 @@ Reproduction (1 M each): closure creation 456 ms against 234 ms; an object liter
 
 **Impact.** 10 to 30% on allocation-heavy workloads, and it lowers sweep cost (finding 7). **Effort M to L, risk medium**: the object layout change touches the heap, GC tracing and the debugger. TASK-100.21.
 
+**Done (TASK-100.21).** The first four named slots live inline in a `#[repr(C)]` object (still 160 bytes), a function is two heap blocks (precomputed rooted shapes for its eager properties, `FunctionData` boxes recycled by the sweep), string constants and function names survive collections with their block, and a property add that misses is cached as a shape transition. closures went from 92 to 63 ms (1.45x) and prop-write-alloc from 126 to 76 ms (1.65x), with lower peak memory on both and on most of the Gable set. rxjs-operators is about 6% slower, which profiling attributes to dispatch-loop stalls rather than to any changed path.
+
 ### 7. Fixed cost per collection
 
 **Evidence.**

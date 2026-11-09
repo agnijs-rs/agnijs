@@ -887,8 +887,8 @@ impl Vm {
                     PropSlot::Data(v) => (Some(self.to_api_value(v)), None, None),
                     PropSlot::Accessor { get, set } => (
                         None,
-                        (!get.is_undefined()).then(|| self.to_api_value(get)),
-                        (!set.is_undefined()).then(|| self.to_api_value(set)),
+                        (!get.is_undefined()).then(|| self.to_api_value(get.value())),
+                        (!set.is_undefined()).then(|| self.to_api_value(set.value())),
                     ),
                 };
                 out.properties.push(PropertyInfo {

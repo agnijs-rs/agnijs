@@ -13,7 +13,8 @@
 
 use crate::bigint::BigIntData;
 use crate::env::Environment;
-use crate::object::{KeyTable, ObjectData, Shape};
+use crate::object::{FunctionData, KeyTable, ObjectData, Shape};
+
 use crate::string::{Repr, StringData, Units};
 use crate::symbol::SymbolData;
 use crate::object::KeyTableId;
@@ -241,6 +242,7 @@ impl<T> BufPool<T> {
 /// buffers) is counted as it grows, through [`Heap::note_growth`], at the
 /// per-entry sizes below. [`Heap::approx_live_bytes`] uses the same sizes,
 /// so the live figure after a collection and the allocation counter agree.
+/// `ObjectData`, inline slots included.
 pub(crate) const OBJECT_BYTES: usize = 160;
 pub(crate) const ENV_BYTES: usize = 64;
 pub(crate) const SYMBOL_BYTES: usize = 32;
@@ -255,8 +257,8 @@ pub const ATTENTION_GC: u32 = 1;
 pub const ATTENTION_DEBUG: u32 = 2;
 /// One dense element (a `Value`).
 pub(crate) const ELEMENT_BYTES: usize = 16;
-/// One shape-described property slot.
-pub(crate) const SLOT_BYTES: usize = 24;
+/// One shape-described property slot past the inline ones (a `PropSlot`).
+pub(crate) const SLOT_BYTES: usize = 16;
 /// One dictionary-mode property, or one sparse element.
 pub(crate) const DICT_ENTRY_BYTES: usize = 48;
 
@@ -292,6 +294,11 @@ pub struct Heap {
     /// Emptied value buffers of dead objects' elements and dead scopes'
     /// bindings, for new ones.
     pub(crate) value_pool: BufPool<Value>,
+    /// Dead functions' data boxes, for new functions (no more than the
+    /// objects that fit under the collection threshold; emptied at the
+    /// start of each sweep, so a stale box keeps its old code block alive
+    /// until the next collection at most).
+    pub(crate) fn_pool: Vec<Box<FunctionData>>,
     /// Interned strings (atoms), weakly held: the sweep removes dead ones.
     intern: HashTable<StrId>,
     /// The VM's attention word (ADR 0019 J7): non-zero when the dispatch
@@ -334,6 +341,8 @@ pub struct Heap {
     /// Atoms pinned for the property keys of code-block names, kept alive
     /// as roots so the keys can be computed once per block (TASK-100.20).
     pub pinned: HashSet<StrId>,
+    /// Strings allocated so far (diagnostics and tests).
+    pub strings_allocated: u64,
 }
 
 impl Default for Heap {
@@ -361,6 +370,7 @@ impl Heap {
             shape_epoch: 0,
             slot_pool: BufPool::default(),
             value_pool: BufPool::default(),
+            fn_pool: Vec::new(),
             intern: HashTable::new(),
             attention: if stress_every.is_some() { ATTENTION_GC } else { 0 },
             allocated_since_gc: 0,
@@ -373,6 +383,7 @@ impl Heap {
             single_chars: vec![None; 256],
             proto_epoch: 1,
             pinned: HashSet::new(),
+            strings_allocated: 0,
         }
     }
 
@@ -641,6 +652,7 @@ impl Heap {
 
     fn alloc_string(&mut self, data: StringData) -> StrId {
         self.charge(STRING_BYTES + data.byte_len());
+        self.strings_allocated += 1;
         StrId(self.strings.alloc(data))
     }
 

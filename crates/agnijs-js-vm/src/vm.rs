@@ -5,7 +5,7 @@ use crate::heap::Heap;
 use crate::interp::Frame;
 use crate::object::{CallArgs, Class, NativeData, NativeFn, NativeKind, NativeTag, ObjectData};
 use crate::realm::{Intrinsic, Realm};
-use crate::value::{Attrs, ObjId, PropKey, Property, StrId, SymId, Value};
+use crate::value::{Attrs, ObjId, PropKey, Property, ShapeId, StrId, SymId, Value};
 use agnijs_engine_api::{EngineId, Host, RealmId};
 use hashbrown::HashMap;
 use std::collections::VecDeque;
@@ -358,6 +358,11 @@ pub struct Vm {
     /// This VM's claim on a code block's run-time feedback
     /// (`CodeBlock::feedback`): ids, shapes and keys in it are this VM's.
     pub(crate) feedback_owner: u32,
+    /// The shapes a new function object and its prototype object start
+    /// with, by [`FnShape`] (`ShapeId(0)` until first used). Rooted, so
+    /// creating a function adds its eager properties without a
+    /// transition lookup.
+    pub(crate) fn_shapes: [ShapeId; FnShape::COUNT],
     /// Inline-cache counters (feature `ic-stats`).
     #[cfg(feature = "ic-stats")]
     pub ic_stats: crate::interp::ic::IcStats,
@@ -367,6 +372,26 @@ pub struct Vm {
 }
 
 /// A distinct, non-zero feedback owner per VM.
+/// The eager own properties of a new function object (or of a
+/// constructor's prototype object), in property order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FnShape {
+    /// `length`, `name`: arrows, methods, async functions, class
+    /// constructors (their `prototype` comes from the class).
+    Plain = 0,
+    /// `length`, `name`, `prototype`: strict functions and generators.
+    WithPrototype = 1,
+    /// `length`, `name`, `caller`, `arguments`, `prototype`: sloppy
+    /// functions.
+    Sloppy = 2,
+    /// A constructor's prototype object: `constructor`.
+    ProtoObject = 3,
+}
+
+impl FnShape {
+    pub(crate) const COUNT: usize = 4;
+}
+
 fn next_feedback_owner() -> u32 {
     use std::sync::atomic::{AtomicU32, Ordering};
     static NEXT: AtomicU32 = AtomicU32::new(1);
@@ -423,6 +448,7 @@ impl Vm {
             debug_hot: false,
             arg_scratch: Vec::new(),
             feedback_owner: next_feedback_owner(),
+            fn_shapes: [ShapeId(0); FnShape::COUNT],
             #[cfg(feature = "ic-stats")]
             ic_stats: Default::default(),
             #[cfg(feature = "instr-count")]

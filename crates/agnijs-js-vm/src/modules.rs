@@ -1269,7 +1269,7 @@ pub fn ns_get(vm: &mut Vm, o: ObjId, key: PropKey, receiver: Value) -> JsResult<
                     if get.is_undefined() {
                         Ok(Value::Undefined)
                     } else {
-                        vm.call_value(get, receiver, &[])
+                        vm.call_value(get.value(), receiver, &[])
                     }
                 }
             },

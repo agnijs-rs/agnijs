@@ -331,12 +331,12 @@ impl Vm {
             match cur.slot {
                 PropSlot::Accessor { get, set } => {
                     if let Some(g) = desc.get {
-                        if !self.same_value(g, get) {
+                        if !self.same_value(g, get.value()) {
                             return false;
                         }
                     }
                     if let Some(s) = desc.set {
-                        if !self.same_value(s, set) {
+                        if !self.same_value(s, set.value()) {
                             return false;
                         }
                     }
@@ -380,8 +380,8 @@ impl Vm {
                     ),
                 ),
                 PropSlot::Accessor { get, set } => Property::accessor(
-                    desc.get.unwrap_or(get),
-                    desc.set.unwrap_or(set),
+                    desc.get.unwrap_or(get.value()),
+                    desc.set.unwrap_or(set.value()),
                     Attrs::new(false, enumerable, configurable),
                 ),
             }
@@ -568,7 +568,7 @@ impl Vm {
                         if get.is_undefined() {
                             Ok(Value::Undefined)
                         } else {
-                            self.call_value(get, receiver, &[])
+                            self.call_value(get.value(), receiver, &[])
                         }
                     }
                 };
@@ -597,7 +597,7 @@ impl Vm {
                     PropSlot::Accessor { get, .. } if get.is_undefined() => {
                         OrdinaryGet::Value(Value::Undefined)
                     }
-                    PropSlot::Accessor { get, .. } => match self.inlinable_callee(get) {
+                    PropSlot::Accessor { get, .. } => match self.inlinable_callee(get.value()) {
                         Some(g) => OrdinaryGet::Getter(g),
                         None => OrdinaryGet::Generic,
                     },
@@ -768,11 +768,11 @@ impl Vm {
                     return Ok(Ok(false));
                 }
                 if inline_setter {
-                    if let Some(s) = self.inlinable_callee(set) {
+                    if let Some(s) = self.inlinable_callee(set.value()) {
                         return Ok(Err(s));
                     }
                 }
-                self.call_value(set, receiver, &[v])?;
+                self.call_value(set.value(), receiver, &[v])?;
                 Ok(Ok(true))
             }
         }

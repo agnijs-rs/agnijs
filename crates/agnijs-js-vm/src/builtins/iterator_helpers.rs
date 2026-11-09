@@ -170,15 +170,15 @@ fn iterator_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let proto = vm.intrinsic(Intrinsic::WrapForValidIteratorPrototype);
     let wrapper = vm.alloc(ObjectData::new(
         Some(proto),
-        Class::WrapForValidIterator { iterator, next },
+        Class::WrapForValidIterator(Box::new(crate::object::IteratorRecord { iterator, next })),
     ));
     Ok(Value::Object(wrapper))
 }
 
 fn wrap_parts(vm: &mut Vm, this: Value, method: &str) -> JsResult<(Value, Value)> {
     if let Value::Object(o) = this {
-        if let Class::WrapForValidIterator { iterator, next } = vm.heap.obj(o).class {
-            return Ok((iterator, next));
+        if let Class::WrapForValidIterator(r) = &vm.heap.obj(o).class {
+            return Ok((r.iterator, r.next));
         }
     }
     Err(vm.throw_type(&format!(

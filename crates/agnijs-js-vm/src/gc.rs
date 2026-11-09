@@ -27,7 +27,7 @@
 
 use std::rc::Rc;
 
-use agnijs_js_compiler::bytecode::{CodeBlock, IcEntry};
+use agnijs_js_compiler::bytecode::{CodeBlock, ConstString, IcEntry};
 
 use crate::env::Environment;
 use crate::interp::Frame;
@@ -147,8 +147,8 @@ impl<'v> Tracer<'v> {
         match s {
             PropSlot::Data(v) => self.value(v),
             PropSlot::Accessor { get, set } => {
-                self.value(get);
-                self.value(set);
+                self.value(get.value());
+                self.value(set.value());
             }
         }
     }
@@ -179,6 +179,16 @@ impl<'v> Tracer<'v> {
         // Entries from before an earlier shape-freeing collection may name
         // reused ids; clear them rather than keep arbitrary shapes alive.
         vm.fresh_ic(fb);
+        // String constants materialised since the last collection survive
+        // this one with the block, so a loop does not allocate them again.
+        let prev = vm.gc_count - 1;
+        for cell in fb.strings.iter().chain(std::iter::once(&fb.name)) {
+            let e = cell.get();
+            if e.epoch == prev {
+                self.str(StrId(e.id));
+                cell.set(ConstString { id: e.id, epoch: vm.gc_count });
+            }
+        }
         for site in fb.ic.iter() {
             for c in &site.entries {
                 let e = c.get();
@@ -190,6 +200,9 @@ impl<'v> Tracer<'v> {
                         | IcEntry::KIND_PROTO_ACCESSOR
                 ) {
                     self.shape(ShapeId(e.shape));
+                } else if e.kind == IcEntry::KIND_OWN_ADD {
+                    self.shape(ShapeId(e.shape));
+                    self.shape(ShapeId(e.holder));
                 }
             }
         }
@@ -289,7 +302,7 @@ impl ObjectData {
     pub fn trace(&self, t: &mut Tracer) {
         t.opt_obj(self.proto);
         t.shape(self.shape);
-        for s in &self.slots {
+        for s in self.slots() {
             t.slot(*s);
         }
         if let Some(d) = &self.dict {
@@ -387,10 +400,9 @@ impl Class {
                 }
             }
             Class::Module(m) => m.trace(t),
-            Class::AsyncFromSyncIterator { iterator, next }
-            | Class::WrapForValidIterator { iterator, next } => {
-                t.value(*iterator);
-                t.value(*next);
+            Class::AsyncFromSyncIterator(r) | Class::WrapForValidIterator(r) => {
+                t.value(r.iterator);
+                t.value(r.next);
             }
             Class::RegExpStringIterator(r) => {
                 t.value(r.regexp);
@@ -572,6 +584,9 @@ impl Vm {
         for s in vm.names.all() {
             t.str(s);
         }
+        for &s in &vm.fn_shapes {
+            t.shape(s);
+        }
         for s in vm.well_known.all() {
             t.sym(s);
         }
@@ -619,6 +634,10 @@ impl Vm {
             let budget = heap.gc_threshold;
             heap.slot_pool.restart(budget);
             heap.value_pool.restart(budget);
+            heap.fn_pool.clear();
+            // No more functions than objects fit under the threshold.
+            let fn_pool_max = budget / OBJECT_BYTES;
+            let fn_pool = &mut heap.fn_pool;
             let slot_pool = &mut heap.slot_pool;
             let value_pool = &mut heap.value_pool;
             let finalizers = &mut self.pending_finalizers;
@@ -633,7 +652,12 @@ impl Vm {
                             finalizers.push((h.class, h.data));
                         }
                     }
-                    slot_pool.give(std::mem::take(&mut o.slots));
+                    if matches!(o.class, Class::Function(_)) && fn_pool.len() < fn_pool_max {
+                        if let Class::Function(f) = std::mem::replace(&mut o.class, Class::Ordinary) {
+                            fn_pool.push(f);
+                        }
+                    }
+                    slot_pool.give(o.take_slots());
                     if let Elements::Dense(v) = &mut o.elements {
                         value_pool.give(std::mem::take(v));
                     }

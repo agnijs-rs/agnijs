@@ -198,14 +198,14 @@ pub fn create_async_from_sync_iterator(vm: &mut Vm, iterator: Value, next: Value
     let proto = vm.intrinsic(Intrinsic::AsyncFromSyncIteratorPrototype);
     Value::Object(vm.alloc(ObjectData::new(
         Some(proto),
-        Class::AsyncFromSyncIterator { iterator, next },
+        Class::AsyncFromSyncIterator(Box::new(crate::object::IteratorRecord { iterator, next })),
     )))
 }
 
 fn afs_parts(vm: &mut Vm, this: Value) -> (Value, Value) {
     match this {
         Value::Object(o) => match &vm.heap.obj(o).class {
-            Class::AsyncFromSyncIterator { iterator, next } => (*iterator, *next),
+            Class::AsyncFromSyncIterator(r) => (r.iterator, r.next),
             _ => unreachable!("AsyncFromSyncIterator method on wrong receiver"),
         },
         _ => unreachable!("AsyncFromSyncIterator method on wrong receiver"),

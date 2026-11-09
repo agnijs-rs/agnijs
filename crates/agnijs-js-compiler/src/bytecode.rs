@@ -880,6 +880,11 @@ impl IcEntry {
     /// A data property found from a string primitive through
     /// `String.prototype` (a method, usually).
     pub const KIND_STRING_PROTO_DATA: u8 = 7;
+    /// A write that adds an own writable, enumerable, configurable data
+    /// property: a receiver of `shape` whose prototype is `proto` (`u32::MAX`
+    /// for none) moves to the shape in `holder`. `epoch` guards the
+    /// prototype chain, none of which has the key.
+    pub const KIND_OWN_ADD: u8 = 8;
     /// The site saw more receivers than it has entries; it stays generic.
     /// Only ever in entry 0.
     pub const KIND_MEGAMORPHIC: u8 = 0xFF;
@@ -980,6 +985,9 @@ pub struct Feedback {
     pub name_keys: Box<[Cell<u64>]>,
     /// String constants, indexed by constant index.
     pub strings: Box<[Cell<ConstString>]>,
+    /// The string value of the block's `name` (a function's initial
+    /// `name` property), like a string constant.
+    pub name: Cell<ConstString>,
     /// The owning VM's shape epoch the `ic` entries are valid in: a VM
     /// that frees shapes (and may reuse their ids) moves its epoch, and
     /// clears entries recorded in an earlier one before using them.
@@ -1087,6 +1095,7 @@ impl CodeBlock {
                 .iter()
                 .map(|_| Cell::new(ConstString::EMPTY))
                 .collect(),
+            name: Cell::new(ConstString::EMPTY),
             shape_epoch: Cell::new(0),
             gc_mark: Cell::new(0),
         });

@@ -6,10 +6,10 @@ use crate::object::{
     BoundData, Class, ConstructorKind, FunctionData, NativeTag, ObjectData, ThisMode,
 };
 use crate::realm::Intrinsic;
-use crate::value::{Attrs, ObjId, PropKey, Property, Value};
-use crate::vm::{ErrorType, Fault, JsResult, Vm};
+use crate::value::{Attrs, ObjId, PropKey, PropSlot, Property, ShapeId, StrId, Value};
+use crate::vm::{ErrorType, FnShape, Fault, JsResult, Vm};
 use agnijs_engine_api::RealmId;
-use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind};
+use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind, ConstString};
 use agnijs_js_parser::ast::FunctionKind;
 use std::rc::Rc;
 
@@ -523,48 +523,31 @@ impl Vm {
             class_data: None,
             module,
         };
-        let f = self.alloc(ObjectData::new(Some(proto), Class::Function(Box::new(fd))));
-        let len_key = PropKey::Str(self.names.length);
-        self.heap.add_own_property(
-            f,
-            len_key,
-            Property::data(
-                Value::Number(code.param_count as f64),
-                Attrs::CONFIGURABLE_ONLY,
-            ),
-        );
-        let name = self.str(&code.name);
-        let name_key = PropKey::Str(self.names.name);
-        self.heap
-            .add_own_property(f, name_key, Property::data(name, Attrs::CONFIGURABLE_ONLY));
-        // Web-compatible extension (as in every major engine): plain sloppy
-        // functions carry own undefined caller/arguments properties instead
-        // of inheriting %Function.prototype%'s poison pills.
-        if !code.strict
-            && code.kind == CodeKind::Function
-            && code.function_kind == FunctionKind::Normal
-        {
-            for n in ["caller", "arguments"] {
-                let k = self.key(n);
-                self.heap.add_own_property(
-                    f,
-                    k,
-                    Property::data(Value::Undefined, Attrs::CONFIGURABLE_ONLY),
-                );
+        let name = self.function_name(&code);
+        let fd = match self.heap.fn_pool.pop() {
+            Some(mut b) => {
+                *b = fd;
+                b
             }
-        }
-        match code.function_kind {
+            None => Box::new(fd),
+        };
+        let f = self.alloc(ObjectData::new(Some(proto), Class::Function(fd)));
+        // The eager properties, in order: length, name, then (sloppy
+        // functions, a web-compatible extension as in every major engine)
+        // own undefined caller and arguments instead of inheriting
+        // %Function.prototype%'s poison pills, then prototype.
+        let length = PropSlot::Data(Value::Number(code.param_count as f64));
+        let name = PropSlot::Data(name);
+        let sloppy = !code.strict
+            && code.kind == CodeKind::Function
+            && code.function_kind == FunctionKind::Normal;
+        let prototype = match code.function_kind {
             FunctionKind::Normal if is_ctor && code.kind != CodeKind::ClassConstructor => {
                 let p = self.new_object();
-                let ck = PropKey::Str(self.names.constructor);
+                let shape = self.fn_shape(FnShape::ProtoObject);
                 self.heap
-                    .add_own_property(p, ck, Property::data(Value::Object(f), Attrs::METHOD));
-                let pk = PropKey::Str(self.names.prototype);
-                self.heap.add_own_property(
-                    f,
-                    pk,
-                    Property::data(Value::Object(p), Attrs(Attrs::WRITABLE)),
-                );
+                    .init_named(p, shape, &[PropSlot::Data(Value::Object(f))]);
+                Some(p)
             }
             FunctionKind::Generator | FunctionKind::AsyncGenerator => {
                 let pp = if code.function_kind == FunctionKind::Generator {
@@ -573,17 +556,73 @@ impl Vm {
                     Intrinsic::AsyncGeneratorPrototype
                 };
                 let pp = self.intrinsic(pp);
-                let p = self.new_object_with_proto(Some(pp));
-                let pk = PropKey::Str(self.names.prototype);
-                self.heap.add_own_property(
-                    f,
-                    pk,
-                    Property::data(Value::Object(p), Attrs(Attrs::WRITABLE)),
-                );
+                Some(self.new_object_with_proto(Some(pp)))
             }
-            _ => {}
+            _ => None,
+        };
+        match prototype {
+            None => {
+                let shape = self.fn_shape(FnShape::Plain);
+                self.heap.init_named(f, shape, &[length, name]);
+            }
+            Some(p) if sloppy => {
+                let shape = self.fn_shape(FnShape::Sloppy);
+                let u = PropSlot::UNDEFINED;
+                let p = PropSlot::Data(Value::Object(p));
+                self.heap.init_named(f, shape, &[length, name, u, u, p]);
+            }
+            Some(p) => {
+                let shape = self.fn_shape(FnShape::WithPrototype);
+                let p = PropSlot::Data(Value::Object(p));
+                self.heap.init_named(f, shape, &[length, name, p]);
+            }
         }
         f
+    }
+
+    /// A function's initial `name` value: one string per block, kept by
+    /// the block's feedback like a string constant.
+    fn function_name(&mut self, code: &CodeBlock) -> Value {
+        let epoch = self.gc_count;
+        let cell = code.feedback(self.feedback_owner).map(|f| &f.name);
+        if let Some(c) = cell {
+            let e = c.get();
+            if e.epoch == epoch {
+                return Value::String(StrId(e.id));
+            }
+        }
+        let id = self.heap.atom(&code.name);
+        if let Some(c) = cell {
+            c.set(ConstString { id: id.0, epoch });
+        }
+        Value::String(id)
+    }
+
+    /// The shape a new function or prototype object starts with.
+    fn fn_shape(&mut self, which: FnShape) -> ShapeId {
+        let s = self.fn_shapes[which as usize];
+        if s != ShapeId(0) {
+            return s;
+        }
+        let c = Attrs::CONFIGURABLE_ONLY;
+        let n = &self.names;
+        let (length, name) = (PropKey::Str(n.length), PropKey::Str(n.name));
+        let prototype = (PropKey::Str(n.prototype), Attrs(Attrs::WRITABLE));
+        let keys: Vec<(PropKey, Attrs)> = match which {
+            FnShape::Plain => vec![(length, c), (name, c)],
+            FnShape::WithPrototype => vec![(length, c), (name, c), prototype],
+            FnShape::Sloppy => vec![
+                (length, c),
+                (name, c),
+                (PropKey::Str(n.caller), c),
+                (PropKey::Str(n.arguments), c),
+                prototype,
+            ],
+            FnShape::ProtoObject => vec![(PropKey::Str(n.constructor), Attrs::METHOD)],
+        };
+        let s = self.heap.shape_with(&keys);
+        self.fn_shapes[which as usize] = s;
+        s
     }
 
     /// ClassDefinitionEvaluation: the constructor and prototype objects.

@@ -538,9 +538,9 @@ fn lookup_accessor(vm: &mut Vm, a: &CallArgs, getter: bool) -> JsResult<Value> {
             return Ok(match p.slot {
                 PropSlot::Accessor { get, set } => {
                     if getter {
-                        get
+                        get.value()
                     } else {
-                        set
+                        set.value()
                     }
                 }
                 PropSlot::Data(_) => Value::Undefined,

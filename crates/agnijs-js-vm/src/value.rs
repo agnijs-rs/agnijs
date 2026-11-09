@@ -338,12 +338,67 @@ impl Attrs {
     }
 }
 
+/// One half of an accessor pair: a function object or none (`undefined`),
+/// in four bytes, so a [`PropSlot`] is no bigger than a [`Value`]
+/// (TASK-100.21).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct OptObj(u32);
+
+impl OptObj {
+    pub const NONE: OptObj = OptObj(u32::MAX);
+
+    /// From a getter or setter value: an object or `undefined` (property
+    /// descriptors validate this before any accessor is stored).
+    #[inline]
+    pub fn from_value(v: Value) -> OptObj {
+        match v {
+            Value::Object(o) => {
+                debug_assert!(o.0 != u32::MAX);
+                OptObj(o.0)
+            }
+            _ => {
+                debug_assert!(v.is_undefined(), "accessor half that is not an object: {v:?}");
+                OptObj::NONE
+            }
+        }
+    }
+
+    /// The half as a value: the function, or `undefined`.
+    #[inline]
+    pub fn value(self) -> Value {
+        if self.0 == u32::MAX {
+            Value::Undefined
+        } else {
+            Value::Object(ObjId(self.0))
+        }
+    }
+
+    #[inline]
+    pub fn is_undefined(self) -> bool {
+        self.0 == u32::MAX
+    }
+}
+
 /// A property's value part: a data value or an accessor pair (each half
-/// `Undefined` when absent).
+/// none when absent). Sixteen bytes, the size of a [`Value`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PropSlot {
     Data(Value),
-    Accessor { get: Value, set: Value },
+    Accessor { get: OptObj, set: OptObj },
+}
+
+impl PropSlot {
+    /// An empty slot (`undefined` data), the filler of unused inline slots.
+    pub const UNDEFINED: PropSlot = PropSlot::Data(Value::Undefined);
+
+    /// An accessor pair from two values (objects or `undefined`).
+    #[inline]
+    pub fn accessor(get: Value, set: Value) -> PropSlot {
+        PropSlot::Accessor {
+            get: OptObj::from_value(get),
+            set: OptObj::from_value(set),
+        }
+    }
 }
 
 /// A full own property.
@@ -362,7 +417,7 @@ impl Property {
     }
     pub fn accessor(get: Value, set: Value, attrs: Attrs) -> Property {
         Property {
-            slot: PropSlot::Accessor { get, set },
+            slot: PropSlot::accessor(get, set),
             attrs,
         }
     }
@@ -418,8 +473,8 @@ impl PropertyDescriptor {
                 ..Default::default()
             },
             PropSlot::Accessor { get, set } => PropertyDescriptor {
-                get: Some(get),
-                set: Some(set),
+                get: Some(get.value()),
+                set: Some(set.value()),
                 enumerable: Some(p.attrs.enumerable()),
                 configurable: Some(p.attrs.configurable()),
                 ..Default::default()
