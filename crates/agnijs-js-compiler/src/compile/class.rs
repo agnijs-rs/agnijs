@@ -172,9 +172,7 @@ impl<'a> Compiler<'a> {
                     self.set_pos(f.span);
                     let key = self.property_key_reg(&f.key)?;
                     let anon = f.value.as_ref().map(is_anonymous_function).unwrap_or(false);
-                    let static_key = static_key_name(&f.key)
-                        .filter(|k| Self::utf16_is_str(k))
-                        .map(|k| utf16_to_string(&k));
+                    let static_key = static_key_str(&f.key);
                     let init = self.alloc();
                     match &f.value {
                         Some(v) => {

@@ -221,6 +221,18 @@ pub struct Compiler<'a> {
     pub(crate) fns: Vec<FnState>,
     /// Compiling eval code: unresolved names are looked up dynamically.
     pub(crate) eval_mode: bool,
+    /// Emission buffers of finished functions, reused by the next one: a
+    /// function's code is copied out at its exact length, so each finished
+    /// function costs one allocation per buffer instead of a growth series.
+    buffers: Vec<EmitBuffers>,
+}
+
+/// The growable per-function emission buffers.
+#[derive(Default)]
+struct EmitBuffers {
+    instrs: Vec<Instr>,
+    offsets: Vec<u32>,
+    statements: Vec<StatementStart>,
 }
 
 pub(crate) type CResult<T> = Result<T, CompileError>;
@@ -233,6 +245,7 @@ impl<'a> Compiler<'a> {
             scopes: Vec::new(),
             fns: Vec::new(),
             eval_mode,
+            buffers: Vec::new(),
         }
     }
 
@@ -409,11 +422,6 @@ impl<'a> Compiler<'a> {
         fs.names.push(s.clone());
         fs.name_map.insert(s.clone(), i);
         i
-    }
-
-    /// Whether a UTF-16 key is representable as a `str` name.
-    pub(crate) fn utf16_is_str(s: &[u16]) -> bool {
-        String::from_utf16(s).is_ok()
     }
 
     pub(crate) fn emit_load_str(&mut self, s: &[u16]) {
@@ -1142,6 +1150,7 @@ impl<'a> Compiler<'a> {
         // any function's, so `for (let i ...)` at module level does not copy
         // an environment per iteration (TASK-100.17).
         let poisoned = analysis.has_eval_inside || kind == CodeKind::Eval;
+        let buffers = self.buffers.pop().unwrap_or_default();
         self.fns.push(FnState {
             ic_count: 0,
             kind,
@@ -1152,8 +1161,8 @@ impl<'a> Compiler<'a> {
             poisoned,
             name,
             span,
-            instrs: Vec::new(),
-            offsets: Vec::new(),
+            instrs: buffers.instrs,
+            offsets: buffers.offsets,
             constants: Vec::new(),
             number_consts: HashMap::new(),
             string_consts: HashMap::new(),
@@ -1169,7 +1178,7 @@ impl<'a> Compiler<'a> {
             ctl: Vec::new(),
             cur_pos: span.start,
             stmt_pending: None,
-            statements: Vec::new(),
+            statements: buffers.statements,
             locals: Vec::new(),
             completion: None,
             optional_exits: Vec::new(),
@@ -1192,6 +1201,17 @@ impl<'a> Compiler<'a> {
             l.end = l.end.min(len);
         }
         debug_assert_eq!(self.scopes.len(), fs.scope_base, "scopes not closed");
+        let instrs = fs.instrs.as_slice().to_vec();
+        let offsets = fs.offsets.as_slice().to_vec();
+        let statements = fs.statements.as_slice().to_vec();
+        fs.instrs.clear();
+        fs.offsets.clear();
+        fs.statements.clear();
+        self.buffers.push(EmitBuffers {
+            instrs: fs.instrs,
+            offsets: fs.offsets,
+            statements: fs.statements,
+        });
         Rc::new(CodeBlock {
             name: fs.name,
             kind: fs.kind,
@@ -1204,8 +1224,8 @@ impl<'a> Compiler<'a> {
             param_regs: fs.param_regs,
             param_names: fs.param_names,
             keeps_arguments: fs.keeps_arguments,
-            instrs: fs.instrs,
-            offsets: fs.offsets,
+            instrs,
+            offsets,
             constants: fs.constants,
             names: fs.names,
             functions: fs.functions,
@@ -1219,7 +1239,7 @@ impl<'a> Compiler<'a> {
             feedback: std::cell::OnceCell::new(),
             globals: std::cell::OnceCell::new(),
             debug: DebugInfo {
-                statements: fs.statements,
+                statements,
                 locals: fs.locals,
             }
             .into(),
@@ -1320,6 +1340,20 @@ pub(crate) fn static_key_name(key: &PropertyKey) -> Option<Vec<u16>> {
     key.static_name()
 }
 
+/// The static name of a property key as a `str`, when it has one that is
+/// valid UTF-16 (`static_key_name` filtered by `utf16_is_str`), borrowed
+/// from the AST when it can be.
+pub(crate) fn static_key_str(key: &PropertyKey) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+    match key {
+        PropertyKey::Ident(i) => Some(Cow::Borrowed(&i.name)),
+        PropertyKey::String(s) => String::from_utf16(&s.value).ok().map(Cow::Owned),
+        PropertyKey::Number(n, _) => Some(Cow::Owned(agnijs_js_parser::number::to_js_string(*n))),
+        PropertyKey::BigInt(b, _) => Some(Cow::Borrowed(b)),
+        PropertyKey::Computed(_) | PropertyKey::Private(_) => None,
+    }
+}
+
 /// Whether an expression is an anonymous function definition (for
 /// NamedEvaluation).
 pub(crate) fn is_anonymous_function(e: &Expression) -> bool {
@@ -1340,6 +1374,3 @@ pub(crate) enum NameHint<'n> {
     Dynamic(Reg),
 }
 
-pub(crate) fn utf16_to_string(s: &[u16]) -> String {
-    String::from_utf16_lossy(s)
-}

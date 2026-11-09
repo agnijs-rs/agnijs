@@ -317,17 +317,13 @@ impl<'a> Compiler<'a> {
                         self.emit(Instr::SetPrototypeLiteral { obj });
                         continue;
                     }
-                    let static_name = static_key_name(&p.key);
                     match p.kind {
                         PropertyKind::Init => {
-                            if let Some(name) = &static_name {
-                                if Self::utf16_is_str(name) {
-                                    let s = utf16_to_string(name);
-                                    self.expr_named(&p.value, NameHint::Static(&s))?;
-                                    let n = self.name(&s);
-                                    self.emit(Instr::DefineOwnNamed { obj, name: n });
-                                    continue;
-                                }
+                            if let Some(s) = static_key_str(&p.key) {
+                                self.expr_named(&p.value, NameHint::Static(&s))?;
+                                let n = self.name(&s);
+                                self.emit(Instr::DefineOwnNamed { obj, name: n });
+                                continue;
                             }
                             let m2 = self.mark();
                             let key = self.property_key_reg(&p.key)?;
