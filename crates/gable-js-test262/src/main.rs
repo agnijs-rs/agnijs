@@ -71,6 +71,11 @@ enum Cmd {
         /// Print every failure message.
         #[arg(long)]
         verbose: bool,
+        /// Run every script and module from serialised bytecode
+        /// (`compile_script`/`compile_module` then load), against the same
+        /// exclusions and baseline. Engines with a bytecode format only.
+        #[arg(long)]
+        precompile: bool,
     },
     /// Run one JS file against an engine with the test262 harness loaded
     /// (for debugging; not part of the conformance run).
@@ -171,6 +176,7 @@ fn main() -> Result<()> {
             include_intl402,
             only_intl402,
             verbose,
+            precompile,
         } => run(RunArgs {
             engine,
             test262: test262.unwrap_or_else(default_test262_dir),
@@ -185,6 +191,7 @@ fn main() -> Result<()> {
             include_intl402,
             only_intl402,
             verbose,
+            precompile,
         }),
     }
 }
@@ -239,6 +246,7 @@ struct RunArgs {
     include_intl402: bool,
     only_intl402: bool,
     verbose: bool,
+    precompile: bool,
 }
 
 fn factory_for(engine: &str) -> Result<Mode> {
@@ -276,7 +284,11 @@ fn run(args: RunArgs) -> Result<()> {
         eprintln!("warning: checkout is at {commit}, PIN says {pinned}");
     }
 
-    let factory = factory_for(&args.engine)?;
+    let factory = match (factory_for(&args.engine)?, args.precompile) {
+        (Mode::Engine(f), true) => Mode::Precompiled(f),
+        (_, true) => bail!("--precompile needs an engine that runs code"),
+        (mode, false) => mode,
+    };
     let features = FeatureList::parse(&std::fs::read_to_string(root.join("features.txt"))?);
     let post = parse_name_list(&std::fs::read_to_string(
         crate_dir().join("post-es2025-features.txt"),

@@ -1,11 +1,11 @@
 //! The `gable_engine_api::Engine` implementation: value conversion across
 //! the interface, host functions and objects, and the bytecode container.
 //!
-//! Bytecode container (ADR 0010): `GBLC` magic, the format string, a kind
-//! byte, the script name and the source text. The container pins the
-//! compiler version so stale artifacts are rejected before anything runs;
-//! the serialised register bytecode replaces the source payload in M7
-//! (startup work), behind the same header.
+//! Bytecode container (ADR 0010): the shared `GBJS` container with the
+//! `gable-bc-2` tag around a kind byte and the serialised code tree, so
+//! loading precompiled code skips parsing and compiling. The M2
+//! source-payload container (`GBLC`, `gable-bc-1`) still loads for one
+//! release.
 
 use crate::object::{CallArgs, Class, HostObjectData, NativeData, NativeKind, ObjectData};
 use crate::realm::Intrinsic;
@@ -19,8 +19,17 @@ use gable_engine_api::{
 use gable_js_compiler::bytecode::CodeBlock;
 use std::rc::Rc;
 
-pub const MAGIC: &[u8; 4] = b"GBLC";
-pub const FORMAT: &str = "gable-bc-1";
+/// The format tag in the shared `GBJS` container (`gable_engine_api::bytecode`):
+/// a kind byte, then the serialised code tree (`gable_js_compiler::serialize`).
+/// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
+/// constant pool or the serialiser's layout changes it.
+pub const FORMAT: &str = "gable-bc-2";
+
+/// The M2 container (ADR 0010): `GBLC` magic, `gable-bc-1`, a kind byte, the
+/// name and the source text, recompiled on load. Still accepted for one
+/// release so caches written before M7 keep loading; never produced.
+pub const LEGACY_MAGIC: &[u8; 4] = b"GBLC";
+pub const LEGACY_FORMAT: &str = "gable-bc-1";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;
@@ -30,25 +39,58 @@ pub enum Decoded {
     Module(Rc<CodeBlock>),
 }
 
-pub fn encode_bytecode(module: bool, name: &str, source: &str) -> Vec<u8> {
-    let mut out = Vec::with_capacity(16 + name.len() + source.len());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(FORMAT.as_bytes());
-    out.push(if module { KIND_MODULE } else { KIND_SCRIPT });
-    out.extend_from_slice(&(name.len() as u32).to_le_bytes());
-    out.extend_from_slice(name.as_bytes());
-    out.extend_from_slice(&(source.len() as u32).to_le_bytes());
-    out.extend_from_slice(source.as_bytes());
-    out
+/// 64-bit FNV-1a: detects accidental damage (truncated downloads, bad
+/// disks, a bundler that rewrote bytes) before the tree is decoded. It is
+/// not a signature; bytecode is code, trusted as far as source would be.
+fn checksum(kind: u8, tree: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in std::iter::once(&kind).chain(tree) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+/// Payload: kind byte, checksum of kind and tree (u64 LE), tree.
+pub fn encode_bytecode(module: bool, code: &CodeBlock) -> Vec<u8> {
+    let kind = if module { KIND_MODULE } else { KIND_SCRIPT };
+    let tree = gable_js_compiler::serialize::encode(code);
+    let mut payload = Vec::with_capacity(9 + tree.len());
+    payload.push(kind);
+    payload.extend_from_slice(&checksum(kind, &tree).to_le_bytes());
+    payload.extend_from_slice(&tree);
+    api::bytecode::wrap(FORMAT, &payload)
 }
 
 pub fn decode_bytecode(bytes: &[u8], _want_module: bool) -> Result<Decoded, Error> {
-    if bytes.len() < 4 || &bytes[..4] != MAGIC {
-        return Err(Error::BytecodeMismatch {
-            expected: FORMAT.to_string(),
-            found: "not gable bytecode".to_string(),
-        });
+    if bytes.starts_with(LEGACY_MAGIC) {
+        return decode_legacy(bytes);
     }
+    let payload = api::bytecode::unwrap(FORMAT, bytes)?;
+    if payload.len() < 9 {
+        return Err(Error::BytecodeCorrupt("truncated payload header".into()));
+    }
+    let kind = payload[0];
+    let sum = u64::from_le_bytes(payload[1..9].try_into().unwrap());
+    let tree = &payload[9..];
+    if checksum(kind, tree) != sum {
+        return Err(Error::BytecodeCorrupt("payload checksum mismatch".into()));
+    }
+    let code = gable_js_compiler::serialize::decode(tree)
+        .map_err(|e| Error::BytecodeCorrupt(e.to_string()))?;
+    use gable_js_compiler::bytecode::CodeKind;
+    match (kind, code.kind) {
+        (KIND_SCRIPT, CodeKind::Script) => Ok(Decoded::Script(code)),
+        (KIND_MODULE, CodeKind::Module) => Ok(Decoded::Module(code)),
+        (KIND_SCRIPT | KIND_MODULE, k) => Err(Error::BytecodeCorrupt(format!(
+            "kind byte {kind} does not match a {k:?} code block"
+        ))),
+        _ => Err(Error::BytecodeCorrupt("unknown code kind".into())),
+    }
+}
+
+fn decode_legacy(bytes: &[u8]) -> Result<Decoded, Error> {
+    const FORMAT: &str = LEGACY_FORMAT;
     let vlen = FORMAT.len();
     if bytes.len() < 4 + vlen {
         return Err(Error::BytecodeCorrupt("truncated header".into()));
@@ -428,10 +470,10 @@ impl Engine for Vm {
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {
         self.check_realm(realm)?;
-        if let Err(e) = gable_js_compiler::compile_script(source, name) {
-            return Err(self.syntax_error_value(realm, &e.message));
+        match gable_js_compiler::compile_script(source, name) {
+            Ok(code) => Ok(encode_bytecode(false, &code)),
+            Err(e) => Err(self.syntax_error_value(realm, &e.message)),
         }
-        Ok(encode_bytecode(false, name, source))
     }
 
     fn compile_module(
@@ -441,10 +483,10 @@ impl Engine for Vm {
         source: &str,
     ) -> api::Result<Vec<u8>> {
         self.check_realm(realm)?;
-        if let Err(e) = gable_js_compiler::compile_module(source, specifier) {
-            return Err(self.syntax_error_value(realm, &e.message));
+        match gable_js_compiler::compile_module(source, specifier) {
+            Ok(code) => Ok(encode_bytecode(true, &code)),
+            Err(e) => Err(self.syntax_error_value(realm, &e.message)),
         }
-        Ok(encode_bytecode(true, specifier, source))
     }
 
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> api::Result<api::Value> {

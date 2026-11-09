@@ -22,6 +22,11 @@ pub type Factory = Arc<dyn Fn(Rc<dyn Host>) -> Box<dyn Engine> + Send + Sync>;
 pub enum Mode {
     /// Evaluate with a fresh engine from the factory.
     Engine(Factory),
+    /// Like `Engine`, but every script (harness and test) and every
+    /// module goes through `compile_script`/`compile_module` and is run
+    /// from the serialised bytecode, so the suite checks the bytecode
+    /// round trip.
+    Precompiled(Factory),
     /// Parse with `gable-js-parser` only: positive tests must parse, tests
     /// negative in the `parse` phase must fail to parse, nothing runs.
     ParseOnly,
@@ -63,6 +68,8 @@ const ASYNC_FAILURE: &str = "Test262:AsyncTestFailure:";
 /// test directory, and a deadline enforced through the interrupt hook.
 struct Test262Host {
     prints: RefCell<Vec<String>>,
+    /// Hand modules to the engine as Gable bytecode (`Mode::Precompiled`).
+    precompile: bool,
     deadline: Instant,
     root: PathBuf,
 }
@@ -102,6 +109,15 @@ impl Host for Test262Host {
             .map_err(|e| format!("cannot load module {resolved}: {e}"))?;
         if resolved.ends_with(".json") {
             Ok(ModuleSource::Json(text))
+        } else if self.precompile {
+            // A module that does not compile is handed over as source so
+            // the engine reports its SyntaxError the usual way.
+            match gable_js_compiler::compile_module(&text, resolved) {
+                Ok(code) => Ok(ModuleSource::Bytecode(
+                    gable_js_vm::engine::encode_bytecode(true, &code),
+                )),
+                Err(_) => Ok(ModuleSource::Source(text)),
+            }
         } else {
             Ok(ModuleSource::Source(text))
         }
@@ -138,8 +154,9 @@ pub fn run_test(
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Vec<RunResult> {
-    let factory = match mode {
-        Mode::Engine(f) => f,
+    let (factory, precompile) = match mode {
+        Mode::Engine(f) => (f, false),
+        Mode::Precompiled(f) => (f, true),
         Mode::ParseOnly => return parse_test(case, harness, false),
         Mode::CompileOnly => return parse_test(case, harness, true),
     };
@@ -147,20 +164,20 @@ pub fn run_test(
     if m.is_module() || m.is_raw() {
         return vec![RunResult {
             strict: None,
-            outcome: run_guarded(case, false, factory, harness, timeout),
+            outcome: run_guarded(case, false, factory, precompile, harness, timeout),
         }];
     }
     let mut runs = Vec::new();
     if !m.has_flag("onlyStrict") {
         runs.push(RunResult {
             strict: Some(false),
-            outcome: run_guarded(case, false, factory, harness, timeout),
+            outcome: run_guarded(case, false, factory, precompile, harness, timeout),
         });
     }
     if !m.has_flag("noStrict") {
         runs.push(RunResult {
             strict: Some(true),
-            outcome: run_guarded(case, true, factory, harness, timeout),
+            outcome: run_guarded(case, true, factory, precompile, harness, timeout),
         });
     }
     runs
@@ -172,11 +189,12 @@ fn run_guarded(
     case: &TestCase,
     strict: bool,
     factory: &Factory,
+    precompile: bool,
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Outcome {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_once(case, strict, factory, harness, timeout)
+        run_once(case, strict, factory, precompile, harness, timeout)
     })) {
         Ok(o) => o,
         Err(p) => {
@@ -312,11 +330,13 @@ fn run_once(
     case: &TestCase,
     strict: bool,
     factory: &Factory,
+    precompile: bool,
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Outcome {
     let host = Rc::new(Test262Host {
         prints: RefCell::new(Vec::new()),
+        precompile: precompile,
         deadline: Instant::now() + timeout,
         root: case
             .path
@@ -340,7 +360,13 @@ fn run_once(
             let Some(src) = harness.get(f) else {
                 return Outcome::Fail(format!("missing harness file {f}"));
             };
-            if let Err(e) = engine.eval_script(realm, &format!("harness/{f}"), src) {
+            if let Err(e) = eval_source(
+                &mut *engine,
+                realm,
+                precompile,
+                &format!("harness/{f}"),
+                src,
+            ) {
                 return Outcome::Fail(format!("harness {f} failed: {e}"));
             }
         }
@@ -356,7 +382,13 @@ fn run_once(
         };
         // The script is named by its absolute path so dynamic `import()`
         // from a script resolves relative to the test file.
-        match engine.eval_script(realm, &normalize(&case.path), &source) {
+        match eval_source(
+            &mut *engine,
+            realm,
+            precompile,
+            &normalize(&case.path),
+            &source,
+        ) {
             Ok(_) => drain_jobs(&mut *engine, realm),
             Err(e) => Err(describe_error(&mut *engine, realm, e)),
         }
@@ -392,6 +424,22 @@ fn run_once(
             neg.kind, neg.phase
         )),
     }
+}
+
+/// Evaluate a script from source, or (precompiling) compile it to bytecode
+/// first and run that. A compile error is the same SyntaxError either way.
+fn eval_source(
+    engine: &mut dyn Engine,
+    realm: RealmId,
+    precompile: bool,
+    name: &str,
+    source: &str,
+) -> gable_engine_api::Result<gable_engine_api::Value> {
+    if !precompile {
+        return engine.eval_script(realm, name, source);
+    }
+    let bytes = engine.compile_script(realm, name, source)?;
+    engine.eval_bytecode(realm, &bytes)
 }
 
 fn run_module(
@@ -603,6 +651,7 @@ pub fn eval_file(
 ) -> std::result::Result<Vec<String>, (String, String, Vec<String>)> {
     let host = Rc::new(Test262Host {
         prints: RefCell::new(Vec::new()),
+        precompile: false,
         deadline: Instant::now() + timeout,
         root: path.parent().map(Path::to_path_buf).unwrap_or_default(),
     });

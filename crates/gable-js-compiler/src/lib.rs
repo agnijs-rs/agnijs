@@ -7,6 +7,7 @@
 pub mod analysis;
 pub mod bytecode;
 mod compile;
+pub mod serialize;
 
 pub use bytecode::*;
 pub use gable_js_parser::EvalOptions;

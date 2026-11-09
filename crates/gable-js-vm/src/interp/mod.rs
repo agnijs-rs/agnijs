@@ -101,7 +101,11 @@ impl Vm {
                 // The stress interval is counted inside maybe_collect.
                 self.maybe_collect();
                 if let Some(limit) = self.heap.memory_limit {
-                    if self.heap.live_bytes > limit {
+                    // Under a native frame (a job, a callback) the collector
+                    // is deferred, so everything allocated since the last
+                    // collection is still held: count it, or a loop inside a
+                    // callback would grow past the limit unchecked.
+                    if self.heap.live_bytes + self.heap.allocated_since_gc > limit {
                         return Err(Fault::OutOfMemory);
                     }
                 }
