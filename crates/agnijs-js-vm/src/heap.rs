@@ -13,7 +13,7 @@
 
 use crate::bigint::BigIntData;
 use crate::env::Environment;
-use crate::object::{ObjectData, Shape};
+use crate::object::{KeyTable, ObjectData, Shape};
 use crate::string::{Repr, StringData, Units};
 use crate::symbol::SymbolData;
 use crate::value::{BigId, EnvId, ObjId, ShapeId, StrId, SymId};
@@ -178,6 +178,9 @@ pub struct Heap {
     /// program's property-shape structure, and their keys are kept alive
     /// as roots. See ADR 0009.
     pub shapes: Vec<Shape>,
+    /// The key storage shapes share along a transition chain
+    /// (`object::KeyTable`); table 0 is the root shape's empty table.
+    pub key_tables: Vec<KeyTable>,
     /// Interned strings (atoms), weakly held: the sweep removes dead ones.
     intern: HashTable<StrId>,
     /// Bytes allocated since the last collection (approximate).
@@ -218,6 +221,7 @@ impl Heap {
             bigints: Arena::default(),
             envs: Arena::default(),
             shapes: Vec::new(),
+            key_tables: vec![KeyTable::default()],
             intern: HashTable::new(),
             allocated_since_gc: 0,
             gc_threshold: 8 * 1024 * 1024,

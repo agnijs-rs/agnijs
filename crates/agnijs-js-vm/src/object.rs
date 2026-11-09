@@ -31,42 +31,87 @@ const DENSE_GAP: u32 = 4096;
 // ---- shapes -----------------------------------------------------------------
 
 /// A shape: the ordered named properties (keys and attributes) of every
-/// object sharing it. Slot `i` of an object holds the value of `keys[i]`.
+/// object sharing it. Slot `i` of an object holds the value of key `i`.
+///
+/// The keys themselves live in a [`KeyTable`] that every shape of one
+/// transition chain shares: a shape owns the first `len` entries of its
+/// table. Adding a property to the shape at the table's tip appends one
+/// entry (amortised O(1)); a second transition off the same shape forks
+/// the table, copying only that prefix. Readers go through
+/// `Heap::shape_lookup`, `Heap::shape_key` and `Heap::shape_keys`.
 pub struct Shape {
-    pub keys: Vec<(PropKey, Attrs)>,
-    index: HashMap<PropKey, u32>,
+    pub table: KeyTableId,
+    pub len: u32,
     transitions: HashMap<(PropKey, Attrs), ShapeId>,
     pub parent: Option<ShapeId>,
 }
 
 impl Shape {
+    /// The empty shape, over the heap's first (empty) key table.
     pub fn root() -> Shape {
         Shape {
-            keys: Vec::new(),
-            index: HashMap::new(),
+            table: KeyTableId(0),
+            len: 0,
             transitions: HashMap::new(),
             parent: None,
         }
     }
 
-    #[inline]
-    pub fn lookup(&self, key: PropKey) -> Option<u32> {
-        if self.keys.len() <= 8 {
-            self.keys
-                .iter()
-                .position(|(k, _)| *k == key)
-                .map(|i| i as u32)
-        } else {
-            self.index.get(&key).copied()
-        }
-    }
-
     pub fn len(&self) -> usize {
-        self.keys.len()
+        self.len as usize
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.len == 0
+    }
+}
+
+/// Index of a [`KeyTable`] in `Heap::key_tables`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct KeyTableId(pub u32);
+
+/// The ordered keys of one transition chain, appended to as the chain
+/// grows. Up to [`KeyTable::INDEX_FROM`] keys a lookup scans the prefix;
+/// past that the table carries a hash index of every key it holds, which
+/// a shape consults for positions below its own `len`.
+#[derive(Default)]
+pub struct KeyTable {
+    pub keys: Vec<(PropKey, Attrs)>,
+    index: HashMap<PropKey, u32>,
+}
+
+impl KeyTable {
+    /// Lookups over this many keys or fewer scan; beyond it they hash.
+    const INDEX_FROM: usize = 8;
+
+    fn with_keys(keys: Vec<(PropKey, Attrs)>) -> KeyTable {
+        let mut t = KeyTable { keys: Vec::new(), index: HashMap::new() };
+        for (k, a) in keys {
+            t.push(k, a);
+        }
+        t
+    }
+
+    fn push(&mut self, key: PropKey, attrs: Attrs) {
+        let i = self.keys.len() as u32;
+        self.keys.push((key, attrs));
+        if self.keys.len() == KeyTable::INDEX_FROM + 1 {
+            self.index.reserve(self.keys.len());
+            for (j, (k, _)) in self.keys.iter().enumerate() {
+                self.index.insert(*k, j as u32);
+            }
+        } else if self.keys.len() > KeyTable::INDEX_FROM {
+            self.index.insert(key, i);
+        }
+    }
+
+    #[inline]
+    fn lookup(&self, len: usize, key: PropKey) -> Option<u32> {
+        if len <= KeyTable::INDEX_FROM {
+            self.keys[..len].iter().position(|(k, _)| *k == key).map(|i| i as u32)
+        } else {
+            self.index.get(&key).copied().filter(|&i| (i as usize) < len)
+        }
     }
 }
 
@@ -394,21 +439,48 @@ impl ObjectData {
 // ---- storage operations -----------------------------------------------------
 
 impl Heap {
+    /// The slot of `key` in `shape`, if the shape has it.
+    #[inline]
+    pub fn shape_lookup(&self, shape: ShapeId, key: PropKey) -> Option<u32> {
+        let sh = self.shape(shape);
+        self.key_tables[sh.table.0 as usize].lookup(sh.len as usize, key)
+    }
+
+    /// The key and attributes stored in `slot` of `shape`.
+    #[inline]
+    pub fn shape_key(&self, shape: ShapeId, slot: u32) -> (PropKey, Attrs) {
+        let sh = self.shape(shape);
+        debug_assert!(slot < sh.len);
+        self.key_tables[sh.table.0 as usize].keys[slot as usize]
+    }
+
+    /// Every key of `shape`, in slot order.
+    #[inline]
+    pub fn shape_keys(&self, shape: ShapeId) -> &[(PropKey, Attrs)] {
+        let sh = self.shape(shape);
+        &self.key_tables[sh.table.0 as usize].keys[..sh.len as usize]
+    }
+
     /// Transition `shape` by adding `key` with `attrs`.
     fn shape_add(&mut self, shape: ShapeId, key: PropKey, attrs: Attrs) -> ShapeId {
         if let Some(&next) = self.shape(shape).transitions.get(&(key, attrs)) {
             return next;
         }
-        let parent = self.shape(shape);
-        let mut keys = parent.keys.clone();
-        keys.push((key, attrs));
-        let mut index = HashMap::with_capacity(keys.len());
-        for (i, (k, _)) in keys.iter().enumerate() {
-            index.insert(*k, i as u32);
+        let (mut table, len) = {
+            let p = self.shape(shape);
+            (p.table, p.len as usize)
+        };
+        if self.key_tables[table.0 as usize].keys.len() != len {
+            // Another transition already extended this table past
+            // `shape`: the new chain gets its own copy of the prefix.
+            let prefix = self.key_tables[table.0 as usize].keys[..len].to_vec();
+            table = KeyTableId(self.key_tables.len() as u32);
+            self.key_tables.push(KeyTable::with_keys(prefix));
         }
+        self.key_tables[table.0 as usize].push(key, attrs);
         let new = Shape {
-            keys,
-            index,
+            table,
+            len: len as u32 + 1,
             transitions: HashMap::new(),
             parent: Some(shape),
         };
@@ -423,9 +495,8 @@ impl Heap {
         if o.dict.is_some() {
             return;
         }
-        let shape = self.shape(o.shape);
         let mut dict = IndexMap::with_capacity(o.slots.len() + 8);
-        for (i, (k, attrs)) in shape.keys.iter().enumerate() {
+        for (i, (k, attrs)) in self.shape_keys(o.shape).iter().enumerate() {
             dict.insert(
                 *k,
                 Property {
@@ -477,11 +548,10 @@ impl Heap {
                 if let Some(d) = &o.dict {
                     d.get(&key).copied()
                 } else {
-                    let shape = self.shape(o.shape);
-                    let slot = shape.lookup(key)?;
+                    let slot = self.shape_lookup(o.shape, key)?;
                     Some(Property {
                         slot: o.slots[slot as usize],
-                        attrs: shape.keys[slot as usize].1,
+                        attrs: self.shape_key(o.shape, slot).1,
                     })
                 }
             }
@@ -583,10 +653,9 @@ impl Heap {
                 }
                 let shape = o.shape;
                 let slot = self
-                    .shape(shape)
-                    .lookup(key)
+                    .shape_lookup(shape, key)
                     .expect("replace_own_property: missing key");
-                let attrs = self.shape(shape).keys[slot as usize].1;
+                let attrs = self.shape_key(shape, slot).1;
                 if attrs == prop.attrs {
                     self.obj_mut(obj).slots[slot as usize] = prop.slot;
                 } else {
@@ -620,7 +689,7 @@ impl Heap {
                     return;
                 }
                 let shape = o.shape;
-                if let Some(slot) = self.shape(shape).lookup(key) {
+                if let Some(slot) = self.shape_lookup(shape, key) {
                     self.obj_mut(obj).slots[slot as usize] = PropSlot::Data(value);
                 }
             }
@@ -658,13 +727,13 @@ impl Heap {
                     return d.shift_remove(&key).is_some();
                 }
                 let shape = o.shape;
-                let Some(slot) = self.shape(shape).lookup(key) else {
+                let Some(slot) = self.shape_lookup(shape, key) else {
                     return false;
                 };
                 // Removing the most recently added key walks back to the
                 // parent shape; anything else goes to dictionary mode.
                 let sh = self.shape(shape);
-                if slot as usize + 1 == sh.keys.len() {
+                if slot + 1 == sh.len {
                     let parent = sh.parent.expect("non-root shape has a parent");
                     let o = self.obj_mut(obj);
                     o.slots.pop();
@@ -707,7 +776,7 @@ impl Heap {
                 push(*k, &mut keys, &mut symbols);
             }
         } else {
-            for (k, _) in &self.shape(o.shape).keys {
+            for (k, _) in self.shape_keys(o.shape) {
                 push(*k, &mut keys, &mut symbols);
             }
         }
@@ -736,8 +805,7 @@ impl Heap {
             keys.extend(d.keys().filter(|k| matches!(k, PropKey::Str(_))).copied());
         } else {
             keys.extend(
-                self.shape(o.shape)
-                    .keys
+                self.shape_keys(o.shape)
                     .iter()
                     .map(|(k, _)| *k)
                     .filter(|k| matches!(k, PropKey::Str(_))),

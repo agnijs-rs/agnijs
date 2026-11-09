@@ -5,7 +5,7 @@ status: Done
 assignee:
   - '@claude-fable'
 created_date: '2026-11-09T03:19:00Z'
-updated_date: '2026-11-09T06:45:00Z'
+updated_date: '2026-11-09T06:58:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -67,6 +67,8 @@ Verification (this branch, release, one run each): cargo test -p agnijs-js-vm gr
 Micro-benchmarks (bench run --filter regex, agnijs, 1 warmup + 5 iterations, before = origin/main bc9fcca bench.exe, after = this branch, same machine): regex 385.73 -> 376.72 ms (0.98), regex-tokenize 99.95 -> 98.35 ms (0.98), regex-long-input 7.77 -> 7.51 ms (0.97), regex-redos 0.01 -> 0.01 ms; QuickJS-NG for context: 137.36 / 21.73 / 3.29 / 94.99 ms. The change is confined to agnijs-js-regex's exec entry, which only RegExp built-ins reach, so the non-regex micro-benchmarks and the Gable benchmarks cannot move; they were not re-run.
 
 Docs: ADR 0013 addendum gained the section 'Anchored patterns try index 0 only (TASK-100.30)'.
+
+Gable suites (run-suites.mjs --engine agnijs, Gable harness path-patched to this branch at the TASK-100.27 working tree, which includes this commit): 79 files, 758 passed, 2 known timing-budget failures listed in suites-expected.json, exit 0. Gable's harness manifests were restored afterwards; the pin moves in its own commit.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

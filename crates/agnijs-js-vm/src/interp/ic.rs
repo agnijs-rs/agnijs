@@ -83,7 +83,7 @@ impl Vm {
             return;
         }
         let shape = o.shape;
-        if let Some(slot) = self.heap.shape(shape).lookup(key) {
+        if let Some(slot) = self.heap.shape_lookup(shape, key) {
             if let Some(PropSlot::Data(_)) = o.slots.get(slot as usize) {
                 code.ic[ic as usize].set(IcEntry {
                     shape: shape.0,
@@ -101,7 +101,7 @@ impl Vm {
             return;
         }
         let hshape = h.shape;
-        if let Some(slot) = self.heap.shape(hshape).lookup(key) {
+        if let Some(slot) = self.heap.shape_lookup(hshape, key) {
             if let Some(PropSlot::Data(_)) = h.slots.get(slot as usize) {
                 code.ic[ic as usize].set(IcEntry {
                     shape: shape.0,
@@ -143,9 +143,8 @@ impl Vm {
             return;
         }
         let shape = o.shape;
-        let sh = self.heap.shape(shape);
-        if let Some(slot) = sh.lookup(key) {
-            let writable = sh.keys[slot as usize].1.writable();
+        if let Some(slot) = self.heap.shape_lookup(shape, key) {
+            let writable = self.heap.shape_key(shape, slot).1.writable();
             if writable && matches!(o.slots.get(slot as usize), Some(PropSlot::Data(_))) {
                 code.ic[ic as usize].set(IcEntry {
                     shape: shape.0,

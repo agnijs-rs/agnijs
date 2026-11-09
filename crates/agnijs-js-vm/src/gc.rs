@@ -354,8 +354,9 @@ impl Vm {
         for m in self.modules.values() {
             roots.obj(*m);
         }
-        for shape in &self.heap.shapes {
-            for (k, _) in &shape.keys {
+        // Shape keys, once per shared table rather than once per shape.
+        for table in &self.heap.key_tables {
+            for (k, _) in &table.keys {
                 roots.key(*k);
             }
         }
