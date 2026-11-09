@@ -1,10 +1,11 @@
 ---
 id: TASK-100.16
 title: 'Engine: let the collector run while native frames are on the stack'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@fable'
 created_date: '2026-11-09T03:18:00Z'
-updated_date: '2026-11-09T05:53:00Z'
+updated_date: '2026-11-09T21:44:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -41,6 +42,12 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #5 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #6 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Design: snapshot retention at nested run-loop entry. 1. Every arena slot records a monotonic allocation serial (Heap::alloc_serial). 2. When Rust enters a nested run loop (Vm::run with native_depth > 0: natives calling back, host calls, jobs, module evaluation, generator resumption), the VM records the serial; a collection under that loop treats every heap value born before the innermost such serial as a root (traced, so what it references survives too). Rust code can only hold values that existed when it entered the loop, so no native needs per-site rooting and the collector stays precise, non-moving and stack-map free (ADR 0019 J6). 3. Vm::maybe_collect no longer refuses under native frames; refresh_attention keeps the GC bit set. 4. Pacing excludes the retained bytes so the next collection (at an outer level) frees them. 5. Tests first: memory growth with native frames on the stack (forEach/map/sort/replace callbacks, jobs, host calls, modules), GC-stress variants, natives holding values across callbacks; then implementation; then test262 (default, precompile, intl402, RegExp modes), gc-stress subset, Gable suites and benches; ADR 0009 addendum and findings doc.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
