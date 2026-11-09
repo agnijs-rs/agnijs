@@ -86,6 +86,32 @@ fn inline_caches_start_empty_after_decode() {
 }
 
 #[test]
+fn debug_info_round_trips_including_backward_offsets_and_multi_byte_values() {
+    let code = compile_script("let a = 1;\nlet b = a + 1;\nb;", "d.js").unwrap();
+    let mut owned = Rc::try_unwrap(code).expect("sole owner");
+    assert!(owned.debug.statements.len() >= 3);
+    // A statement that starts before the one ahead of it (a negative
+    // delta), and a position whose delta takes three LEB128 bytes.
+    let len = owned.instrs.len() as u32;
+    owned.debug.statements[1].offset = 0;
+    owned.source = Rc::new(gable_js_compiler::SourceText {
+        name: owned.source.name.clone(),
+        text: format!("{}{}", owned.source.text, " ".repeat(300_000)).into(),
+    });
+    let last = owned.debug.statements.len() - 1;
+    owned.debug.statements[last].offset = 299_999;
+    owned.debug.locals.push(gable_js_compiler::LocalVar {
+        name: "late".into(),
+        reg: 0,
+        start: len - 1,
+        end: len,
+    });
+    let back = decode(&encode(&owned)).unwrap();
+    assert_eq!(back.debug.statements, owned.debug.statements);
+    assert_eq!(format!("{:?}", back.debug.locals), format!("{:?}", owned.debug.locals));
+}
+
+#[test]
 fn truncated_input_is_refused_at_every_length() {
     let code = compile_script(SCRIPT, "all.js").unwrap();
     let bytes = encode(&code);

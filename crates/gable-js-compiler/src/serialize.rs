@@ -94,12 +94,24 @@ impl Writer {
     fn len(&mut self, n: usize) {
         self.u32(u32::try_from(n).expect("bytecode pool exceeds u32"));
     }
-    fn str(&mut self, s: &Rc<str>) {
+    /// LEB128: seven bits per byte, low bits first.
+    fn var(&mut self, mut v: u32) {
+        while v >= 0x80 {
+            self.out.push(v as u8 | 0x80);
+            v >>= 7;
+        }
+        self.out.push(v as u8);
+    }
+    fn str_index(&mut self, s: &Rc<str>) -> u32 {
         let next = self.str_list.len() as u32;
         let i = *self.strs.entry(s.clone()).or_insert_with(|| next);
         if i == next {
             self.str_list.push(s.clone());
         }
+        i
+    }
+    fn str(&mut self, s: &Rc<str>) {
+        let i = self.str_index(s);
         self.u32(i);
     }
     fn strs(&mut self, list: &[Rc<str>]) {
@@ -181,8 +193,25 @@ impl<'a> Reader<'a> {
         }
         Ok(n)
     }
+    fn var(&mut self) -> Result<u32> {
+        let mut v: u32 = 0;
+        for shift in (0..35).step_by(7) {
+            let b = self.u8()?;
+            if shift == 28 && b > 0x0F {
+                return invalid("variable-length integer exceeds 32 bits");
+            }
+            v |= ((b & 0x7F) as u32) << shift;
+            if b & 0x80 == 0 {
+                return Ok(v);
+            }
+        }
+        unreachable!("the fifth byte either ends the integer or is refused")
+    }
     fn str(&mut self) -> Result<Rc<str>> {
         let i = self.u32()? as usize;
+        self.str_at(i)
+    }
+    fn str_at(&mut self, i: usize) -> Result<Rc<str>> {
         match self.strs.get(i) {
             Some(s) => Ok(s.clone()),
             None => invalid(format!("string index {i} out of range")),
@@ -791,18 +820,7 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
     for o in &c.offsets {
         w.u32(*o);
     }
-    w.len(c.debug.statements.len());
-    for s in &c.debug.statements {
-        w.u32(s.pc);
-        w.u32(s.offset);
-    }
-    w.len(c.debug.locals.len());
-    for l in &c.debug.locals {
-        w.str(&l.name);
-        w.u16(l.reg);
-        w.u32(l.start);
-        w.u32(l.end);
-    }
+    put_debug_info(w, &c.debug);
     w.len(c.constants.len());
     for k in &c.constants {
         put_constant(w, k);
@@ -860,6 +878,59 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
     w.len(c.ic.len());
 }
 
+/// Debug info is most of a block's metadata by count, so it is packed:
+/// statement starts as deltas from the previous one (the instruction index
+/// as an unsigned delta, the source offset zigzag-encoded, since a
+/// statement can start before the one emitted ahead of it) and locals as
+/// (name index, register, start, length), all LEB128.
+fn put_debug_info(w: &mut Writer, d: &DebugInfo) {
+    w.len(d.statements.len());
+    let (mut pc, mut offset) = (0u32, 0u32);
+    for s in &d.statements {
+        w.var(s.pc.wrapping_sub(pc));
+        let delta = s.offset.wrapping_sub(offset) as i32;
+        w.var(((delta << 1) ^ (delta >> 31)) as u32);
+        (pc, offset) = (s.pc, s.offset);
+    }
+    w.len(d.locals.len());
+    for l in &d.locals {
+        let name = w.str_index(&l.name);
+        w.var(name);
+        w.var(l.reg as u32);
+        w.var(l.start);
+        w.var(l.end.saturating_sub(l.start));
+    }
+}
+
+/// Kept out of line so `get_block`'s instruction loop compiles as before.
+#[inline(never)]
+fn get_debug_info(r: &mut Reader) -> Result<DebugInfo> {
+    let n = r.count(2)?;
+    let mut statements = Vec::with_capacity(n);
+    let (mut pc, mut offset) = (0u32, 0u32);
+    for _ in 0..n {
+        pc = pc.wrapping_add(r.var()?);
+        let z = r.var()?;
+        let delta = ((z >> 1) as i32) ^ -((z & 1) as i32);
+        offset = offset.wrapping_add(delta as u32);
+        statements.push(StatementStart { pc, offset });
+    }
+    let n = r.count(4)?;
+    let mut locals = Vec::with_capacity(n);
+    for _ in 0..n {
+        let name = r.var()? as usize;
+        let name = r.str_at(name)?;
+        let reg = u16::try_from(r.var()?)
+            .map_err(|_| DecodeError::Invalid("local register exceeds 16 bits".into()))?;
+        let start = r.var()?;
+        let end = start
+            .checked_add(r.var()?)
+            .ok_or_else(|| DecodeError::Invalid("local range overflows".into()))?;
+        locals.push(LocalVar { name, reg, start, end });
+    }
+    Ok(DebugInfo { statements, locals })
+}
+
 fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
     if depth > MAX_NESTING {
         return invalid(format!("functions nested deeper than {MAX_NESTING}"));
@@ -879,26 +950,7 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
     let instrs = (0..n).map(|_| get_instr(r)).collect::<Result<Vec<_>>>()?;
     let n = r.count(4)?;
     let offsets = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>>>()?;
-    let n = r.count(8)?;
-    let statements = (0..n)
-        .map(|_| {
-            Ok(StatementStart {
-                pc: r.u32()?,
-                offset: r.u32()?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let n = r.count(11)?;
-    let locals = (0..n)
-        .map(|_| {
-            Ok(LocalVar {
-                name: r.str()?,
-                reg: r.u16()?,
-                start: r.u32()?,
-                end: r.u32()?,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let debug = get_debug_info(r)?;
     let n = r.count(1)?;
     let constants = (0..n).map(|_| get_constant(r)).collect::<Result<_>>()?;
     let names = r.strs()?;
@@ -993,13 +1045,31 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         span,
         module,
         ic: (0..ic_len).map(|_| Cell::new(IcEntry::EMPTY)).collect(),
-        debug: DebugInfo { statements, locals },
+        debug,
     };
     verify_block(&code)?;
     Ok(Rc::new(code))
 }
 
 /// Block-level invariants the interpreter relies on.
+#[inline(never)]
+fn verify_debug_info(code: &CodeBlock, len: usize, text_len: usize) -> Result<()> {
+    let d = &code.debug;
+    if d.statements
+        .iter()
+        .any(|s| s.pc as usize >= len || s.offset as usize > text_len)
+        || d.statements.windows(2).any(|w| w[0].pc >= w[1].pc)
+    {
+        return invalid("statement starts out of order or outside the block");
+    }
+    if let Some(l) = d.locals.iter().find(|l| {
+        l.reg >= code.register_count || l.start > l.end || l.end as usize > len
+    }) {
+        return invalid(format!("local {:?} outside the block", l.name));
+    }
+    Ok(())
+}
+
 fn verify_block(code: &CodeBlock) -> Result<()> {
     let len = code.instrs.len();
     if len == 0 {
@@ -1031,20 +1101,7 @@ fn verify_block(code: &CodeBlock) -> Result<()> {
     if let Some(o) = code.offsets.iter().find(|o| **o as usize > text.len()) {
         return invalid(format!("source offset {o} outside the source text"));
     }
-    if code
-        .debug
-        .statements
-        .iter()
-        .any(|s| s.pc as usize >= len || s.offset as usize > text.len())
-        || code.debug.statements.windows(2).any(|w| w[0].pc >= w[1].pc)
-    {
-        return invalid("statement starts out of order or outside the block");
-    }
-    if let Some(l) = code.debug.locals.iter().find(|l| {
-        l.reg >= code.register_count || l.start > l.end || l.end as usize > len
-    }) {
-        return invalid(format!("local {:?} outside the block", l.name));
-    }
+    verify_debug_info(code, len, text.len())?;
     for h in &code.handlers {
         if h.start > h.end || h.end as usize > len || h.target as usize >= len {
             return invalid(format!("exception handler {h:?} leaves the block"));
