@@ -347,6 +347,18 @@ impl Vm {
         r
     }
 
+    /// A collection safe point on entry to a host call, before any argument
+    /// is turned into an unrooted VM value: only the host's handles are
+    /// live. The called function runs as a native frame, where collection
+    /// is deferred, so an embedder that drives code through host calls
+    /// (timers, event handlers) would otherwise never collect.
+    fn host_call_safe_point(&mut self) {
+        if self.native_depth == 0 && self.frames.is_empty() && (self.gc_requested || self.heap.wants_gc()) {
+            self.handles.reclaim();
+            self.collect();
+        }
+    }
+
     fn syntax_error_value(&mut self, realm: RealmId, message: &str) -> Error {
         let saved = self.current_realm;
         self.current_realm = realm;
@@ -684,6 +696,7 @@ impl Engine for Vm {
         this: &api::Value,
         args: &[api::Value],
     ) -> api::Result<api::Value> {
+        self.host_call_safe_point();
         let f = self.from_api_value(function)?;
         let t = self.from_api_value(this)?;
         let mut vals = Vec::with_capacity(args.len());
@@ -705,6 +718,7 @@ impl Engine for Vm {
         constructor: &api::Value,
         args: &[api::Value],
     ) -> api::Result<api::Value> {
+        self.host_call_safe_point();
         let c = self.from_api_value(constructor)?;
         let mut vals = Vec::with_capacity(args.len());
         for a in args {

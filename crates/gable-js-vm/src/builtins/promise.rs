@@ -483,7 +483,16 @@ impl Vm {
     /// Drain the job queue. Returns the number of jobs run.
     pub fn drain_jobs(&mut self) -> JsResult<usize> {
         let mut n = 0;
-        while let Some(job) = self.jobs.pop_front() {
+        loop {
+            // Between jobs is a safe point when the host drains the queue
+            // (no frames, no native caller holding values in Rust locals).
+            // Each job runs its callback as a native frame, where the
+            // collector is deferred, so without this an embedder that runs
+            // code only from jobs and host calls never collects.
+            if self.native_depth == 0 && self.frames.is_empty() {
+                self.maybe_collect();
+            }
+            let Some(job) = self.jobs.pop_front() else { break };
             n += 1;
             let r = self.run_job(job);
             if let Err(f) = r {

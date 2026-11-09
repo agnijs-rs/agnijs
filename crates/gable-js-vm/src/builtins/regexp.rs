@@ -156,14 +156,25 @@ pub fn is_regexp(vm: &mut Vm, v: Value) -> JsResult<bool> {
 
 /// The code units of `s`, shared across the repeated execs a global
 /// operation performs on one string.
+///
+/// Short strings are copied each time and never cached, so matching a word
+/// between two execs on a long line does not evict the line (that made a
+/// tokenizer quadratic). Long strings live in a small most-recent-first
+/// cache.
 fn input_units(vm: &mut Vm, s: StrId) -> Rc<Vec<u16>> {
-    if let Some((id, u)) = &vm.regex_input_cache {
-        if *id == s {
-            return u.clone();
-        }
+    const SHORT: usize = 256;
+    const ENTRIES: usize = 4;
+    if let Some(i) = vm.regex_input_cache.iter().position(|(id, _)| *id == s) {
+        let hit = vm.regex_input_cache.remove(i);
+        let u = hit.1.clone();
+        vm.regex_input_cache.insert(0, hit);
+        return u;
     }
     let u = Rc::new(vm.heap.units(s).to_vec());
-    vm.regex_input_cache = Some((s, u.clone()));
+    if u.len() >= SHORT {
+        vm.regex_input_cache.truncate(ENTRIES - 1);
+        vm.regex_input_cache.insert(0, (s, u.clone()));
+    }
     u
 }
 

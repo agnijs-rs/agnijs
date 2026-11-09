@@ -83,6 +83,12 @@ impl Flags {
 /// A compiled pattern.
 pub struct Regex {
     inner: regress::Regex,
+    /// `(?:P)()|` for sticky attempts, compiled on first use (see
+    /// [`Regex::exec_sticky`]).
+    anchored: std::cell::OnceCell<regress::Regex>,
+    /// The numbered-groups pattern and backend flags `inner` came from.
+    source: Vec<u32>,
+    backend_flags: regress::Flags,
     unicode_mode: bool,
     /// Capture-group names by group number (1-based groups at index
     /// `n - 1`); `None` for unnamed groups.
@@ -124,6 +130,9 @@ impl Regex {
             .map_err(|e| format!("Invalid regular expression: {}", e.text))?;
         Ok(Regex {
             inner,
+            anchored: std::cell::OnceCell::new(),
+            source: stripped,
+            backend_flags: rflags,
             unicode_mode,
             names,
         })
@@ -146,17 +155,26 @@ impl Regex {
 
     /// Find the leftmost match starting at or after `start`.
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
+        let m = self.find(&self.inner, input, start)?;
+        Some(self.captures(&m, m.captures.len()))
+    }
+
+    fn find(&self, re: &regress::Regex, input: &[u16], start: usize) -> Option<regress::Match> {
         if start > input.len() {
             return None;
         }
-        let m = if self.unicode_mode {
-            self.inner.find_from_utf16(input, start).next()
+        if self.unicode_mode {
+            re.find_from_utf16(input, start).next()
         } else {
-            self.inner.find_from_ucs2(input, start).next()
-        }?;
-        let mut ranges = Vec::with_capacity(m.captures.len() + 1);
+            re.find_from_ucs2(input, start).next()
+        }
+    }
+
+    /// The match's whole range and its first `groups` captures.
+    fn captures(&self, m: &regress::Match, groups: usize) -> Captures {
+        let mut ranges = Vec::with_capacity(groups + 1);
         ranges.push(Some((m.range.start, m.range.end)));
-        for c in &m.captures {
+        for c in &m.captures[..groups] {
             ranges.push(c.as_ref().map(|r| (r.start, r.end)));
         }
         // Groups the parser saw but the matcher did not report (it never
@@ -164,17 +182,31 @@ impl Regex {
         while ranges.len() < self.names.len() + 1 {
             ranges.push(None);
         }
-        Some(Captures { ranges })
+        Captures { ranges }
     }
 
     /// Find a match that starts exactly at `start` (sticky semantics).
+    ///
+    /// The backend only searches leftmost, so a plain search would walk the
+    /// rest of the input before failing: quadratic for a tokenizer probing
+    /// every position. The search runs `(?:P)()|` instead: at `start`
+    /// either `P` matches, and the trailing empty group (numbered after all
+    /// of `P`'s groups) participates, or the empty alternative matches
+    /// right there. Either way the search stops at `start`.
     pub fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
-        let c = self.exec(input, start)?;
-        if c.ranges[0].map(|r| r.0) == Some(start) {
-            Some(c)
-        } else {
-            None
+        let anchored = self.anchored.get_or_init(|| {
+            let mut p: Vec<u32> = "(?:".chars().map(|c| c as u32).collect();
+            p.extend_from_slice(&self.source);
+            p.extend(")()|".chars().map(|c| c as u32));
+            regress::Regex::from_unicode(p.into_iter(), self.backend_flags)
+                .expect("a pattern that compiled still compiles inside a group")
+        });
+        let m = self.find(anchored, input, start)?;
+        let groups = m.captures.len() - 1;
+        if m.range.start != start || m.captures[groups].is_none() {
+            return None;
         }
+        Some(self.captures(&m, groups))
     }
 }
 
@@ -406,6 +438,40 @@ mod tests {
         assert_eq!(c.ranges, vec![Some((1, 2)), Some((1, 2)), None]);
         assert!(re.exec_sticky(&u("xa"), 0).is_none());
         assert!(re.exec_sticky(&u("xa"), 1).is_some());
+    }
+
+    #[test]
+    fn sticky_matches_keep_groups_alternatives_and_empty_matches() {
+        let re = Regex::compile(&u("(a)|b(c)?"), &Flags::default()).unwrap();
+        assert_eq!(re.exec_sticky(&u("xbc"), 1).unwrap().ranges, vec![Some((1, 3)), None, Some((2, 3))]);
+        assert_eq!(re.exec_sticky(&u("xa"), 1).unwrap().ranges, vec![Some((1, 2)), Some((1, 2)), None]);
+        assert!(re.exec_sticky(&u("xa"), 0).is_none());
+        // A pattern that matches the empty string matches at `start`.
+        let re = Regex::compile(&u("a*"), &Flags::default()).unwrap();
+        assert_eq!(re.exec_sticky(&u("baa"), 0).unwrap().ranges, vec![Some((0, 0))]);
+        assert_eq!(re.exec_sticky(&u("baa"), 1).unwrap().ranges, vec![Some((1, 3))]);
+        // Backreferences, lookbehind and named groups see the original numbering.
+        let re = Regex::compile(&u("(?<=x)(?<q>['\"]).*?\\k<q>"), &Flags::default()).unwrap();
+        assert_eq!(re.exec_sticky(&u("x'a'"), 1).unwrap().ranges, vec![Some((1, 4)), Some((1, 2))]);
+        assert!(re.exec_sticky(&u("y'a'"), 1).is_none());
+        let re = Regex::compile(&u("."), &Flags { unicode: true, ..Flags::default() }).unwrap();
+        assert_eq!(re.exec_sticky(&u("a\u{1F600}"), 1).unwrap().ranges, vec![Some((1, 3))]);
+        assert!(re.exec_sticky(&u("a"), 1).is_none());
+    }
+
+    #[test]
+    fn a_failed_sticky_match_does_not_search_the_rest_of_the_input() {
+        // A tokenizer probes `/[a-z]+/y` at every position of a long line;
+        // each failed probe must cost O(1), not O(rest of the input). The
+        // old leftmost-search-then-filter took minutes here, the anchored
+        // attempt takes milliseconds even in a debug build.
+        let input: Vec<u16> = "'".repeat(200_000).encode_utf16().collect();
+        let re = Regex::compile(&u("[a-z]+"), &Flags { sticky: true, ..Flags::default() }).unwrap();
+        let t = std::time::Instant::now();
+        for i in 0..2_000 {
+            assert!(re.exec_sticky(&input, i).is_none());
+        }
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "took {:?}", t.elapsed());
     }
 
     #[test]

@@ -333,10 +333,11 @@ pub struct Vm {
     pub host_classes: Vec<gable_engine_api::HostClassDef>,
     /// Compiled regular expressions by (pattern, flags); see builtins::regexp.
     pub regex_cache: HashMap<(Vec<u16>, String), Rc<gable_js_regex::Regex>>,
-    /// The UTF-16 form of the string the last RegExp exec ran against, so a
-    /// global match/replace/split over a long string stays linear. String
-    /// ids are reused only after a collection, which clears this.
-    pub regex_input_cache: Option<(StrId, Rc<Vec<u16>>)>,
+    /// The UTF-16 form of the last few long strings RegExp exec ran against,
+    /// most recent first, so a global match/replace/split or a sticky
+    /// tokenizer over a long string stays linear. String ids are reused
+    /// only after a collection, which clears this.
+    pub regex_input_cache: Vec<(StrId, Rc<Vec<u16>>)>,
     /// Host objects whose wrapper died, awaiting their class finaliser.
     pub pending_finalizers: Vec<(
         gable_engine_api::HostClassId,
@@ -374,7 +375,7 @@ impl Vm {
             symbol_registry: HashMap::new(),
             jobs: VecDeque::new(),
             regex_cache: HashMap::new(),
-            regex_input_cache: None,
+            regex_input_cache: Vec::new(),
             engine_id,
             scripts: HashMap::new(),
             modules: HashMap::new(),

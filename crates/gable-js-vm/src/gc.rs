@@ -297,7 +297,7 @@ impl Vm {
     pub fn collect(&mut self) {
         self.gc_requested = false;
         self.gc_count += 1;
-        self.regex_input_cache = None;
+        self.regex_input_cache.clear();
         let mut work: Vec<Work> = Vec::with_capacity(1024);
         let mut buf = Tracer::default();
 
