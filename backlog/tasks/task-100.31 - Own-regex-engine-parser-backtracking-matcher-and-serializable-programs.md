@@ -1,9 +1,11 @@
 ---
 id: TASK-100.31
 title: 'Own regex engine: parser, backtracking matcher and serializable programs'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-09T05:17:00Z'
+updated_date: '2026-11-09T19:43:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -24,3 +26,13 @@ Replace regress with a regex engine we own, behind the existing seam (ADR 0013).
 - [ ] #3 Compiled regex programs serialize and load through the bytecode container with a format version bump under ADR 0010
 - [ ] #4 regress is removed or becomes an optional test-only reference, and gable-js-bench shows no regression on the regex workloads
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Unicode 17 tables generated from the UCD by a Node tool (tools/gen-regex-unicode.mjs) into agnijs-js-regex: properties, scripts, properties of strings, simple case folding and the non-unicode Canonicalize; own CharSet with case closure; syntax.rs checks property names against them (no regress).
+2. Own parser: validated pattern -> IR (named groups and \k resolved, modifiers, Annex B, u/v classes with strings). Push.
+3. Own backtracking matcher on that IR: explicit backtrack stack, counted loops with registers, ES empty-iteration check, lookaround (atomic), lookbehind backward, backrefs (icase), fast paths (single-char greedy loops, literal prefix scan, first-char skip). Linear matcher compiles from the same IR with CharSet lookups instead of regress predicates. Auto routing: exponential patterns start linear; others backtrack under a step budget and continue on the linear matcher from the current start when it runs out (cost model keeps the non-overlapping-set refinement). Differential fuzzing vs regress (dev-dependency) and linear vs backtracking, bounded. test262 RegExp suites in all three modes. Push.
+4. Program serialization: Regex programs encode/decode with verification; the bytecode serializer embeds a compiled program per regex literal; agnijs-bc-7 with an ADR 0010 addendum; VM seeds its regex cache on load. Push.
+5. Retire regress: test-only reference (dev-dependency), THIRD-PARTY-NOTICES, ADR 0013 addendum, bench comparison (alternating binaries), full test262 set, gable suites via the path-patched harness, targeted gc-stress subset. Push.
+<!-- SECTION:PLAN:END -->

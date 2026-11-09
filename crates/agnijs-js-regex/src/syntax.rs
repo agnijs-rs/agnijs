@@ -6,9 +6,8 @@
 //! early errors (group counts, duplicate group names, out-of-order class
 //! ranges, quantifier bounds, invalid escapes, `v`-mode class set rules).
 //!
-//! Unicode property names and values are checked by compiling a one-escape
-//! pattern with `regress`, which carries the Unicode tables; everything
-//! else is parsed here so the grammar is under our control.
+//! Unicode property names and values are checked against the engine's own
+//! Unicode tables (`unicode.rs`).
 
 use std::collections::HashSet;
 
@@ -695,16 +694,7 @@ impl P {
                 _ => return self.err("invalid property name"),
             }
         }
-        const STRING_PROPS: &[&str] = &[
-            "Basic_Emoji",
-            "Emoji_Keycap_Sequence",
-            "RGI_Emoji_Modifier_Sequence",
-            "RGI_Emoji_Flag_Sequence",
-            "RGI_Emoji_Tag_Sequence",
-            "RGI_Emoji_ZWJ_Sequence",
-            "RGI_Emoji",
-        ];
-        if STRING_PROPS.contains(&body.as_str()) {
+        if crate::unicode::is_string_property(&body) {
             if !self.v {
                 return self.err("invalid property name");
             }
@@ -717,7 +707,11 @@ impl P {
         {
             return self.err("invalid property name");
         }
-        if regress::Regex::with_flags(&format!("\\p{{{body}}}"), "u").is_err() {
+        let known = match body.split_once('=') {
+            Some((name, value)) => crate::unicode::property(name, Some(value)).is_some(),
+            None => crate::unicode::property(&body, None).is_some(),
+        };
+        if !known {
             return self.err(format!("invalid property name '{body}'"));
         }
         Ok(false)

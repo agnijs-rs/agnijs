@@ -11,6 +11,18 @@
 
 pub mod syntax;
 
+// TASK-100.31: the engine's own regex parser, character sets and Unicode
+// tables. The matchers move onto them in the next commits.
+#[allow(dead_code)]
+mod charset;
+#[allow(dead_code)]
+mod parse;
+#[allow(dead_code)]
+mod unicode;
+#[rustfmt::skip]
+#[allow(dead_code)]
+mod unicode_tables;
+
 #[cfg(feature = "linear")]
 mod linear;
 
