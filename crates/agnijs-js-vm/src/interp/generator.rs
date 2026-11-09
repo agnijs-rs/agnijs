@@ -179,7 +179,7 @@ impl Vm {
                 g.resume_reg,
             )
         };
-        self.in_native(|vm| {
+        self.run_entry(true, |vm| {
             let mut frame = saved.frame;
             frame.exit = true;
             frame.generator = Some(gen);
@@ -196,13 +196,11 @@ impl Vm {
                 None => {
                     // After an `Await`: a rejection is thrown at the await.
                     if mode == ResumeMode::Throw {
-                        if let Err(f) = vm.handle_fault(Fault::Throw(value)) {
-                            return Err(f);
-                        }
+                        vm.handle_fault(Fault::Throw(value))?;
                     }
                 }
             }
-            vm.run()
+            Ok(())
         })
     }
 
@@ -519,7 +517,7 @@ pub fn call_async_function(
     vm: &mut Vm,
     fo: ObjId,
     this: Value,
-    args: Vec<Value>,
+    args: &[Value],
 ) -> JsResult<Value> {
     let cap = promise::new_promise_capability_intrinsic(vm);
     let data = GeneratorData {
@@ -535,11 +533,18 @@ pub fn call_async_function(
         Some(proto),
         Class::Generator(Box::new(data)),
     ));
-    let outcome = vm.in_native(|vm| {
-        vm.push_function_frame(fo, this, args, Value::Undefined, ConstructKind::None, true)?;
+    let outcome = vm.run_entry(true, |vm| {
+        vm.push_function_frame(
+            fo,
+            this,
+            crate::interp::Args::Slice(args),
+            Value::Undefined,
+            ConstructKind::None,
+            true,
+        )?;
         let fi = vm.frames.len() - 1;
         vm.frames[fi].generator = Some(go);
-        vm.run()
+        Ok(())
     });
     vm.async_function_settle(go, outcome)?;
     Ok(Value::Object(cap.promise))

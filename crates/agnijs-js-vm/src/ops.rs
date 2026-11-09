@@ -9,6 +9,13 @@ use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, PropSlot, Property, PropertyDescriptor, Value};
 use crate::vm::{JsResult, Vm};
 
+/// The result of [`Vm::ordinary_get`].
+pub(crate) enum OrdinaryGet {
+    Value(Value),
+    Getter(ObjId),
+    Generic,
+}
+
 /// Which exotic behaviour an object has, decided once per operation.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Exotic {
@@ -573,6 +580,36 @@ impl Vm {
         }
     }
 
+    /// [[Get]] of `key` on `o` (the receiver) when every object on the way
+    /// to the holder is ordinary, so the lookup observes nothing
+    /// (TASK-100.19): the data value, or the bytecode getter to push as a
+    /// frame in the current run loop. `Generic` sends the access down
+    /// `get_prop`, which repeats the lookup with all of its effects.
+    pub(crate) fn ordinary_get(&self, o: ObjId, key: PropKey) -> OrdinaryGet {
+        let mut cur = o;
+        loop {
+            if self.exotic_of(cur) != Exotic::None {
+                return OrdinaryGet::Generic;
+            }
+            if let Some(p) = self.heap.get_own_property(cur, key) {
+                return match p.slot {
+                    PropSlot::Data(v) => OrdinaryGet::Value(v),
+                    PropSlot::Accessor { get, .. } if get.is_undefined() => {
+                        OrdinaryGet::Value(Value::Undefined)
+                    }
+                    PropSlot::Accessor { get, .. } => match self.inlinable_callee(get) {
+                        Some(g) => OrdinaryGet::Getter(g),
+                        None => OrdinaryGet::Generic,
+                    },
+                };
+            }
+            match self.heap.obj(cur).proto {
+                Some(p) => cur = p,
+                None => return OrdinaryGet::Value(Value::Undefined),
+            }
+        }
+    }
+
     /// Get(O, P) with O an object value.
     pub fn get(&mut self, o: ObjId, key: PropKey) -> JsResult<Value> {
         self.get_prop(o, key, Value::Object(o))
@@ -642,25 +679,44 @@ impl Vm {
         v: Value,
         receiver: Value,
     ) -> JsResult<bool> {
+        match self.set_prop_with(o, key, v, receiver, false)? {
+            Ok(ok) => Ok(ok),
+            Err(_) => unreachable!("setter returned with inline_setter off"),
+        }
+    }
+
+    /// [[Set]], except that with `inline_setter` a bytecode setter that
+    /// can be a frame push in the current run loop is returned (`Err`)
+    /// instead of called (TASK-100.19). Everything before the call (the
+    /// lookup and its effects) has then happened.
+    #[inline]
+    pub(crate) fn set_prop_with(
+        &mut self,
+        o: ObjId,
+        key: PropKey,
+        v: Value,
+        receiver: Value,
+        inline_setter: bool,
+    ) -> JsResult<Result<bool, ObjId>> {
         // Fast path: own writable data property on an ordinary receiver.
         if receiver == Value::Object(o) && self.exotic_of(o) == Exotic::None {
             if let Some(p) = self.heap.get_own_property(o, key) {
                 if let PropSlot::Data(_) = p.slot {
                     if p.attrs.writable() {
                         self.heap.set_own_value(o, key, v);
-                        return Ok(true);
+                        return Ok(Ok(true));
                     }
-                    return Ok(false);
+                    return Ok(Ok(false));
                 }
             }
         }
         let mut cur = o;
         let own_desc: Property = loop {
             match self.exotic_of(cur) {
-                Exotic::Proxy => return proxy::proxy_set(self, cur, key, v, receiver),
+                Exotic::Proxy => return proxy::proxy_set(self, cur, key, v, receiver).map(Ok),
                 Exotic::TypedArray => {
                     if let Some(r) = typedarray::ta_set(self, cur, key, v, receiver)? {
-                        return Ok(r);
+                        return Ok(Ok(r));
                     }
                     // A valid element index seen through another receiver is
                     // an own writable data property.
@@ -669,7 +725,7 @@ impl Vm {
                     }
                 }
                 // A module namespace's [[Set]] is "return false".
-                Exotic::Namespace => return Ok(false),
+                Exotic::Namespace => return Ok(Ok(false)),
                 Exotic::None => {
                     if let Some(p) = self.heap.get_own_property(cur, key) {
                         break p;
@@ -689,30 +745,35 @@ impl Vm {
         match own_desc.slot {
             PropSlot::Data(_) => {
                 if !own_desc.attrs.writable() {
-                    return Ok(false);
+                    return Ok(Ok(false));
                 }
                 let Value::Object(r) = receiver else {
-                    return Ok(false);
+                    return Ok(Ok(false));
                 };
                 if let Some(existing) = self.own_property(r, key)? {
                     if existing.is_accessor() || !existing.attrs.writable() {
-                        return Ok(false);
+                        return Ok(Ok(false));
                     }
                     let desc = PropertyDescriptor {
                         value: Some(v),
                         ..Default::default()
                     };
-                    self.define_own_property(r, key, desc)
+                    self.define_own_property(r, key, desc).map(Ok)
                 } else {
-                    self.create_data_property(r, key, v)
+                    self.create_data_property(r, key, v).map(Ok)
                 }
             }
             PropSlot::Accessor { set, .. } => {
                 if set.is_undefined() {
-                    return Ok(false);
+                    return Ok(Ok(false));
+                }
+                if inline_setter {
+                    if let Some(s) = self.inlinable_callee(set) {
+                        return Ok(Err(s));
+                    }
                 }
                 self.call_value(set, receiver, &[v])?;
-                Ok(true)
+                Ok(Ok(true))
             }
         }
     }
@@ -752,12 +813,15 @@ impl Vm {
             }
         };
         if !ok && strict {
-            let ks = self.display_key(key);
-            return Err(self.throw_type(&format!(
-                "Cannot assign to read only property '{ks}' of object"
-            )));
+            return Err(self.throw_read_only(key));
         }
         Ok(())
+    }
+
+    /// The TypeError for a failed strict-mode assignment to `key`.
+    pub(crate) fn throw_read_only(&mut self, key: PropKey) -> crate::vm::Fault {
+        let ks = self.display_key(key);
+        self.throw_type(&format!("Cannot assign to read only property '{ks}' of object"))
     }
 
     // ---- [[Delete]] ---------------------------------------------------------------------

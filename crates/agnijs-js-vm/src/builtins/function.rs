@@ -1,6 +1,6 @@
 //! Function constructor and Function.prototype.
 
-use crate::object::{CallArgs, Class};
+use crate::object::{CallArgs, Class, NativeTag};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
 use crate::vm::{JsResult, Vm};
@@ -28,9 +28,16 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     );
     let _ = ctor;
 
-    vm.method(proto, "apply", 2, proto_apply);
+    let apply = vm.method(proto, "apply", 2, proto_apply);
     vm.method(proto, "bind", 1, proto_bind);
-    vm.method(proto, "call", 1, proto_call);
+    let call = vm.method(proto, "call", 1, proto_call);
+    // The interpreter pushes a bytecode target's frame itself for these two
+    // (TASK-100.19); the natives below remain the generic path.
+    for (f, tag) in [(apply, NativeTag::FunctionApply), (call, NativeTag::FunctionCall)] {
+        if let Some(n) = vm.heap.obj_mut(f).native_mut() {
+            n.tag = tag;
+        }
+    }
     vm.method(proto, "toString", 0, proto_to_string);
     let hi = vm.well_known.has_instance;
     let f = vm.new_native("[Symbol.hasInstance]", 1, proto_has_instance);

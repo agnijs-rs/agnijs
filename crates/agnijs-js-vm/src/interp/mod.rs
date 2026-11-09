@@ -57,6 +57,9 @@ pub struct Frame {
     pub realm: RealmId,
     /// Return to the Rust caller of `run` when this frame finishes.
     pub exit: bool,
+    /// On return, leave the caller's accumulator as it is: a setter called
+    /// by `SetNamed`, whose result is the assigned value, not the setter's.
+    pub discard_result: bool,
     pub construct: ConstructKind,
     pub kind: FrameKind,
     /// The generator or async-function state object driving this frame.
@@ -80,6 +83,41 @@ pub enum RunOutcome {
     InitialYield,
 }
 
+/// The arguments of a call: a run of the caller's registers (a call from
+/// bytecode) or a slice from Rust. The callee's frame copies them into its
+/// parameter registers (ADR 0019 J8).
+#[derive(Clone, Copy)]
+pub(crate) enum Args<'a> {
+    Regs { start: usize, len: usize },
+    Slice(&'a [Value]),
+}
+
+impl Args<'_> {
+    #[inline]
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            Args::Regs { len, .. } => *len,
+            Args::Slice(s) => s.len(),
+        }
+    }
+
+    /// The arguments after the first `n`.
+    #[inline]
+    pub(crate) fn skip(self, n: usize) -> Self {
+        match self {
+            Args::Regs { start, len } => {
+                let n = n.min(len);
+                Args::Regs { start: start + n, len: len - n }
+            }
+            Args::Slice(s) => Args::Slice(&s[n.min(s.len())..]),
+        }
+    }
+}
+
+/// Register arguments up to this many reach a native through a buffer on
+/// the Rust stack instead of a `Vec`.
+pub(crate) const INLINE_ARGS: usize = 8;
+
 /// What the dispatch loop should do after an instruction.
 pub(crate) enum Flow {
     Next,
@@ -89,6 +127,28 @@ pub(crate) enum Flow {
 }
 
 impl Vm {
+    /// The one entry into JavaScript from Rust (ADR 0019 J8): host calls,
+    /// natives calling back, jobs, generator and async resumption, eval and
+    /// scripts all come through here, which is where a later tier will be
+    /// chosen. `push` pushes the exit frame (and may route a fault into it);
+    /// the frame then runs to completion. With `native`, the caller is Rust
+    /// code holding unrooted values, so the collector is deferred.
+    pub(crate) fn run_entry(
+        &mut self,
+        native: bool,
+        push: impl FnOnce(&mut Vm) -> JsResult<()>,
+    ) -> JsResult<RunOutcome> {
+        if native {
+            self.in_native(|vm| {
+                push(vm)?;
+                vm.run()
+            })
+        } else {
+            push(self)?;
+            self.run()
+        }
+    }
+
     /// Run until the top frame (an exit frame) completes.
     ///
     /// The running frame's `pc`, accumulator and register base live in
@@ -107,7 +167,7 @@ impl Vm {
     /// The arms below are the hot cases that allocate nothing, fault
     /// nothing and observe no frame; each falls back to `step` for the
     /// generic semantics (J3) of the same instruction.
-    pub fn run(&mut self) -> JsResult<RunOutcome> {
+    fn run(&mut self) -> JsResult<RunOutcome> {
         debug_assert!(self.frames.last().map(|f| f.exit).unwrap_or(false));
         self.refresh_attention();
         // Function entry: a host entry, a nested run loop or a resumed
@@ -495,8 +555,10 @@ impl Vm {
                     writeback!();
                     let f = reg!(callee);
                     let t = reg!(this);
-                    let start = base + args as usize;
-                    let a = self.regs[start..start + argc as usize].to_vec();
+                    let a = Args::Regs {
+                        start: base + args as usize,
+                        len: argc as usize,
+                    };
                     flow!(self.call_from_frame(f, t, a));
                 }
                 Instr::Return => {
@@ -602,6 +664,7 @@ impl Vm {
     }
 
     /// Push a frame for `code` with the register file extended.
+    #[inline]
     pub(crate) fn push_frame(&mut self, mut frame: Frame) -> JsResult<()> {
         if self.frames.len() >= crate::vm::MAX_FRAMES {
             return Err(self.throw_range("Maximum call stack size exceeded"));
@@ -649,13 +712,13 @@ impl Vm {
             argc: 0,
             realm,
             exit: true,
+            discard_result: false,
             construct: ConstructKind::None,
             kind: FrameKind::Script,
             generator: None,
             module: None,
         };
-        self.push_frame(frame)?;
-        match self.run()? {
+        match self.run_entry(false, |vm| vm.push_frame(frame))? {
             RunOutcome::Return(v) => Ok(v),
             other => panic!("script run ended with {other:?}"),
         }

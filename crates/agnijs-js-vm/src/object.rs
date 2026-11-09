@@ -173,8 +173,22 @@ pub enum NativeKind {
     Host(Rc<HostFunction>),
 }
 
+/// Natives the interpreter recognises at a call site and replaces by a
+/// frame push in the current run loop (TASK-100.19). The native itself
+/// stays the generic path, for every case the interpreter does not inline.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum NativeTag {
+    #[default]
+    None,
+    /// `Function.prototype.call`.
+    FunctionCall,
+    /// `Function.prototype.apply`.
+    FunctionApply,
+}
+
 pub struct NativeData {
     pub func: NativeKind,
+    pub tag: NativeTag,
     pub realm: RealmId,
     /// Has [[Construct]].
     pub constructor: bool,

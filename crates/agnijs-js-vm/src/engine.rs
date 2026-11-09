@@ -771,6 +771,7 @@ impl Engine for Vm {
             let proto = vm.intrinsic_in(realm, Intrinsic::FunctionPrototype);
             let data = NativeData {
                 func: NativeKind::Host(f),
+                tag: crate::object::NativeTag::None,
                 realm,
                 constructor: false,
                 slots: Vec::new(),

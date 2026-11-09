@@ -1325,18 +1325,16 @@ impl Vm {
             argc: 0,
             realm,
             exit: true,
+            discard_result: false,
             construct: ConstructKind::None,
             kind: FrameKind::Eval,
             generator: None,
             module,
         };
-        self.in_native(|vm| {
-            vm.push_frame(frame)?;
-            match vm.run()? {
-                RunOutcome::Return(v) => Ok(v),
-                other => panic!("eval run ended with {other:?}"),
-            }
-        })
+        match self.run_entry(true, |vm| vm.push_frame(frame))? {
+            RunOutcome::Return(v) => Ok(v),
+            other => panic!("eval run ended with {other:?}"),
+        }
     }
 
     /// The parser context of a direct eval at frame `fi`.

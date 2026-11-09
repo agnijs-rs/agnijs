@@ -169,6 +169,70 @@ fn stepping_over_into_and_out_stops_at_statement_starts() {
     assert_eq!(run(&mut *d, realm, "check.js", "out"), Value::Number(10.0));
 }
 
+const STEPS_THROUGH_CALL: &str = "function inner(x) {
+  const y = x * 2;
+  return y + 1;
+}
+var o = { get g() {
+  return 7;
+} };
+function outer() {
+  debugger;
+  const a = inner.call(null, 1);
+  const b = inner.apply(null, [a]);
+  const c = o.g;
+  return a + b + c;
+}
+globalThis.out = outer();
+";
+
+/// Functions reached through `Function.prototype.call` and `apply`, and
+/// getters, run in the caller's run loop (TASK-100.19): stepping into and
+/// out of them stops where it does for a direct call.
+#[test]
+fn stepping_into_call_apply_and_a_getter_stops_in_the_target() {
+    let (mut d, client, realm) = debuggee();
+    client.on_pause(|_d, p| {
+        assert!(matches!(p.reason, PauseReason::DebuggerStatement));
+        ResumeAction::StepOver
+    });
+    client.on_pause(|_d, _p| ResumeAction::StepInto);
+    client.on_pause(|_d, p| {
+        assert_eq!(p.frames.len(), 3, "inner, outer and the script");
+        assert_eq!(var(&p.frames[0].scopes[0], "x"), Some(Value::Number(1.0)));
+        ResumeAction::StepOut
+    });
+    client.on_pause(|_d, _p| ResumeAction::StepInto);
+    client.on_pause(|_d, p| {
+        assert_eq!(p.frames.len(), 3, "inner, outer and the script");
+        assert_eq!(var(&p.frames[0].scopes[0], "x"), Some(Value::Number(3.0)));
+        ResumeAction::StepOver
+    });
+    client.on_pause(|_d, _p| ResumeAction::StepOver);
+    client.on_pause(|_d, _p| ResumeAction::StepInto);
+    client.on_pause(|_d, p| {
+        assert_eq!(p.frames.len(), 3, "the getter, outer and the script");
+        ResumeAction::StepOut
+    });
+    client.on_pause(|_d, _p| ResumeAction::Continue);
+    run(&mut *d, realm, "steps.js", STEPS_THROUGH_CALL);
+    assert_eq!(
+        client.pauses(),
+        vec![
+            ("outer".to_string(), 8, 2),
+            ("outer".to_string(), 9, 2),
+            ("inner".to_string(), 1, 2),
+            ("outer".to_string(), 10, 2),
+            ("inner".to_string(), 1, 2),
+            ("inner".to_string(), 2, 2),
+            ("outer".to_string(), 11, 2),
+            (String::new(), 5, 2),
+            ("outer".to_string(), 12, 2),
+        ]
+    );
+    assert_eq!(run(&mut *d, realm, "check.js", "out"), Value::Number(17.0));
+}
+
 /// Precompiled code carries its debug info in the container and decodes it
 /// when the debugger first needs it: breakpoints resolve, pauses report the
 /// statement's position, locals are named and stepping stops at statements.

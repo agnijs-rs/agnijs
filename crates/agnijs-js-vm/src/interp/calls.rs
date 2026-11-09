@@ -1,8 +1,10 @@
 //! Calling and constructing: frame setup for bytecode functions, dispatch
 //! to natives, bound functions and proxies, and function object creation.
 
-use super::{ConstructKind, Flow, Frame, FrameKind, RunOutcome};
-use crate::object::{BoundData, Class, ConstructorKind, FunctionData, ObjectData, ThisMode};
+use super::{Args, ConstructKind, Flow, Frame, FrameKind, RunOutcome, INLINE_ARGS};
+use crate::object::{
+    BoundData, Class, ConstructorKind, FunctionData, NativeTag, ObjectData, ThisMode,
+};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
@@ -82,15 +84,20 @@ impl Vm {
     // ---- calls from bytecode ----------------------------------------------------------
 
     /// `Call`: run a bytecode function in the same loop when possible.
+    ///
+    /// `Function.prototype.call` and `apply` with a bytecode target are
+    /// unwrapped here (ADR 0019 J8): the target's frame is pushed in the
+    /// current run loop, with no native frame and no nested `Vm::run`. Every
+    /// other case, including all the error cases, takes the native.
     pub(crate) fn call_from_frame(
         &mut self,
         f: Value,
         this: Value,
-        args: Vec<Value>,
+        args: Args,
     ) -> JsResult<Flow> {
         if let Value::Object(fo) = f {
-            if let Class::Function(fd) = &self.heap.obj(fo).class {
-                if fd.code.function_kind == FunctionKind::Normal {
+            match &self.heap.obj(fo).class {
+                Class::Function(fd) if fd.code.function_kind == FunctionKind::Normal => {
                     if fd.is_class_constructor {
                         let realm = fd.realm;
                         let name = self.function_name_for_error(fo);
@@ -110,18 +117,139 @@ impl Vm {
                     )?;
                     return Ok(Flow::Reload);
                 }
+                Class::Native(n) if n.tag != NativeTag::None => {
+                    let tag = n.tag;
+                    if self.call_through(tag, this, args)? {
+                        return Ok(Flow::Reload);
+                    }
+                }
+                _ => {}
             }
         }
-        let v = self.call_value(f, this, &args)?;
+        let v = self.with_arg_slice(args, |vm, a| vm.call_value(f, this, a))?;
         self.frames.last_mut().expect("call with no frame").acc = v;
         Ok(Flow::Next)
+    }
+
+    /// A function whose call can be a frame push in the current run loop: a
+    /// plain (not generator, not async) bytecode function that is not a
+    /// class constructor.
+    #[inline]
+    pub(crate) fn inlinable_callee(&self, f: Value) -> Option<ObjId> {
+        let Value::Object(fo) = f else { return None };
+        match &self.heap.obj(fo).class {
+            Class::Function(fd)
+                if fd.code.function_kind == FunctionKind::Normal && !fd.is_class_constructor =>
+            {
+                Some(fo)
+            }
+            _ => None,
+        }
+    }
+
+    /// `target.call(...)` or `target.apply(...)` (by `tag`) from bytecode:
+    /// push the target's frame and return `true`, or return `false` to let
+    /// the native run. Only the effects the native would have are performed
+    /// (CreateListFromArrayLike for `apply`), in the same order.
+    fn call_through(&mut self, tag: NativeTag, target: Value, args: Args) -> JsResult<bool> {
+        let Some(t) = self.inlinable_callee(target) else {
+            return Ok(false);
+        };
+        let this = self.arg_at(args, 0);
+        match tag {
+            NativeTag::None => Ok(false),
+            NativeTag::FunctionCall => {
+                let rest = args.skip(1);
+                self.push_function_frame(t, this, rest, Value::Undefined, ConstructKind::None, false)?;
+                Ok(true)
+            }
+            NativeTag::FunctionApply => {
+                let list = self.arg_at(args, 1);
+                if list.is_nullish() {
+                    self.push_function_frame(
+                        t,
+                        this,
+                        Args::Slice(&[]),
+                        Value::Undefined,
+                        ConstructKind::None,
+                        false,
+                    )?;
+                    return Ok(true);
+                }
+                let Value::Object(lo) = list else {
+                    // The native throws the TypeError.
+                    return Ok(false);
+                };
+                // A dense array without holes is copied as is (what
+                // CreateListFromArrayLike reads, with nothing observable);
+                // the scratch buffer saves the allocation.
+                let mut buf = std::mem::take(&mut self.arg_scratch);
+                buf.clear();
+                match self.heap.dense_values(lo) {
+                    Some(d) => buf.extend_from_slice(d),
+                    None => {
+                        let list = self.create_list_from_array_like(list);
+                        match list {
+                            Ok(l) => buf = l,
+                            Err(e) => {
+                                self.arg_scratch = buf;
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                let r = self.push_function_frame(
+                    t,
+                    this,
+                    Args::Slice(&buf),
+                    Value::Undefined,
+                    ConstructKind::None,
+                    false,
+                );
+                self.arg_scratch = buf;
+                r.map(|()| true)
+            }
+        }
+    }
+
+    /// Argument `i` of a call, or undefined.
+    #[inline]
+    pub(crate) fn arg_at(&self, args: Args, i: usize) -> Value {
+        match args {
+            Args::Regs { start, len } if i < len => self.regs[start + i],
+            Args::Slice(s) => s.get(i).copied().unwrap_or(Value::Undefined),
+            _ => Value::Undefined,
+        }
+    }
+
+    /// Run `k` with the arguments as a slice. Register arguments are copied
+    /// to a buffer on the Rust stack (the register file may grow under `k`),
+    /// so a native called from bytecode allocates nothing for them.
+    #[inline]
+    pub(crate) fn with_arg_slice<R>(
+        &mut self,
+        args: Args,
+        k: impl FnOnce(&mut Vm, &[Value]) -> R,
+    ) -> R {
+        match args {
+            Args::Slice(s) => k(self, s),
+            Args::Regs { start, len } if len <= INLINE_ARGS => {
+                let mut buf = [Value::Undefined; INLINE_ARGS];
+                buf[..len].copy_from_slice(&self.regs[start..start + len]);
+                k(self, &buf[..len])
+            }
+            Args::Regs { start, len } => {
+                let v = self.regs[start..start + len].to_vec();
+                k(self, &v)
+            }
+        }
     }
 
     /// `Construct`: like `call_from_frame`, for `new`.
     pub(crate) fn construct_from_frame(
         &mut self,
         f: Value,
-        args: Vec<Value>,
+        args: Args,
         new_target: Value,
     ) -> JsResult<Flow> {
         if !self.is_constructor(f) {
@@ -144,18 +272,21 @@ impl Vm {
             self.push_function_frame(fo, this, args, new_target, kind, false)?;
             return Ok(Flow::Reload);
         }
-        let v = self.construct_value(f, &args, new_target)?;
+        let v = self.with_arg_slice(args, |vm, a| vm.construct_value(f, a, new_target))?;
         self.frames.last_mut().expect("construct with no frame").acc = v;
         Ok(Flow::Next)
     }
 
-    /// Push a frame for a bytecode function. `this` is coerced here for
-    /// plain calls.
+    /// Push a frame for a bytecode function: the one frame-push path for
+    /// calls (ADR 0019 J8). `this` is coerced here for plain calls. The
+    /// arguments are copied straight into the new frame's parameter
+    /// registers; they are kept as a list only when the code needs it (an
+    /// arguments object or rest parameters), so a call allocates nothing.
     pub(crate) fn push_function_frame(
         &mut self,
         fo: ObjId,
         this: Value,
-        args: Vec<Value>,
+        args: Args,
         new_target: Value,
         construct: ConstructKind,
         exit: bool,
@@ -175,14 +306,30 @@ impl Vm {
                 } else if this.is_object() {
                     this
                 } else {
-                    Value::Object(self.to_object(this)?)
+                    // The wrapper comes from the callee's realm, which the
+                    // native that used to sit in between (call/apply) set.
+                    let caller = self.current_realm;
+                    self.current_realm = realm;
+                    let o = self.to_object(this);
+                    self.current_realm = caller;
+                    Value::Object(o?)
                 }
             }
             _ => this,
         };
         let argc = args.len();
+        let param_base = code.param_base as usize;
+        let param_regs = code.param_regs as usize;
+        let kept = if code.keeps_arguments {
+            match args {
+                Args::Regs { start, len } => self.regs[start..start + len].to_vec(),
+                Args::Slice(s) => s.to_vec(),
+            }
+        } else {
+            Vec::new()
+        };
         let frame = Frame {
-            code: code.clone(),
+            code,
             pc: 0,
             base: 0,
             acc: Value::Undefined,
@@ -192,24 +339,24 @@ impl Vm {
             this,
             callee: Some(fo),
             new_target,
-            args: if code.keeps_arguments {
-                args.clone()
-            } else {
-                Vec::new()
-            },
+            args: kept,
             argc,
             realm,
             exit,
+            discard_result: false,
             construct,
             kind: FrameKind::Function,
             generator: None,
             module,
         };
         self.push_frame(frame)?;
-        let base = self.frames.last().unwrap().base;
-        let pb = base + code.param_base as usize;
-        for i in 0..code.param_regs as usize {
-            self.regs[pb + i] = args.get(i).copied().unwrap_or(Value::Undefined);
+        // The caller's registers sit below the new window, so a register
+        // run of arguments is still in place after the file grew.
+        let pb = self.frames.last().unwrap().base + param_base;
+        let n = argc.min(param_regs);
+        match args {
+            Args::Regs { start, .. } => self.regs.copy_within(start..start + n, pb),
+            Args::Slice(s) => self.regs[pb..pb + n].copy_from_slice(&s[..n]),
         }
         Ok(())
     }
@@ -239,22 +386,17 @@ impl Vm {
                 }
                 let kind = fd.code.function_kind;
                 match kind {
-                    FunctionKind::Normal => self.run_function(
+                    FunctionKind::Normal
+                    | FunctionKind::Generator
+                    | FunctionKind::AsyncGenerator => self.run_function(
                         fo,
                         this,
-                        args.to_vec(),
-                        Value::Undefined,
-                        ConstructKind::None,
-                    ),
-                    FunctionKind::Generator | FunctionKind::AsyncGenerator => self.run_function(
-                        fo,
-                        this,
-                        args.to_vec(),
+                        args,
                         Value::Undefined,
                         ConstructKind::None,
                     ),
                     FunctionKind::Async => {
-                        crate::interp::generator::call_async_function(self, fo, this, args.to_vec())
+                        crate::interp::generator::call_async_function(self, fo, this, args)
                     }
                 }
             }
@@ -299,7 +441,7 @@ impl Vm {
                     )?;
                     (Value::Object(obj), ConstructKind::Base)
                 };
-                self.run_function(fo, this, args.to_vec(), new_target, kind)
+                self.run_function(fo, this, args, new_target, kind)
             }
             Class::Native(_) => self.call_native(fo, Value::Undefined, args, new_target),
             Class::Bound(b) => {
@@ -318,22 +460,23 @@ impl Vm {
         }
     }
 
-    /// Run a bytecode function to completion in a nested interpreter loop.
+    /// Run a bytecode function to completion from Rust, through the one
+    /// entry into JavaScript ([`Vm::run_entry`]).
     pub(crate) fn run_function(
         &mut self,
         fo: ObjId,
         this: Value,
-        args: Vec<Value>,
+        args: &[Value],
         new_target: Value,
         construct: ConstructKind,
     ) -> JsResult<Value> {
-        self.in_native(|vm| {
-            vm.push_function_frame(fo, this, args, new_target, construct, true)?;
-            match vm.run()? {
-                RunOutcome::Return(v) => Ok(v),
-                other => panic!("function run ended with {other:?}"),
-            }
-        })
+        let outcome = self.run_entry(true, |vm| {
+            vm.push_function_frame(fo, this, Args::Slice(args), new_target, construct, true)
+        })?;
+        match outcome {
+            RunOutcome::Return(v) => Ok(v),
+            other => panic!("function run ended with {other:?}"),
+        }
     }
 
     // ---- function objects -------------------------------------------------------------

@@ -1,6 +1,6 @@
 //! One instruction at a time: the big match.
 
-use super::{Flow, RunOutcome};
+use super::{Args, ConstructKind, Flow, RunOutcome};
 use crate::convert::{bin_arith, Hint};
 use crate::object::{Class, FieldKey, ObjectData};
 use crate::symbol::{PrivateElement, SymbolData, SymbolKind};
@@ -86,11 +86,13 @@ impl Vm {
                 self.frames[fi].pc = (pc as i64 + off as i64) as usize;
             }};
         }
-        macro_rules! args_vec {
-            ($args:expr, $argc:expr) => {{
-                let start = base + ($args) as usize;
-                self.regs[start..start + ($argc) as usize].to_vec()
-            }};
+        macro_rules! reg_args {
+            ($args:expr, $argc:expr) => {
+                Args::Regs {
+                    start: base + ($args) as usize,
+                    len: ($argc) as usize,
+                }
+            };
         }
 
         match instr {
@@ -274,6 +276,27 @@ impl Vm {
                 let key = self.name_key(code, name);
                 if let Value::Object(oid) = o {
                     self.ic_fill_get(code, ic, oid, key);
+                    // An ordinary lookup reads the value directly, and a
+                    // bytecode getter runs as a frame in this loop.
+                    match self.ordinary_get(oid, key) {
+                        crate::ops::OrdinaryGet::Value(v) => set_acc!(v),
+                        crate::ops::OrdinaryGet::Getter(g) => {
+                            self.push_function_frame(
+                                g,
+                                o,
+                                Args::Slice(&[]),
+                                Value::Undefined,
+                                ConstructKind::None,
+                                false,
+                            )?;
+                            return Ok(Flow::Reload);
+                        }
+                        crate::ops::OrdinaryGet::Generic => {
+                            let v = self.get_prop(oid, key, o)?;
+                            set_acc!(v);
+                        }
+                    }
+                    return Ok(Flow::Next);
                 }
                 let v = self.get_value_named(o, key, &code.names[name as usize].clone())?;
                 set_acc!(v);
@@ -294,6 +317,26 @@ impl Vm {
                 let key = self.name_key(code, name);
                 if let Value::Object(oid) = o {
                     self.ic_fill_set(code, ic, oid, key);
+                    // A bytecode setter runs as a frame in this loop; the
+                    // accumulator keeps the assigned value.
+                    match self.set_prop_with(oid, key, v, o, true)? {
+                        Ok(true) => {}
+                        Ok(false) if strict => return Err(self.throw_read_only(key)),
+                        Ok(false) => {}
+                        Err(s) => {
+                            self.push_function_frame(
+                                s,
+                                o,
+                                Args::Slice(&[v]),
+                                Value::Undefined,
+                                ConstructKind::None,
+                                false,
+                            )?;
+                            self.frames.last_mut().unwrap().discard_result = true;
+                            return Ok(Flow::Reload);
+                        }
+                    }
+                    return Ok(Flow::Next);
                 }
                 self.put_value(o, key, v, strict)?;
             }
@@ -867,15 +910,14 @@ impl Vm {
             } => {
                 let f = reg!(callee);
                 let t = reg!(this);
-                let a = args_vec!(args, argc);
-                return self.call_from_frame(f, t, a);
+                return self.call_from_frame(f, t, reg_args!(args, argc));
             }
             Instr::CallSpread { callee, this, args } => {
                 let f = reg!(callee);
                 let t = reg!(this);
                 let arr = reg!(args).as_object().expect("CallSpread with a non-array");
                 let a = self.array_to_vec(arr);
-                return self.call_from_frame(f, t, a);
+                return self.call_from_frame(f, t, Args::Slice(&a));
             }
             Instr::CallEval {
                 callee,
@@ -886,15 +928,11 @@ impl Vm {
             } => {
                 let f = reg!(callee);
                 let t = reg!(this);
-                let a = args_vec!(args, argc);
+                let a = reg_args!(args, argc);
                 if let Value::Object(fo) = f {
                     if fo == self.intrinsic_in(self.frames[fi].realm, crate::realm::Intrinsic::Eval)
                     {
-                        let v = self.direct_eval(
-                            fi,
-                            a.first().copied().unwrap_or(Value::Undefined),
-                            strict,
-                        )?;
+                        let v = self.direct_eval(fi, self.arg_at(a, 0), strict)?;
                         set_acc!(v);
                         return Ok(Flow::Next);
                     }
@@ -925,12 +963,11 @@ impl Vm {
                         return Ok(Flow::Next);
                     }
                 }
-                return self.call_from_frame(f, t, a);
+                return self.call_from_frame(f, t, Args::Slice(&a));
             }
             Instr::Construct { callee, args, argc } => {
                 let f = reg!(callee);
-                let a = args_vec!(args, argc);
-                return self.construct_from_frame(f, a, f);
+                return self.construct_from_frame(f, reg_args!(args, argc), f);
             }
             Instr::ConstructSpread { callee, args } => {
                 let f = reg!(callee);
@@ -938,7 +975,7 @@ impl Vm {
                     .as_object()
                     .expect("ConstructSpread with a non-array");
                 let a = self.array_to_vec(arr);
-                return self.construct_from_frame(f, a, f);
+                return self.construct_from_frame(f, Args::Slice(&a), f);
             }
             Instr::SuperCall {
                 func,
@@ -950,7 +987,7 @@ impl Vm {
                     .as_object()
                     .expect("SuperCall with a non-function");
                 let nt = reg!(new_target);
-                let a = args_vec!(args, argc);
+                let a = reg_args!(args, argc);
                 let parent = self.get_prototype_of(f)?;
                 let parent = match parent {
                     Some(p) if self.is_constructor(Value::Object(p)) => Value::Object(p),
@@ -976,7 +1013,7 @@ impl Vm {
                     Some(p) if self.is_constructor(Value::Object(p)) => Value::Object(p),
                     _ => return Err(self.throw_type("Super constructor is not a constructor")),
                 };
-                return self.construct_from_frame(parent, a, nt);
+                return self.construct_from_frame(parent, Args::Slice(&a), nt);
             }
             Instr::Return => {
                 return Ok(self.do_return());
@@ -1325,10 +1362,12 @@ impl Vm {
         if frame.exit {
             return Flow::Done(RunOutcome::Return(v));
         }
-        self.frames
-            .last_mut()
-            .expect("return with no caller frame")
-            .acc = v;
+        if !frame.discard_result {
+            self.frames
+                .last_mut()
+                .expect("return with no caller frame")
+                .acc = v;
+        }
         Flow::Reload
     }
 

@@ -3,7 +3,7 @@
 
 use crate::heap::Heap;
 use crate::interp::Frame;
-use crate::object::{CallArgs, Class, NativeData, NativeFn, NativeKind, ObjectData};
+use crate::object::{CallArgs, Class, NativeData, NativeFn, NativeKind, NativeTag, ObjectData};
 use crate::realm::{Intrinsic, Realm};
 use crate::value::{Attrs, ObjId, PropKey, Property, StrId, SymId, Value};
 use agnijs_engine_api::{EngineId, Host, RealmId};
@@ -352,6 +352,9 @@ pub struct Vm {
     pub(crate) debug: Option<Box<crate::debug::DebugState>>,
     /// Tested on the dispatch loop's slow path: a client is attached.
     pub(crate) debug_hot: bool,
+    /// Reused buffer for the argument list of an inlined
+    /// `Function.prototype.apply` (TASK-100.19).
+    pub(crate) arg_scratch: Vec<Value>,
     /// Instructions dispatched by `Vm::run` (feature `instr-count`).
     #[cfg(feature = "instr-count")]
     pub instr_count: u64,
@@ -405,6 +408,7 @@ impl Vm {
             gc_requested: false,
             debug: None,
             debug_hot: false,
+            arg_scratch: Vec::new(),
             #[cfg(feature = "instr-count")]
             instr_count: 0,
         };
@@ -593,6 +597,7 @@ impl Vm {
         let proto = self.intrinsic_in(realm, Intrinsic::FunctionPrototype);
         let data = NativeData {
             func: NativeKind::Fn(f),
+            tag: NativeTag::None,
             realm,
             constructor,
             slots: Vec::new(),
@@ -623,6 +628,7 @@ impl Vm {
         let proto = self.intrinsic_in(realm, Intrinsic::FunctionPrototype);
         let data = NativeData {
             func: NativeKind::Fn(f),
+            tag: NativeTag::None,
             realm,
             constructor: false,
             slots: Vec::new(),
