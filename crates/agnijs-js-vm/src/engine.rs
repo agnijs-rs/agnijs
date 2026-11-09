@@ -2,10 +2,11 @@
 //! the interface, host functions and objects, and the bytecode container.
 //!
 //! Bytecode container (ADR 0010): the shared `AGJS` container with the
-//! `agnijs-bc-6` tag around a kind byte, a checksum and the serialised code
-//! tree, so loading precompiled code skips parsing and compiling. Any other
-//! container, including the M2 source-payload container, is rejected; the
-//! host recompiles from source.
+//! `agnijs-bc-7` tag around a kind byte, a checksum, the serialised code
+//! tree and the compiled programs of its regex literals, so loading
+//! precompiled code skips parsing and compiling, regexes included. Any
+//! other container, including the M2 source-payload container, is
+//! rejected; the host recompiles from source.
 
 use crate::object::{CallArgs, Class, HostObjectData, NativeData, NativeKind, ObjectData};
 use crate::realm::Intrinsic;
@@ -20,10 +21,13 @@ use agnijs_js_compiler::bytecode::CodeBlock;
 use std::rc::Rc;
 
 /// The format tag in the shared `AGJS` container (`agnijs_engine_api::bytecode`):
-/// a kind byte, then the serialised code tree (`agnijs_js_compiler::serialize`).
-/// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
-/// constant pool or the serialiser's layout changes it.
-pub const FORMAT: &str = "agnijs-bc-6";
+/// a kind byte, then the serialised code tree (`agnijs_js_compiler::serialize`)
+/// and the regex section (see [`encode_bytecode`]). The tag pins the
+/// compiler: any change to `Instr`, `CodeBlock`, the constant pool, the
+/// serialiser's layout or the regex program format
+/// (`agnijs_js_regex::Regex::program_bytes`) changes it. `agnijs-bc-7`
+/// added the regex section (TASK-100.31).
+pub const FORMAT: &str = "agnijs-bc-7";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;
@@ -78,38 +82,169 @@ impl Vm {
     }
 }
 
-/// Payload: kind byte, checksum of kind and tree (u64 LE), tree.
+/// A compiled regex literal carried in the container: the pattern's code
+/// units, its flags as `RegexCache` bits, and the matcher program
+/// (`agnijs_js_regex::Regex::program_bytes`).
+struct RegexEntry {
+    pattern: Vec<u16>,
+    flags: u8,
+    program: Vec<u8>,
+}
+
+/// The regex literals of `code` and every function nested in it, each
+/// distinct pattern and flags once, compiled.
+fn regex_literals(code: &CodeBlock) -> Vec<RegexEntry> {
+    use agnijs_js_compiler::bytecode::{Constant, Instr};
+    type Seen = std::collections::HashSet<(Rc<[u16]>, Rc<[u16]>)>;
+    fn walk(code: &CodeBlock, seen: &mut Seen, out: &mut Vec<RegexEntry>) {
+        for i in &code.instrs {
+            let Instr::CreateRegExp { pattern, flags } = *i else { continue };
+            let (Some(Constant::String(p)), Some(Constant::String(f))) =
+                (code.constants.get(pattern as usize), code.constants.get(flags as usize))
+            else {
+                continue;
+            };
+            if !seen.insert((p.clone(), f.clone())) {
+                continue;
+            }
+            // The parser has validated every literal; one that does not
+            // compile anyway is left for the VM to report at run time.
+            let Ok(parsed) = agnijs_js_regex::Flags::parse(f) else { continue };
+            let Ok(re) = agnijs_js_regex::Regex::compile(p, &parsed) else { continue };
+            out.push(RegexEntry {
+                pattern: p.to_vec(),
+                flags: crate::builtins::regexp::flag_bits(&parsed),
+                program: re.program_bytes(),
+            });
+        }
+        for f in &code.functions {
+            walk(f, seen, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(code, &mut Default::default(), &mut out);
+    out
+}
+
+/// Payload: kind byte, checksum of kind and body (u64 LE), body. Body: the
+/// tree's length (u64 LE), the tree, then the regex section (ADR 0010
+/// addendum): a u32 LE count, then per literal its pattern (u32 LE unit
+/// count, units LE), its flag bits (one byte) and its compiled program
+/// (u32 LE length, bytes).
 pub fn encode_bytecode(module: bool, code: &CodeBlock) -> Vec<u8> {
     let kind = if module { KIND_MODULE } else { KIND_SCRIPT };
     let tree = agnijs_js_compiler::serialize::encode(code);
-    let mut payload = Vec::with_capacity(9 + tree.len());
+    assemble(kind, &tree, &regex_literals(code))
+}
+
+fn assemble(kind: u8, tree: &[u8], regexes: &[RegexEntry]) -> Vec<u8> {
+    let mut body = Vec::with_capacity(8 + tree.len() + 4);
+    body.extend_from_slice(&(tree.len() as u64).to_le_bytes());
+    body.extend_from_slice(tree);
+    body.extend_from_slice(&(regexes.len() as u32).to_le_bytes());
+    for r in regexes {
+        body.extend_from_slice(&(r.pattern.len() as u32).to_le_bytes());
+        for u in &r.pattern {
+            body.extend_from_slice(&u.to_le_bytes());
+        }
+        body.push(r.flags);
+        body.extend_from_slice(&(r.program.len() as u32).to_le_bytes());
+        body.extend_from_slice(&r.program);
+    }
+    let mut payload = Vec::with_capacity(9 + body.len());
     payload.push(kind);
-    payload.extend_from_slice(&checksum(kind, &tree).to_le_bytes());
-    payload.extend_from_slice(&tree);
+    payload.extend_from_slice(&checksum(kind, &body).to_le_bytes());
+    payload.extend_from_slice(&body);
     api::bytecode::wrap(FORMAT, &payload)
 }
 
+/// Reads the little-endian fields of the payload body.
+struct Fields<'a>(&'a [u8]);
+
+impl<'a> Fields<'a> {
+    fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
+        if n > self.0.len() {
+            return Err(Error::BytecodeCorrupt("truncated payload".into()));
+        }
+        let (head, rest) = self.0.split_at(n);
+        self.0 = rest;
+        Ok(head)
+    }
+    fn u32(&mut self) -> Result<usize, Error> {
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().unwrap()) as usize)
+    }
+    fn u64(&mut self) -> Result<u64, Error> {
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
+    }
+}
+
 pub fn decode_bytecode(bytes: &[u8], _want_module: bool) -> Result<Decoded, Error> {
+    decode_payload(bytes).map(|(code, _)| code)
+}
+
+fn decode_payload(bytes: &[u8]) -> Result<(Decoded, Vec<RegexEntry>), Error> {
     let payload = api::bytecode::unwrap(FORMAT, bytes)?;
     if payload.len() < 9 {
         return Err(Error::BytecodeCorrupt("truncated payload header".into()));
     }
     let kind = payload[0];
     let sum = u64::from_le_bytes(payload[1..9].try_into().unwrap());
-    let tree = &payload[9..];
-    if checksum(kind, tree) != sum {
+    let body = &payload[9..];
+    if checksum(kind, body) != sum {
         return Err(Error::BytecodeCorrupt("payload checksum mismatch".into()));
+    }
+    let mut f = Fields(body);
+    let tree_len = usize::try_from(f.u64()?).map_err(|_| Error::BytecodeCorrupt("truncated payload".into()))?;
+    let tree = f.take(tree_len)?;
+    let count = f.u32()?;
+    // Each entry takes at least nine bytes: no allocation past the input.
+    let mut regexes = Vec::with_capacity(count.min(f.0.len() / 9));
+    for _ in 0..count {
+        let n = f.u32()?;
+        let units = f.take(n.checked_mul(2).ok_or_else(|| Error::BytecodeCorrupt("truncated payload".into()))?)?;
+        let pattern = units.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let flags = f.take(1)?[0];
+        let len = f.u32()?;
+        let program = f.take(len)?.to_vec();
+        regexes.push(RegexEntry { pattern, flags, program });
+    }
+    if !f.0.is_empty() {
+        return Err(Error::BytecodeCorrupt("trailing bytes after the regex section".into()));
     }
     let code = agnijs_js_compiler::serialize::decode(tree)
         .map_err(|e| Error::BytecodeCorrupt(e.to_string()))?;
     use agnijs_js_compiler::bytecode::CodeKind;
-    match (kind, code.kind) {
-        (KIND_SCRIPT, CodeKind::Script) => Ok(Decoded::Script(code)),
-        (KIND_MODULE, CodeKind::Module) => Ok(Decoded::Module(code)),
-        (KIND_SCRIPT | KIND_MODULE, k) => Err(Error::BytecodeCorrupt(format!(
-            "kind byte {kind} does not match a {k:?} code block"
-        ))),
-        _ => Err(Error::BytecodeCorrupt("unknown code kind".into())),
+    let code = match (kind, code.kind) {
+        (KIND_SCRIPT, CodeKind::Script) => Decoded::Script(code),
+        (KIND_MODULE, CodeKind::Module) => Decoded::Module(code),
+        (KIND_SCRIPT | KIND_MODULE, k) => {
+            return Err(Error::BytecodeCorrupt(format!(
+                "kind byte {kind} does not match a {k:?} code block"
+            )))
+        }
+        _ => return Err(Error::BytecodeCorrupt("unknown code kind".into())),
+    };
+    Ok((code, regexes))
+}
+
+impl Vm {
+    /// Decode a container and seed the regex cache with the compiled
+    /// programs it carries, so its literals are not parsed or compiled
+    /// again. Every program is verified first; a malformed one refuses the
+    /// whole container, before any of it runs.
+    pub(crate) fn load_bytecode(&mut self, bytes: &[u8], want_module: bool) -> Result<Decoded, Error> {
+        let _ = want_module;
+        let (code, regexes) = decode_payload(bytes)?;
+        let mut loaded = Vec::with_capacity(regexes.len());
+        for r in regexes {
+            let re = agnijs_js_regex::Regex::from_program_bytes(&r.program, self.regex_mode)
+                .map_err(|e| Error::BytecodeCorrupt(format!("regex /{}/: {e}", String::from_utf16_lossy(&r.pattern))))?;
+            loaded.push((r.pattern, r.flags, Rc::new(re)));
+        }
+        for (pattern, flags, re) in loaded {
+            self.regex_cache.seed(pattern, flags, re);
+        }
+        Ok(code)
     }
 }
 
@@ -485,7 +620,7 @@ impl Engine for Vm {
 
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> api::Result<api::Value> {
         self.check_realm(realm)?;
-        let decoded = decode_bytecode(bytecode, false)?;
+        let decoded = self.load_bytecode(bytecode, false)?;
         match &decoded {
             Decoded::Script(code) | Decoded::Module(code) => self.verify_debug_sections(code)?,
         }
@@ -869,3 +1004,66 @@ impl Vm {
 
 /// `CallArgs` is re-exported for host-facing helpers.
 pub type NativeCallArgs<'a> = CallArgs<'a>;
+
+#[cfg(test)]
+mod tests {
+    //! The regex section of the container (ADR 0010 addendum,
+    //! TASK-100.31), with containers built by hand around it.
+
+    use super::*;
+    use agnijs_engine_api::conformance::TestHost;
+
+    const SOURCE: &str = "function f(s) { return [/a+/.test(s), /(?<x>b)\\k<x>/i.test(s)]; }\nglobalThis.r = f('bB').join();";
+
+    fn parts() -> (Vec<u8>, Vec<RegexEntry>) {
+        let code = agnijs_js_compiler::compile_script(SOURCE, "re.js").unwrap();
+        (agnijs_js_compiler::serialize::encode(&code), regex_literals(&code))
+    }
+
+    fn run(bytes: &[u8]) -> Result<api::Value, Error> {
+        let mut e = make_engine(TestHost::new());
+        let realm = e.main_realm();
+        e.eval_bytecode(realm, bytes)?;
+        e.eval_script(realm, "probe.js", "r")
+    }
+
+    #[test]
+    fn every_distinct_literal_in_the_tree_is_carried_once() {
+        let code = agnijs_js_compiler::compile_script("/x/g; /x/g; /x/; () => [/y/u, () => /x/g];", "a.js").unwrap();
+        let mut found: Vec<_> =
+            regex_literals(&code).iter().map(|r| (String::from_utf16(&r.pattern).unwrap(), r.flags)).collect();
+        found.sort();
+        let g = crate::builtins::regexp::flag_bits(&agnijs_js_regex::Flags { global: true, ..Default::default() });
+        let u = crate::builtins::regexp::flag_bits(&agnijs_js_regex::Flags { unicode: true, ..Default::default() });
+        assert_eq!(found, vec![("x".into(), 0), ("x".into(), g), ("y".into(), u)]);
+    }
+
+    #[test]
+    fn the_carried_program_is_the_one_that_runs() {
+        let (tree, mut regexes) = parts();
+        assert_eq!(run(&assemble(KIND_SCRIPT, &tree, &regexes)).unwrap(), api::Value::string("false,true"));
+        // Give /a+/ the program of /B/i: the loaded code matches with it,
+        // so nothing compiled the pattern again.
+        let other = agnijs_js_regex::Regex::compile(&[0x42], &agnijs_js_regex::Flags::parse(&[0x69]).unwrap()).unwrap();
+        let a = regexes.iter_mut().find(|r| r.pattern == [0x61, 0x2B]).unwrap();
+        a.program = other.program_bytes();
+        assert_eq!(run(&assemble(KIND_SCRIPT, &tree, &regexes)).unwrap(), api::Value::string("true,true"));
+    }
+
+    #[test]
+    fn a_malformed_program_refuses_the_container() {
+        let (tree, mut regexes) = parts();
+        let last = regexes[1].program.len() - 1;
+        regexes[1].program.truncate(last);
+        match run(&assemble(KIND_SCRIPT, &tree, &regexes)) {
+            Err(Error::BytecodeCorrupt(m)) => assert!(m.contains("regex"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_container_without_regex_programs_still_runs() {
+        let (tree, _) = parts();
+        assert_eq!(run(&assemble(KIND_SCRIPT, &tree, &[])).unwrap(), api::Value::string("false,true"));
+    }
+}

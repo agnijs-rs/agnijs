@@ -193,7 +193,6 @@ impl SetMatcher {
     }
 
     /// The set back as ranges (for serialization).
-    #[allow(dead_code)] // Program serialization, the next step of TASK-100.31.
     pub(crate) fn to_set(&self) -> CharSet {
         let mut v = Vec::new();
         for c in 0..256u32 {

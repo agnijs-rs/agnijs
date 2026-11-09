@@ -31,9 +31,9 @@ use crate::parse::{Assertion, Node, Pattern};
 const MAX_PROGRAM: usize = 20_000;
 /// Most nesting levels of quantifiers with a nullable body: each level
 /// doubles the number of thread states.
-const MAX_EMPTY_DEPTH: u32 = 4;
+pub(crate) const MAX_EMPTY_DEPTH: u32 = 4;
 /// Largest thread table (states x capture slots) the matcher allocates.
-const MAX_TABLE: usize = 1 << 18;
+pub(crate) const MAX_TABLE: usize = 1 << 18;
 
 const NONE: usize = usize::MAX;
 

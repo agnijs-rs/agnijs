@@ -651,6 +651,11 @@ impl Prog {
                 }
                 Inst::Close(k) => {
                     let o = regs[open_base + k as usize];
+                    if o == NONE {
+                        // Never in a compiled program: its Open always runs
+                        // first (kept for programs read from bytes).
+                        fail!();
+                    }
                     let (a, b) = if o <= pos { (o, pos) } else { (pos, o) };
                     set_reg!(2 * k as usize, a);
                     set_reg!(2 * k as usize + 1, b);
@@ -794,9 +799,11 @@ impl Prog {
                     pc += 1;
                 }
                 Inst::LookEnd => {
-                    let idx = looks.pop().expect("lookaround marker");
-                    let Frame::Look { pc: lpc, pos: lpos } = stack[idx] else { unreachable!() };
-                    let Inst::Look { negate, end } = self.insts[lpc as usize] else { unreachable!() };
+                    // The lookaround this body belongs to; verified programs
+                    // always have one, and anything else fails the attempt.
+                    let Some(idx) = looks.pop() else { fail!() };
+                    let Some(&Frame::Look { pc: lpc, pos: lpos }) = stack.get(idx) else { fail!() };
+                    let Inst::Look { negate, end } = self.insts[lpc as usize] else { fail!() };
                     if negate {
                         // The body matched, so the lookaround fails: undo
                         // it and backtrack past it.

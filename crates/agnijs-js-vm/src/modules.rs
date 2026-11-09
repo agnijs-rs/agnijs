@@ -231,7 +231,7 @@ impl Vm {
                 self.new_module_record(realm, &resolved, Some(code), None)
             }
             ModuleSource::Bytecode(bytes) => {
-                let code = match crate::engine::decode_bytecode(&bytes, true) {
+                let code = match self.load_bytecode(&bytes, true) {
                     Ok(crate::engine::Decoded::Module(c)) => c,
                     Ok(_) => {
                         return self

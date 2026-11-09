@@ -28,7 +28,7 @@ fn find(pattern: &str, flags: &str, input: &[u16]) -> Option<(usize, usize)> {
 #[test]
 fn escaped_surrogate_pairs_outside_u_mode_are_two_units() {
     // TASK-105
-    assert_eq!(find(r"😀", "", &[0xD83D, 0xDE00]), Some((0, 2)));
+    assert_eq!(find(r"\uD83D\uDE00", "", &[0xD83D, 0xDE00]), Some((0, 2)));
     assert_eq!(find(r"\uD83Db?", "", &[0x61, 0xD83D, 0xDE00]), Some((1, 2)));
 }
 

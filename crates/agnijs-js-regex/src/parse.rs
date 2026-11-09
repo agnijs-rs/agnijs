@@ -84,6 +84,7 @@ pub(crate) enum Node {
 
 impl Node {
     /// Whether the node can match without consuming input.
+    #[cfg_attr(not(feature = "linear"), allow(dead_code))]
     pub(crate) fn nullable(&self) -> bool {
         match self {
             Node::Empty | Node::Assert(_) | Node::Look { .. } | Node::BackRef { .. } => true,

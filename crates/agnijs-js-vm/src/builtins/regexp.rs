@@ -78,6 +78,15 @@ impl RegexCache {
         self.table.insert_unique(hash, CacheEntry { pattern, flags, hash, re }, |e| e.hash);
     }
 
+    /// Add a matcher compiled ahead of time (a regex literal's program
+    /// from a bytecode container, ADR 0010 addendum), unless the pattern
+    /// is already cached.
+    pub(crate) fn seed(&mut self, pattern: Vec<u16>, flags: u8, re: Rc<Regex>) {
+        if self.get(&Units::Two(&pattern), flags).is_none() {
+            self.insert(pattern, flags, re);
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.table.len()
     }
@@ -88,7 +97,7 @@ impl RegexCache {
 }
 
 /// The flags as eight bits, in `dgimsuvy` order.
-fn flag_bits(f: &Flags) -> u8 {
+pub(crate) fn flag_bits(f: &Flags) -> u8 {
     [f.has_indices, f.global, f.ignore_case, f.multiline, f.dot_all, f.unicode, f.unicode_sets, f.sticky]
         .iter()
         .enumerate()

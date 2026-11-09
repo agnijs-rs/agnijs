@@ -21,6 +21,7 @@ pub mod syntax;
 mod backtrack;
 mod charset;
 mod parse;
+mod program;
 mod unicode;
 #[rustfmt::skip]
 #[allow(dead_code, clippy::type_complexity)]
@@ -210,6 +211,21 @@ impl Regex {
         Ok(Regex::from_program(Arc::new(program), mode))
     }
 
+    /// The compiled program as bytes, for bytecode to embed (ADR 0010
+    /// addendum). They do not depend on the matcher mode.
+    pub fn program_bytes(&self) -> Vec<u8> {
+        program::encode(&self.program)
+    }
+
+    /// A pattern from [`Regex::program_bytes`], without parsing or
+    /// compiling it again. The bytes are verified first: anything that is
+    /// not shaped like a program the compiler produces is an error, never
+    /// a panic or a match that cannot finish.
+    pub fn from_program_bytes(bytes: &[u8], mode: MatcherMode) -> Result<Regex, String> {
+        let program = program::decode(bytes).map_err(|e| format!("Invalid compiled regular expression: {e}"))?;
+        Ok(Regex::from_program(Arc::new(program), mode))
+    }
+
     fn from_program(program: Arc<Program>, mode: MatcherMode) -> Regex {
         Regex {
             program,
@@ -316,7 +332,7 @@ impl Regex {
             Err(_) => self.program.backtrack.exec(&mut Default::default(), input, start, sticky, budget),
         };
         match outcome {
-            backtrack::Outcome::Match(ranges) => Some(Captures { ranges }),
+            backtrack::Outcome::Match(ranges) => well_formed(ranges),
             backtrack::Outcome::NoMatch => None,
             backtrack::Outcome::Exhausted(_at) => {
                 #[cfg(feature = "linear")]
@@ -355,8 +371,18 @@ impl Regex {
             }
             Err(_) => lin.exec(&mut lin.scratch(), input, start, sticky),
         }?;
-        Some(Captures { ranges })
+        well_formed(ranges)
     }
+}
+
+/// The match, which callers may slice the input with. A compiled program
+/// always gives a whole match and ranges that do not run backwards; this
+/// keeps a program from bytes to the same promise (a verified one that
+/// records captures oddly may match wrongly, but cannot make a caller
+/// panic).
+fn well_formed(ranges: Vec<Option<(usize, usize)>>) -> Option<Captures> {
+    let ok = ranges.first().is_some_and(|r| r.is_some()) && ranges.iter().flatten().all(|&(a, b)| a <= b);
+    ok.then_some(Captures { ranges })
 }
 
 #[cfg(feature = "linear")]

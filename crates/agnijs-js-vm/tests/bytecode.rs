@@ -33,7 +33,7 @@ fn eval(e: &mut dyn Engine, realm: RealmId, src: &str) -> Value {
 fn the_engine_names_its_bytecode_format_and_uses_the_shared_container() {
     let (_host, mut e, realm) = engine();
     // Pins the tag on purpose: bumping it must be a visible change (ADR 0010).
-    assert_eq!(FORMAT, "agnijs-bc-6");
+    assert_eq!(FORMAT, "agnijs-bc-7");
     assert_eq!(e.info().bytecode_format, FORMAT);
     let bytes = e.compile_script(realm, "a.js", "1 + 1").unwrap();
     assert!(bytecode::unwrap(FORMAT, &bytes).is_ok());
@@ -167,10 +167,10 @@ fn a_future_format_of_this_engine_is_a_version_mismatch() {
     let (_host, mut e, realm) = engine();
     let bytes = e.compile_script(realm, "a.js", "1").unwrap();
     let payload = bytecode::unwrap(FORMAT, &bytes).unwrap().to_vec();
-    let newer = bytecode::wrap("agnijs-bc-7", &payload);
+    let newer = bytecode::wrap("agnijs-bc-8", &payload);
     assert!(matches!(
         e.eval_bytecode(realm, &newer),
-        Err(Error::BytecodeMismatch { found, .. }) if found == "agnijs-bc-7"
+        Err(Error::BytecodeMismatch { found, .. }) if found == "agnijs-bc-8"
     ));
 }
 

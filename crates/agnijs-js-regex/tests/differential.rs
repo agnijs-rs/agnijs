@@ -99,7 +99,7 @@ const LEGACY_ONLY: &[&str] = &[
 ];
 const UNICODE_ONLY: &[&str] = &[
     "\\u{1F600}", "\u{1F600}", "\\uD83D\\uDE00", "\\uD83D", "\\uDE00", "\\p{Lu}", "\\P{Lu}", "\\p{L}",
-    "\\p{Script=Greek}", "[\\p{Ll}\\d]", "[^\\p{Lu}]", "[\\u{1F600}-\\u{1F64F}]", "\\p{ASCII}", "[ðŸ˜€a]",
+    "\\p{Script=Greek}", "[\\p{Ll}\\d]", "[^\\p{Lu}]", "[\\u{1F600}-\\u{1F64F}]", "\\p{ASCII}", "[😀a]",
 ];
 const SETS_ONLY: &[&str] = &[
     "[\\w--[a]]", "[[a-c]&&[b-d]]", "[\\p{L}--[a-z]]", "[[ab][c]]", "[^[ab]]", "[\\d\\q{1}]", "[\\q{ab|c}]",
@@ -541,6 +541,71 @@ fn backtracking_agrees_with_regress() {
     }
     println!(
         "{compared} patterns ({comparisons} compared outcomes), {invalid} invalid, {rejected} rejected by regress, {known} skipped as known regress bugs"
+    );
+}
+
+/// Every compiled program loads back from its bytes and matches the same
+/// (ADR 0010 addendum), and corrupted bytes either fail to load or load
+/// into a program that runs without panicking. Corrupted programs run
+/// only where a step budget bounds them (Auto with an eligible linear
+/// program, or the linear matcher).
+#[test]
+fn programs_survive_serialization_and_corruption() {
+    let (cases, mut rng, trace) = settings();
+    let watchdog = Watchdog::start();
+    let (mut valid, mut corrupted, mut loaded, mut unbudgeted) = (0usize, 0usize, 0usize, 0usize);
+    while valid < cases {
+        let (pattern, flags_s) = random_case(&mut rng, 3, false);
+        let p = u(&pattern);
+        let flags = Flags::parse(&u(&flags_s)).unwrap();
+        watchdog.case(&pattern, &flags_s);
+        if trace {
+            eprintln!("/{}/{flags_s}", pattern.escape_debug());
+        }
+        let Ok(re) = Regex::compile_with(&p, &flags, MatcherMode::Auto) else { continue };
+        valid += 1;
+        let bytes = re.program_bytes();
+        let input = random_input(&mut rng);
+        for mode in [MatcherMode::Auto, MatcherMode::BacktrackingOnly, MatcherMode::LinearWhenEligible] {
+            let again = Regex::from_program_bytes(&bytes, mode)
+                .unwrap_or_else(|e| panic!("/{}/{flags_s} does not load: {e}", pattern.escape_debug()));
+            assert_eq!(again.program_bytes(), bytes, "/{}/{flags_s}", pattern.escape_debug());
+            let original = Regex::compile_with(&p, &flags, mode).unwrap();
+            compare(("compiled", &outcomes(&original, &input, &flags)), ("loaded", &outcomes(&again, &input, &flags)), &pattern, &flags_s, &input);
+        }
+        for _ in 0..4 {
+            let mut bad = bytes.clone();
+            for _ in 0..1 + rng.below(3) {
+                let k = rng.below(bad.len());
+                bad[k] = match rng.below(4) {
+                    0 => bad[k].wrapping_add(1),
+                    1 => bad[k].wrapping_sub(1),
+                    2 => bad[k] ^ (1 << rng.below(8)),
+                    _ => rng.below(256) as u8,
+                };
+            }
+            corrupted += 1;
+            for mode in [MatcherMode::Auto, MatcherMode::LinearWhenEligible] {
+                if let Ok(r) = Regex::from_program_bytes(&bad, mode) {
+                    loaded += 1;
+                    if r.linear_eligibility().is_err() {
+                        // It would backtrack without a step budget, and a
+                        // corrupted loop count can make that exponential
+                        // as in any compiled pattern (`(?:()?|\B){91,}?`).
+                        unbudgeted += 1;
+                        continue;
+                    }
+                    if trace {
+                        eprintln!("  corrupted {mode:?} on \"{}\": {bad:?}", show(&input));
+                    }
+                    let _ = outcomes(&r, &input, &flags);
+                }
+            }
+        }
+    }
+    println!(
+        "{valid} programs round trip; {corrupted} corrupted copies, {loaded} loads of them, {} run, {unbudgeted} not run (no step budget)",
+        loaded - unbudgeted
     );
 }
 
