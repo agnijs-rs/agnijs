@@ -8,7 +8,7 @@
 //! exotic variants), which may call getters, setters and proxy traps, live
 //! in `crate::ops`.
 
-use crate::heap::Heap;
+use crate::heap::{Heap, DICT_ENTRY_BYTES, ELEMENT_BYTES, SLOT_BYTES};
 use crate::interp::generator::GeneratorData;
 use crate::symbol::SymbolKind;
 use crate::value::{
@@ -320,12 +320,18 @@ impl ObjectData {
         }
     }
 
+    /// Approximate bytes of the storage that grows after allocation, at the
+    /// sizes the heap counts growth with.
     pub fn extra_bytes(&self) -> usize {
-        self.slots.len() * 24
-            + self.dict.as_ref().map(|d| d.len() * 48).unwrap_or(0)
+        self.slots.len() * SLOT_BYTES
+            + self
+                .dict
+                .as_ref()
+                .map(|d| d.len() * DICT_ENTRY_BYTES)
+                .unwrap_or(0)
             + match &self.elements {
-                Elements::Dense(v) => v.len() * 16,
-                Elements::Sparse(m) => m.len() * 48,
+                Elements::Dense(v) => v.len() * ELEMENT_BYTES,
+                Elements::Sparse(m) => m.len() * DICT_ENTRY_BYTES,
             }
     }
 
@@ -428,10 +434,12 @@ impl Heap {
                 },
             );
         }
+        let grown = dict.len() * DICT_ENTRY_BYTES;
         let o = self.obj_mut(obj);
         o.dict = Some(Box::new(dict));
         o.slots = Vec::new();
         o.shape = ShapeId(0);
+        self.note_growth(grown);
     }
 
     /// Switch an object's elements to sparse storage.
@@ -444,7 +452,9 @@ impl Heap {
                     map.insert(i as u32, Property::data(*val, Attrs::ALL));
                 }
             }
+            let grown = map.len() * DICT_ENTRY_BYTES;
             o.elements = Elements::Sparse(map);
+            self.note_growth(grown);
         }
     }
 
@@ -482,24 +492,29 @@ impl Heap {
         self.get_own_property(obj, key).is_some()
     }
 
-    /// Add a property that is known to be absent.
+    /// Add a property that is known to be absent. New storage (a dense
+    /// element and any holes before it, a sparse entry, a slot, a
+    /// dictionary entry) counts towards the next collection.
     pub fn add_own_property(&mut self, obj: ObjId, key: PropKey, prop: Property) {
         match key {
             PropKey::Index(i) => {
                 let is_default_data = !prop.is_accessor() && prop.attrs == Attrs::ALL;
                 let o = self.obj_mut(obj);
-                match &mut o.elements {
+                let grown = match &mut o.elements {
                     Elements::Dense(v)
                         if is_default_data && i as usize <= v.len() + DENSE_GAP as usize =>
                     {
                         let idx = i as usize;
                         if idx < v.len() {
                             v[idx] = prop.value().unwrap();
+                            0
                         } else {
+                            let added = idx + 1 - v.len();
                             if idx > v.len() {
                                 v.resize(idx, Value::Empty);
                             }
                             v.push(prop.value().unwrap());
+                            added * ELEMENT_BYTES
                         }
                     }
                     _ => {
@@ -508,13 +523,15 @@ impl Heap {
                         if let Elements::Sparse(m) = &mut o.elements {
                             m.insert(i, prop);
                         }
+                        DICT_ENTRY_BYTES
                     }
-                }
+                };
                 if let Class::Array(a) = &mut self.obj_mut(obj).class {
                     if i >= a.length {
                         a.length = i + 1;
                     }
                 }
+                self.note_growth(grown);
             }
             _ => {
                 let o = self.obj(obj);
@@ -524,12 +541,14 @@ impl Heap {
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     d.insert(key, prop);
+                    self.note_growth(DICT_ENTRY_BYTES);
                 } else {
                     let shape = o.shape;
                     let new_shape = self.shape_add(shape, key, prop.attrs);
                     let o = self.obj_mut(obj);
                     o.shape = new_shape;
                     o.slots.push(prop.slot);
+                    self.note_growth(SLOT_BYTES);
                 }
             }
         }
@@ -764,6 +783,7 @@ impl Heap {
             if v.len() == a.length as usize && a.length < PropKey::MAX_INDEX {
                 v.push(value);
                 a.length += 1;
+                self.note_growth(ELEMENT_BYTES);
                 return true;
             }
         }

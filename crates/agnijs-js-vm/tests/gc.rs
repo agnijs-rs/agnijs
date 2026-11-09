@@ -151,6 +151,62 @@ fn memory_limit_faults_instead_of_growing() {
     assert!(r.is_err(), "the loop should hit the memory limit");
 }
 
+/// TASK-100.23: element growth counts towards the next collection. Before,
+/// only the 160 bytes of each array object counted, so 20 000 arrays of
+/// 1 000 pushed numbers (320 MB of elements) ran zero collections. The
+/// reproduction is scaled to 2 000 arrays here so the test stays bounded
+/// in a debug build: 32 MB of elements against 320 KB of counted headers.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "too slow under Miri; the small stress test below covers the same paths"
+)]
+fn a_loop_that_only_grows_arrays_triggers_collections() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "for (var k = 0; k < 2000; k++) { var a = []; for (var j = 0; j < 1000; j++) a.push(j); }",
+    );
+    assert!(
+        vm.gc_count >= 1,
+        "32 MB of array elements ran {} collections",
+        vm.gc_count
+    );
+    // Everything but the last array is garbage; the heap held at the end
+    // is bounded by the collector's threshold, not by the loop's total.
+    let usage = vm.memory_usage();
+    assert!(
+        usage.heap_bytes < 16 * 1024 * 1024,
+        "{} bytes held after the loop ({} objects)",
+        usage.heap_bytes,
+        usage.object_count
+    );
+}
+
+/// The memory limit is checked against the same counter, so a loop that
+/// only grows arrays must hit it instead of growing past it.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "too slow under Miri; the small stress test below covers the same paths"
+)]
+fn a_memory_limit_stops_a_loop_that_only_grows_arrays() {
+    let mut vm = engine(false);
+    vm.set_memory_limit(Some(4 * 1024 * 1024));
+    let realm = vm.main_realm();
+    // Bounded at 3 000 arrays (48 MB of elements) so a failing run cannot
+    // exhaust the machine; with the limit enforced it stops far earlier.
+    let r = vm.eval_script(
+        realm,
+        "gc-test.js",
+        "var keep = []; for (var k = 0; k < 3000; k++) { var a = []; for (var j = 0; j < 1000; j++) a.push(j); keep.push(a); }",
+    );
+    assert!(
+        matches!(r, Err(agnijs_engine_api::Error::OutOfMemory)),
+        "48 MB of array elements under a 4 MiB limit: {r:?}"
+    );
+}
+
 /// A Miri-sized program: closures, a generator, an exception and a
 /// string concatenation, with a collection at every safe point.
 #[test]

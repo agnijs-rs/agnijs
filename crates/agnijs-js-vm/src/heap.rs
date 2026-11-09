@@ -151,11 +151,22 @@ impl<T> Arena<T> {
     }
 }
 
-/// Approximate allocation sizes, for GC scheduling only.
+/// Approximate allocation sizes, for GC scheduling only. The fixed part of
+/// each heap value is counted when it is allocated; the storage that grows
+/// afterwards (elements, property slots, dictionaries, flattened string
+/// buffers) is counted as it grows, through [`Heap::note_growth`], at the
+/// per-entry sizes below. [`Heap::approx_live_bytes`] uses the same sizes,
+/// so the live figure after a collection and the allocation counter agree.
 const OBJECT_BYTES: usize = 160;
 const ENV_BYTES: usize = 64;
 const SYMBOL_BYTES: usize = 32;
 const STRING_BYTES: usize = 40;
+/// One dense element (a `Value`).
+pub(crate) const ELEMENT_BYTES: usize = 16;
+/// One shape-described property slot.
+pub(crate) const SLOT_BYTES: usize = 24;
+/// One dictionary-mode property, or one sparse element.
+pub(crate) const DICT_ENTRY_BYTES: usize = 48;
 
 pub struct Heap {
     pub objects: Arena<ObjectData>,
@@ -246,10 +257,20 @@ impl Heap {
         self.allocated_since_gc >= self.gc_threshold
     }
 
+    /// Count `bytes` of storage that grew inside an existing heap value
+    /// (elements, slots, a dictionary, a flattened string) towards the next
+    /// collection and the memory limit.
+    #[inline]
+    pub fn note_growth(&mut self, bytes: usize) {
+        self.allocated_since_gc += bytes;
+    }
+
     // ---- objects -----------------------------------------------------------
 
+    /// An object arrives with whatever elements and slots its creator
+    /// filled in (array literals, `new_array`), so that storage counts here.
     pub fn alloc_object(&mut self, data: ObjectData) -> ObjId {
-        self.allocated_since_gc += OBJECT_BYTES;
+        self.allocated_since_gc += OBJECT_BYTES + data.extra_bytes();
         ObjId(self.objects.alloc(data))
     }
 
@@ -419,6 +440,8 @@ impl Heap {
             Repr::Rope { len, one_byte, .. } => (*len as usize, *one_byte),
             _ => return,
         };
+        // The flat buffer is new storage; the rope node counted 16 bytes.
+        self.note_growth(if one_byte { len } else { len * 2 });
         // Collect leaves left to right.
         let mut stack = vec![id];
         if one_byte {
