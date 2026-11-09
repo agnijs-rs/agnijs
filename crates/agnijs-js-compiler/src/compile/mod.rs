@@ -1208,7 +1208,8 @@ impl<'a> Compiler<'a> {
             debug: DebugInfo {
                 statements: fs.statements,
                 locals: fs.locals,
-            },
+            }
+            .into(),
         })
     }
 

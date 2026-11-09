@@ -169,6 +169,59 @@ fn stepping_over_into_and_out_stops_at_statement_starts() {
     assert_eq!(run(&mut *d, realm, "check.js", "out"), Value::Number(10.0));
 }
 
+/// Precompiled code carries its debug info in the container and decodes it
+/// when the debugger first needs it: breakpoints resolve, pauses report the
+/// statement's position, locals are named and stepping stops at statements.
+#[test]
+fn a_precompiled_script_pauses_steps_and_shows_locals_like_source() {
+    let (mut d, client, realm) = debuggee();
+    let bytes = d.engine().compile_script(realm, "add.js", ADD).unwrap();
+    let (id, resolved) = d.set_breakpoint(at_line("add.js", 2));
+    assert!(resolved.is_empty());
+    client.on_pause(move |_d, p| {
+        assert!(matches!(&p.reason, PauseReason::Breakpoint(ids) if ids == &[id]));
+        assert_eq!(p.frames[0].function_name, "add");
+        assert_eq!((p.frames[1].location.line, p.frames[1].location.column), (4, 20));
+        let local = &p.frames[0].scopes[0];
+        assert_eq!(var(local, "a"), Some(Value::Number(2.0)));
+        assert_eq!(var(local, "sum"), Some(Value::Number(5.0)));
+        ResumeAction::Continue
+    });
+    d.engine().eval_bytecode(realm, &bytes).unwrap();
+    assert_eq!(client.pauses(), vec![("add".to_string(), 2, 2)]);
+    assert_eq!(run(&mut *d, realm, "check.js", "result"), Value::Number(5.0));
+    let script = d.scripts().iter().find(|s| s.url == "add.js").unwrap().id;
+    let lines: Vec<u32> = d
+        .breakable_locations(Location { script, line: 0, column: 0 }, None)
+        .iter()
+        .map(|l| l.line)
+        .collect();
+    assert_eq!(lines, vec![0, 1, 2], "the same lines as a source run");
+
+    // Stepping through precompiled code stops where the source run does.
+    let (mut d, client, realm) = debuggee();
+    let bytes = d.engine().compile_script(realm, "steps.js", STEPS).unwrap();
+    client.on_pause(|_d, _p| ResumeAction::StepOver);
+    client.on_pause(|_d, _p| ResumeAction::StepInto);
+    client.on_pause(|_d, p| {
+        assert_eq!(var(&p.frames[0].scopes[0], "x"), Some(Value::Number(1.0)));
+        ResumeAction::StepOut
+    });
+    client.on_pause(|_d, _p| ResumeAction::StepOver);
+    client.on_pause(|_d, _p| ResumeAction::Continue);
+    d.engine().eval_bytecode(realm, &bytes).unwrap();
+    assert_eq!(
+        client.pauses(),
+        vec![
+            ("outer".to_string(), 5, 2),
+            ("outer".to_string(), 6, 2),
+            ("inner".to_string(), 1, 2),
+            ("outer".to_string(), 7, 2),
+            ("outer".to_string(), 8, 2),
+        ]
+    );
+}
+
 #[test]
 fn a_step_that_runs_off_the_end_of_the_script_does_not_leak_into_the_next() {
     let (mut d, client, realm) = debuggee();

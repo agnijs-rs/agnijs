@@ -33,7 +33,7 @@ fn eval(e: &mut dyn Engine, realm: RealmId, src: &str) -> Value {
 fn the_engine_names_its_bytecode_format_and_uses_the_shared_container() {
     let (_host, mut e, realm) = engine();
     // Pins the tag on purpose: bumping it must be a visible change (ADR 0010).
-    assert_eq!(FORMAT, "agnijs-bc-3");
+    assert_eq!(FORMAT, "agnijs-bc-4");
     assert_eq!(e.info().bytecode_format, FORMAT);
     let bytes = e.compile_script(realm, "a.js", "1 + 1").unwrap();
     assert!(bytecode::unwrap(FORMAT, &bytes).is_ok());
@@ -167,11 +167,70 @@ fn a_future_format_of_this_engine_is_a_version_mismatch() {
     let (_host, mut e, realm) = engine();
     let bytes = e.compile_script(realm, "a.js", "1").unwrap();
     let payload = bytecode::unwrap(FORMAT, &bytes).unwrap().to_vec();
-    let newer = bytecode::wrap("agnijs-bc-4", &payload);
+    let newer = bytecode::wrap("agnijs-bc-5", &payload);
     assert!(matches!(
         e.eval_bytecode(realm, &newer),
-        Err(Error::BytecodeMismatch { found, .. }) if found == "agnijs-bc-4"
+        Err(Error::BytecodeMismatch { found, .. }) if found == "agnijs-bc-5"
     ));
+}
+
+/// A container whose debug section (statement starts, locals) is malformed
+/// but whose checksum is right: the section is decoded only when a debugger
+/// needs it, so the code runs, and a debugger that is attached when the
+/// bytes are loaded verifies the section then and refuses the container.
+fn container_with_a_bad_debug_section() -> Vec<u8> {
+    use agnijs_js_compiler::{compile_script, DebugSection};
+    let code = compile_script(
+        "function f(x) { let y = x + 1; return y; }\nglobalThis.ran = f(1);",
+        "bad.js",
+    )
+    .unwrap();
+    let mut owned = Rc::try_unwrap(code).expect("sole owner");
+    let mut debug = std::mem::take(&mut owned.debug).into_info().unwrap();
+    debug.statements.push(agnijs_js_compiler::StatementStart {
+        pc: owned.instrs.len() as u32,
+        offset: 0,
+    });
+    owned.debug = DebugSection::from(debug);
+    agnijs_js_vm::engine::encode_bytecode(false, &owned)
+}
+
+#[test]
+fn a_malformed_debug_section_does_not_stop_the_code_from_running() {
+    let (_host, mut e, realm) = engine();
+    e.eval_bytecode(realm, &container_with_a_bad_debug_section())
+        .unwrap_or_else(|err| panic!("{err}"));
+    assert_eq!(eval(&mut *e, realm, "ran"), Value::Number(2.0));
+    let err = e.eval_script(realm, "t.js", "f(null); f.x.y").unwrap_err();
+    let exc = err.exception().expect("exception");
+    assert_eq!(exc.name, "TypeError");
+    assert_eq!((exc.stack[0].script.as_str(), exc.stack[0].line), ("t.js", 1));
+}
+
+#[test]
+fn an_attached_debugger_refuses_a_malformed_debug_section_at_load() {
+    use agnijs_js_debugger::*;
+    struct Quiet;
+    impl DebugClient for Quiet {
+        fn paused(&self, _: &mut dyn Debuggee, _: &PauseInfo) -> ResumeAction {
+            ResumeAction::Continue
+        }
+    }
+    let mut d = agnijs_js_vm::make_debuggee(TestHost::new());
+    d.attach(Rc::new(Quiet));
+    let realm = d.engine().main_realm();
+    match d
+        .engine()
+        .eval_bytecode(realm, &container_with_a_bad_debug_section())
+    {
+        Err(Error::BytecodeCorrupt(m)) => assert!(m.contains("statement"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        eval(d.engine(), realm, "typeof ran"),
+        Value::string("undefined"),
+        "nothing ran from a refused container"
+    );
 }
 
 /// The M2 source-payload container (ADR 0010): a 4-byte magic, `agnijs-bc-1`,

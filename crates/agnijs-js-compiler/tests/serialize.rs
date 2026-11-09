@@ -2,7 +2,7 @@
 //! unchanged, and bad input is refused with an error instead of a panic.
 
 use agnijs_js_compiler::serialize::{decode, encode, DecodeError};
-use agnijs_js_compiler::{compile_module, compile_script, CodeBlock, Instr};
+use agnijs_js_compiler::{compile_module, compile_script, CodeBlock, DebugInfo, DebugSection, Instr};
 use std::rc::Rc;
 
 /// The compiler's own output, printed in full, is the reference: a decoded
@@ -85,30 +85,169 @@ fn inline_caches_start_empty_after_decode() {
         .all(|c| c.get() == agnijs_js_compiler::IcEntry::EMPTY));
 }
 
+/// The compiler's debug info for `code`, taken out of its section.
+fn debug_of(code: CodeBlock) -> (CodeBlock, DebugInfo) {
+    let mut code = code;
+    let info = std::mem::take(&mut code.debug).into_info().expect("compiled debug info");
+    (code, info)
+}
+
 #[test]
 fn debug_info_round_trips_including_backward_offsets_and_multi_byte_values() {
     let code = compile_script("let a = 1;\nlet b = a + 1;\nb;", "d.js").unwrap();
-    let mut owned = Rc::try_unwrap(code).expect("sole owner");
-    assert!(owned.debug.statements.len() >= 3);
+    let (mut owned, mut debug) = debug_of(Rc::try_unwrap(code).expect("sole owner"));
+    assert!(debug.statements.len() >= 3);
     // A statement that starts before the one ahead of it (a negative
     // delta), and a position whose delta takes three LEB128 bytes.
     let len = owned.instrs.len() as u32;
-    owned.debug.statements[1].offset = 0;
+    debug.statements[1].offset = 0;
     owned.source = Rc::new(agnijs_js_compiler::SourceText {
         name: owned.source.name.clone(),
         text: format!("{}{}", owned.source.text, " ".repeat(300_000)).into(),
     });
-    let last = owned.debug.statements.len() - 1;
-    owned.debug.statements[last].offset = 299_999;
-    owned.debug.locals.push(agnijs_js_compiler::LocalVar {
+    let last = debug.statements.len() - 1;
+    debug.statements[last].offset = 299_999;
+    debug.locals.push(agnijs_js_compiler::LocalVar {
         name: "late".into(),
         reg: 0,
         start: len - 1,
         end: len,
     });
+    owned.debug = DebugSection::from(debug.clone());
     let back = decode(&encode(&owned)).unwrap();
-    assert_eq!(back.debug.statements, owned.debug.statements);
-    assert_eq!(format!("{:?}", back.debug.locals), format!("{:?}", owned.debug.locals));
+    let got = back.debug.get().unwrap();
+    assert_eq!(got.statements, debug.statements);
+    assert_eq!(format!("{:?}", got.locals), format!("{:?}", debug.locals));
+}
+
+/// Every pool whose count is in the payload, recursively.
+fn check_exact_capacity(code: &CodeBlock, path: &str) {
+    fn exact<T>(v: &Vec<T>, what: &str, path: &str) {
+        assert_eq!(v.capacity(), v.len(), "{path}: {what} over-allocated");
+    }
+    exact(&code.instrs, "instrs", path);
+    exact(&code.offsets, "offsets", path);
+    exact(&code.constants, "constants", path);
+    exact(&code.names, "names", path);
+    exact(&code.param_names, "param_names", path);
+    exact(&code.functions, "functions", path);
+    exact(&code.scopes, "scopes", path);
+    for (i, s) in code.scopes.iter().enumerate() {
+        exact(&s.bindings, &format!("scopes[{i}].bindings"), path);
+    }
+    exact(&code.handlers, "handlers", path);
+    if let Some(d) = &code.declarations {
+        exact(&d.var_names, "declarations.var_names", path);
+        exact(&d.functions, "declarations.functions", path);
+        exact(&d.lexical, "declarations.lexical", path);
+        exact(&d.annex_b_functions, "declarations.annex_b_functions", path);
+    }
+    if let Some(m) = &code.module {
+        exact(&m.requested, "module.requested", path);
+        for (i, q) in m.requested.iter().enumerate() {
+            exact(&q.attributes, &format!("module.requested[{i}].attributes"), path);
+        }
+        exact(&m.imports, "module.imports", path);
+        exact(&m.local_exports, "module.local_exports", path);
+        exact(&m.indirect_exports, "module.indirect_exports", path);
+        exact(&m.star_exports, "module.star_exports", path);
+    }
+    for k in &code.constants {
+        if let agnijs_js_compiler::Constant::Template(t) = k {
+            exact(&t.cooked, "template.cooked", path);
+            exact(&t.raw, "template.raw", path);
+        }
+    }
+    let d = code.debug.get().unwrap();
+    exact(&d.statements, "debug.statements", path);
+    exact(&d.locals, "debug.locals", path);
+    for (i, f) in code.functions.iter().enumerate() {
+        check_exact_capacity(f, &format!("{path}/{}[{i}]", f.name));
+    }
+}
+
+#[test]
+fn decoding_allocates_every_pool_at_its_final_size() {
+    for (src, name, module) in [
+        (SCRIPT, "all.js", false),
+        (
+            "import d, { x as y } from './dep.js' with { type: 'json' };\n\
+             export * from 'star'; export { y as z }; export { w } from 'w';\n\
+             export default function f(a, b) { let c = a; { let e = b; c += e; } return c; }",
+            "m.js",
+            true,
+        ),
+    ] {
+        let code = if module {
+            compile_module(src, name).unwrap()
+        } else {
+            compile_script(src, name).unwrap()
+        };
+        let back = decode(&encode(&code)).unwrap();
+        check_exact_capacity(&back, name);
+    }
+}
+
+#[test]
+fn debug_info_is_decoded_on_first_use_not_at_load() {
+    let code = compile_script("let a = 1;\nfunction f(x) { let y = x; return y; }\nf(a);", "lazy.js").unwrap();
+    assert!(code.debug.is_decoded(), "the compiler's own info is already decoded");
+    let back = decode(&encode(&code)).unwrap();
+    assert!(!back.debug.is_decoded(), "loading must not decode the debug section");
+    assert!(!back.functions[0].debug.is_decoded());
+    // Stepping asks whether a pc starts a statement; that is the first use.
+    let first = code.debug.get().unwrap().statements[0].pc as usize;
+    assert!(back.debug.is_statement(first));
+    assert!(back.debug.is_decoded());
+    assert!(!back.functions[0].debug.is_decoded(), "each block decodes on its own");
+    let inner = back.functions[0].debug.get().unwrap();
+    assert_eq!(inner.locals.iter().map(|l| &*l.name).collect::<Vec<_>>(), ["x", "y"]);
+    assert_eq!(
+        back.debug.get().unwrap().statements,
+        code.debug.get().unwrap().statements
+    );
+}
+
+#[test]
+fn a_malformed_debug_section_loads_and_is_refused_at_first_use() {
+    let tampers: [(&str, fn(&mut DebugInfo, &CodeBlock)); 5] = [
+        ("out of order", |d, _| d.statements.swap(0, 1)),
+        ("past the block", |d, c| d.statements[0].pc = c.instrs.len() as u32),
+        ("past the text", |d, c| d.statements[0].offset = c.source.text.len() as u32 + 1),
+        ("register", |d, c| {
+            d.locals.push(agnijs_js_compiler::LocalVar {
+                name: "bad".into(),
+                reg: c.register_count,
+                start: 0,
+                end: 1,
+            })
+        }),
+        ("range", |d, c| {
+            d.locals.push(agnijs_js_compiler::LocalVar {
+                name: "bad".into(),
+                reg: 0,
+                start: 0,
+                end: c.instrs.len() as u32 + 1,
+            })
+        }),
+    ];
+    for (what, tamper) in tampers {
+        let code = compile_script("let a = 1;\nlet b = a + 1;\nb;", "bad.js").unwrap();
+        let (mut owned, mut debug) = debug_of(Rc::try_unwrap(code).expect("sole owner"));
+        tamper(&mut debug, &owned);
+        owned.debug = DebugSection::from(debug);
+        let back = decode(&encode(&owned)).unwrap_or_else(|e| panic!("{what}: load refused: {e}"));
+        assert_eq!(back.instrs, owned.instrs, "{what}: the code itself is intact");
+        assert!(
+            matches!(back.debug.get(), Err(DecodeError::Invalid(_))),
+            "{what}: {:?}",
+            back.debug.get()
+        );
+        // The verdict is kept, and the debugger sees no statements or locals.
+        assert!(back.debug.get().is_err(), "{what}");
+        assert!(!back.debug.is_statement(0), "{what}");
+        assert!(back.debug.statements().is_empty() && back.debug.locals().is_empty(), "{what}");
+    }
 }
 
 #[test]

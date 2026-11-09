@@ -550,7 +550,7 @@ impl Vm {
         let code = &self.frames[fi].code;
         let mut seen: Vec<Rc<str>> = Vec::new();
         let mut out = Vec::new();
-        for l in code.debug.locals.iter().rev() {
+        for l in code.debug.locals().iter().rev() {
             if (l.start as usize) <= pc && pc < l.end as usize && !seen.contains(&l.name) {
                 seen.push(l.name.clone());
                 out.push((l.name.clone(), l.reg));
@@ -950,12 +950,9 @@ impl Vm {
 /// The source offset reported for instruction `pc`: its statement's start
 /// when it begins one.
 fn source_offset(code: &CodeBlock, pc: usize) -> usize {
-    match code
-        .debug
-        .statements
-        .binary_search_by_key(&(pc as u32), |s| s.pc)
-    {
-        Ok(i) => code.debug.statements[i].offset as usize,
+    let statements = code.debug.statements();
+    match statements.binary_search_by_key(&(pc as u32), |s| s.pc) {
+        Ok(i) => statements[i].offset as usize,
         Err(_) => code.offset_at(pc) as usize,
     }
 }
@@ -978,7 +975,7 @@ fn resolve(rec: &ScriptRecord, spec: &BreakpointSpec) -> Option<(usize, Vec<(usi
     let mut best: Option<usize> = None;
     let mut sites = Vec::new();
     for code in rec.blocks() {
-        for s in &code.debug.statements {
+        for s in code.debug.statements() {
             let (pc, off) = (s.pc, s.offset as usize);
             if off < target {
                 continue;
@@ -1123,7 +1120,7 @@ impl Debuggee for Vm {
             .iter()
             .flat_map(|c| {
                 c.debug
-                    .statements
+                    .statements()
                     .iter()
                     .map(|s| s.offset as usize)
                     .collect::<Vec<_>>()

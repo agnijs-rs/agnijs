@@ -240,6 +240,9 @@ impl Vm {
                     }
                     Err(e) => return self.type_error(&format!("{e:?}")),
                 };
+                if let Err(e) = self.verify_debug_sections(&code) {
+                    return self.type_error(&format!("{e:?}"));
+                }
                 self.new_module_record(realm, &resolved, Some(code), None)
             }
             ModuleSource::Json(text) => {

@@ -2,10 +2,10 @@
 //! the interface, host functions and objects, and the bytecode container.
 //!
 //! Bytecode container (ADR 0010): the shared `AGJS` container with the
-//! `agnijs-bc-3` tag around a kind byte and the serialised code tree, so
-//! loading precompiled code skips parsing and compiling. Any other container,
-//! including the M2 source-payload container, is rejected; the host
-//! recompiles from source.
+//! `agnijs-bc-4` tag around a kind byte, a checksum and the serialised code
+//! tree, so loading precompiled code skips parsing and compiling. Any other
+//! container, including the M2 source-payload container, is rejected; the
+//! host recompiles from source.
 
 use crate::object::{CallArgs, Class, HostObjectData, NativeData, NativeKind, ObjectData};
 use crate::realm::Intrinsic;
@@ -23,7 +23,7 @@ use std::rc::Rc;
 /// a kind byte, then the serialised code tree (`agnijs_js_compiler::serialize`).
 /// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
 /// constant pool or the serialiser's layout changes it.
-pub const FORMAT: &str = "agnijs-bc-3";
+pub const FORMAT: &str = "agnijs-bc-4";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;
@@ -33,16 +33,49 @@ pub enum Decoded {
     Module(Rc<CodeBlock>),
 }
 
-/// 64-bit FNV-1a: detects accidental damage (truncated downloads, bad
-/// disks, a bundler that rewrote bytes) before the tree is decoded. It is
-/// not a signature; bytecode is code, trusted as far as source would be.
+/// 64-bit FNV-1a over little-endian 64-bit words (the last word zero-padded,
+/// then the length): detects accidental damage (truncated downloads, bad
+/// disks, a bundler that rewrote bytes) before the tree is decoded. Each step
+/// multiplies by an odd constant, a bijection on `u64`, so two inputs that
+/// differ in one word never collide; words instead of bytes make it eight
+/// times shorter as a dependency chain. It is not a signature; bytecode is
+/// code, trusted as far as source would be.
 fn checksum(kind: u8, tree: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in std::iter::once(&kind).chain(tree) {
-        h ^= *b as u64;
-        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ kind as u64;
+    h = h.wrapping_mul(PRIME);
+    let mut words = tree.chunks_exact(8);
+    for w in &mut words {
+        h ^= u64::from_le_bytes(w.try_into().unwrap());
+        h = h.wrapping_mul(PRIME);
     }
-    h
+    let rest = words.remainder();
+    if !rest.is_empty() {
+        let mut last = [0u8; 8];
+        last[..rest.len()].copy_from_slice(rest);
+        h ^= u64::from_le_bytes(last);
+        h = h.wrapping_mul(PRIME);
+    }
+    (h ^ tree.len() as u64).wrapping_mul(PRIME)
+}
+
+impl Vm {
+    /// With a debugger attached, the debug sections of a loaded tree are
+    /// decoded and verified at load, so a malformed one is refused the way
+    /// the rest of the payload is instead of surfacing later as missing
+    /// statements or locals. Without one, they decode on first use.
+    pub(crate) fn verify_debug_sections(&self, code: &CodeBlock) -> Result<(), Error> {
+        if self.debug.is_none() {
+            return Ok(());
+        }
+        fn walk(code: &CodeBlock) -> Result<(), Error> {
+            code.debug
+                .get()
+                .map_err(|e| Error::BytecodeCorrupt(format!("{}: {e}", code.name)))?;
+            code.functions.iter().try_for_each(|f| walk(f))
+        }
+        walk(code)
+    }
 }
 
 /// Payload: kind byte, checksum of kind and tree (u64 LE), tree.
@@ -452,7 +485,11 @@ impl Engine for Vm {
 
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> api::Result<api::Value> {
         self.check_realm(realm)?;
-        match decode_bytecode(bytecode, false)? {
+        let decoded = decode_bytecode(bytecode, false)?;
+        match &decoded {
+            Decoded::Script(code) | Decoded::Module(code) => self.verify_debug_sections(code)?,
+        }
+        match decoded {
             Decoded::Script(code) => {
                 self.note_script(&code, agnijs_js_debugger::ScriptKind::Script, realm);
                 let v = self.enter(realm, |vm| vm.run_script(code))?;

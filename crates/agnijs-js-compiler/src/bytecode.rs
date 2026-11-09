@@ -10,9 +10,11 @@
 //! environments reached through `(depth, slot)` pairs; globals and names
 //! under `with` or direct `eval` are looked up dynamically by name.
 
+use crate::serialize::DecodeError;
 use agnijs_js_parser::ast::FunctionKind;
 use agnijs_js_parser::span::Span;
-use std::cell::Cell;
+use std::cell::{Cell, OnceCell};
+use std::fmt;
 use std::rc::Rc;
 
 /// A register index in the current frame.
@@ -760,7 +762,105 @@ pub struct CodeBlock {
     /// Inline caches, one per GetNamed / SetNamed site; filled by the VM.
     pub ic: Box<[Cell<IcEntry>]>,
     /// Statement starts and register-resident bindings, for the debugger.
-    pub debug: DebugInfo,
+    /// A loaded block decodes them on first use.
+    pub debug: DebugSection,
+}
+
+/// A block's [`DebugInfo`]: the compiler's own, or the packed section of a
+/// loaded payload, decoded and verified the first time a debugger asks
+/// (stepping, locals, breakpoint resolution, pause positions). Nothing on
+/// the run path reads it: stack traces use `offsets`. The verdict of the
+/// decode is kept, so a malformed section costs one failed decode and then
+/// reads as no debug info.
+pub struct DebugSection {
+    info: OnceCell<Result<DebugInfo, DecodeError>>,
+    packed: Cell<Option<PackedDebugInfo>>,
+}
+
+/// The undecoded debug section of a loaded block, with what its verifier
+/// needs about the block.
+pub struct PackedDebugInfo {
+    pub(crate) bytes: Box<[u8]>,
+    pub(crate) strs: Rc<[Rc<str>]>,
+    pub(crate) instr_count: u32,
+    pub(crate) register_count: u16,
+    pub(crate) text_len: u32,
+}
+
+impl DebugSection {
+    /// A section still to be decoded.
+    pub(crate) fn packed(p: PackedDebugInfo) -> DebugSection {
+        DebugSection {
+            info: OnceCell::new(),
+            packed: Cell::new(Some(p)),
+        }
+    }
+
+    /// The decoded info, or why the section was refused. Decodes on the
+    /// first call; later calls return the same verdict.
+    pub fn get(&self) -> Result<&DebugInfo, DecodeError> {
+        self.info
+            .get_or_init(|| match self.packed.take() {
+                Some(p) => crate::serialize::decode_debug_info(&p),
+                None => Ok(DebugInfo::default()),
+            })
+            .as_ref()
+            .map_err(Clone::clone)
+    }
+
+    /// Whether `get` has run (or the info was the compiler's).
+    pub fn is_decoded(&self) -> bool {
+        self.info.get().is_some()
+    }
+
+    /// Statement starts, by ascending instruction index; empty when the
+    /// section was refused.
+    pub fn statements(&self) -> &[StatementStart] {
+        self.get().map(|d| &d.statements[..]).unwrap_or(&[])
+    }
+
+    /// Register bindings in declaration order; empty when the section was
+    /// refused.
+    pub fn locals(&self) -> &[LocalVar] {
+        self.get().map(|d| &d.locals[..]).unwrap_or(&[])
+    }
+
+    /// Whether instruction `pc` starts a statement.
+    pub fn is_statement(&self, pc: usize) -> bool {
+        self.get().map(|d| d.is_statement(pc)).unwrap_or(false)
+    }
+
+    /// The info, decoding it if needed, by value.
+    pub fn into_info(self) -> Result<DebugInfo, DecodeError> {
+        self.get()?;
+        self.info.into_inner().expect("decoded above")
+    }
+}
+
+impl From<DebugInfo> for DebugSection {
+    fn from(info: DebugInfo) -> DebugSection {
+        DebugSection {
+            info: OnceCell::from(Ok(info)),
+            packed: Cell::new(None),
+        }
+    }
+}
+
+impl Default for DebugSection {
+    fn default() -> DebugSection {
+        DebugInfo::default().into()
+    }
+}
+
+/// Prints the decoded info (decoding it), so a loaded tree prints like the
+/// compiled one.
+impl fmt::Debug for DebugSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.get() {
+            Ok(d) => d.fmt(f),
+            Err(e) => f.debug_struct("DebugInfo").field("error", &e).finish(),
+        }
+    }
 }
 
 /// What a debugger needs beyond `offsets`: where statements start (the

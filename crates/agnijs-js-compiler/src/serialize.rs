@@ -10,8 +10,19 @@
 //! - the root code block, with nested functions inline, every string an
 //!   index into the tables.
 //!
+//! Within a block the pools an instruction can index (constants, names,
+//! scopes, the counts of nested functions and inline caches) come before
+//! the instructions, so each instruction is verified as it is decoded, in
+//! one pass. Every count is written ahead of its items and the decoder
+//! allocates each pool at its final size.
+//!
 //! Inline caches are runtime state (shape ids of one heap), so only their
 //! count is stored and they start empty.
+//!
+//! The debug section (statement starts and register-resident locals) is
+//! prefixed by its byte length. Loading skips it and keeps the bytes in the
+//! block's [`DebugSection`], which decodes and verifies them the first time
+//! a debugger asks; nothing on the run path needs them.
 //!
 //! One instruction table ([`instr_table!`]) drives the encoder, the decoder
 //! and the verifier, so an instruction cannot be added to one and missed by
@@ -68,6 +79,17 @@ fn invalid<T>(m: impl Into<String>) -> Result<T> {
 
 /// Nested functions deeper than this are refused (decoding recurses).
 pub const MAX_NESTING: usize = 256;
+
+/// `n` items read by `f`, in a vector allocated once at its final size.
+/// (`(0..n).map(f).collect::<Result<Vec<_>>>()` cannot reserve: the
+/// `Result` adapter reports a lower bound of zero, so the vector grows.)
+fn collect_n<T>(n: usize, mut f: impl FnMut() -> Result<T>) -> Result<Vec<T>> {
+    let mut out = Vec::with_capacity(n);
+    for _ in 0..n {
+        out.push(f()?);
+    }
+    Ok(out)
+}
 
 // ---- writer and reader --------------------------------------------------------------------------
 
@@ -152,7 +174,9 @@ impl Writer {
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
-    strs: Vec<Rc<str>>,
+    /// Shared with every block's packed debug section, whose locals name
+    /// strings by index.
+    strs: Rc<[Rc<str>]>,
     units: Vec<Rc<[u16]>>,
     sources: Vec<Rc<SourceText>>,
 }
@@ -219,7 +243,7 @@ impl<'a> Reader<'a> {
     }
     fn strs(&mut self) -> Result<Vec<Rc<str>>> {
         let n = self.count(4)?;
-        (0..n).map(|_| self.str()).collect()
+        collect_n(n, || self.str())
     }
     fn units(&mut self) -> Result<Rc<[u16]>> {
         let i = self.u32()? as usize;
@@ -355,10 +379,18 @@ wire_enum!(BindingKind {
 
 // ---- the instruction table ----------------------------------------------------------------------
 
-/// Checks operands against the pools of the block being decoded. Each
-/// method is named after an operand kind in the instruction table.
+/// Checks operands against the pools of the block being decoded, which are
+/// all read before its instructions. Each method is named after an operand
+/// kind in the instruction table.
 struct Verifier<'a> {
-    code: &'a CodeBlock,
+    register_count: Reg,
+    constants: &'a [Constant],
+    names: usize,
+    functions: usize,
+    scopes: usize,
+    ic: usize,
+    /// The block's instruction count (jump targets).
+    len: usize,
     pc: usize,
 }
 
@@ -367,17 +399,17 @@ impl Verifier<'_> {
         Ok(())
     }
     fn reg(&mut self, r: Reg) -> Result<()> {
-        if r < self.code.register_count {
+        if r < self.register_count {
             Ok(())
         } else {
             invalid(format!(
                 "register r{r} at pc {} beyond {} registers",
-                self.pc, self.code.register_count
+                self.pc, self.register_count
             ))
         }
     }
     fn constant(&self, c: ConstIdx) -> Result<&Constant> {
-        match self.code.constants.get(c as usize) {
+        match self.constants.get(c as usize) {
             Some(k) => Ok(k),
             None => invalid(format!("constant {c} at pc {} out of range", self.pc)),
         }
@@ -406,28 +438,28 @@ impl Verifier<'_> {
         }
     }
     fn name(&mut self, n: NameIdx) -> Result<()> {
-        if (n as usize) < self.code.names.len() {
+        if (n as usize) < self.names {
             Ok(())
         } else {
             invalid(format!("name {n} at pc {} out of range", self.pc))
         }
     }
     fn func(&mut self, f: FuncIdx) -> Result<()> {
-        if (f as usize) < self.code.functions.len() {
+        if (f as usize) < self.functions {
             Ok(())
         } else {
             invalid(format!("function {f} at pc {} out of range", self.pc))
         }
     }
     fn scope(&mut self, s: ScopeIdx) -> Result<()> {
-        if (s as usize) < self.code.scopes.len() {
+        if (s as usize) < self.scopes {
             Ok(())
         } else {
             invalid(format!("scope {s} at pc {} out of range", self.pc))
         }
     }
     fn ic(&mut self, i: IcIdx) -> Result<()> {
-        if i == NO_IC || (i as usize) < self.code.ic.len() {
+        if i == NO_IC || (i as usize) < self.ic {
             Ok(())
         } else {
             invalid(format!("inline cache {i} at pc {} out of range", self.pc))
@@ -435,7 +467,7 @@ impl Verifier<'_> {
     }
     fn off(&mut self, o: Offset) -> Result<()> {
         let target = self.pc as i64 + o as i64;
-        if target >= 0 && (target as usize) < self.code.instrs.len() {
+        if target >= 0 && (target as usize) < self.len {
             Ok(())
         } else {
             invalid(format!(
@@ -446,12 +478,12 @@ impl Verifier<'_> {
     }
     /// `count` registers from `base`.
     fn range(&mut self, base: Reg, count: u16) -> Result<()> {
-        if base as u32 + count as u32 <= self.code.register_count as u32 {
+        if base as u32 + count as u32 <= self.register_count as u32 {
             Ok(())
         } else {
             invalid(format!(
                 "register range r{base}..+{count} at pc {} beyond {} registers",
-                self.pc, self.code.register_count
+                self.pc, self.register_count
             ))
         }
     }
@@ -669,9 +701,9 @@ fn get_constant(r: &mut Reader) -> Result<Constant> {
         }
         3 => {
             let n = r.count(1)?;
-            let cooked = (0..n).map(|_| r.opt_units()).collect::<Result<_>>()?;
+            let cooked = collect_n(n, || r.opt_units())?;
             let n = r.count(4)?;
-            let raw = (0..n).map(|_| r.units()).collect::<Result<_>>()?;
+            let raw = collect_n(n, || r.units())?;
             Constant::Template(Rc::new(TemplateConstant { cooked, raw }))
         }
         t => return invalid(format!("constant tag {t}")),
@@ -740,9 +772,7 @@ fn get_module(r: &mut Reader) -> Result<ModuleInfo> {
     for _ in 0..n {
         let specifier = r.units()?;
         let k = r.count(8)?;
-        let attributes = (0..k)
-            .map(|_| Ok((r.units()?, r.units()?)))
-            .collect::<Result<_>>()?;
+        let attributes = collect_n(k, || Ok((r.units()?, r.units()?)))?;
         requested.push(ModuleRequest {
             specifier,
             attributes,
@@ -768,7 +798,7 @@ fn get_module(r: &mut Reader) -> Result<ModuleInfo> {
     let mut exports = [Vec::new(), Vec::new()];
     for list in exports.iter_mut() {
         let k = r.count(4)?;
-        for _ in 0..k {
+        *list = collect_n(k, || {
             let export_name = r.opt_units()?;
             let request = if r.bool()? {
                 Some(in_requests(r.u32()? as usize)?)
@@ -777,19 +807,17 @@ fn get_module(r: &mut Reader) -> Result<ModuleInfo> {
             };
             let import_name = r.opt_units()?;
             let local_name = if r.bool()? { Some(r.str()?) } else { None };
-            list.push(ExportEntry {
+            Ok(ExportEntry {
                 export_name,
                 request,
                 import_name,
                 local_name,
-            });
-        }
+            })
+        })?;
     }
     let [local_exports, indirect_exports] = exports;
     let k = r.count(4)?;
-    let star_exports = (0..k)
-        .map(|_| in_requests(r.u32()? as usize))
-        .collect::<Result<_>>()?;
+    let star_exports = collect_n(k, || in_requests(r.u32()? as usize))?;
     Ok(ModuleInfo {
         requested,
         imports,
@@ -800,6 +828,11 @@ fn get_module(r: &mut Reader) -> Result<ModuleInfo> {
     })
 }
 
+/// Block layout: the scalars, then every pool an instruction indexes
+/// (constants, names, scopes), the declarations, source, span and module
+/// record, the inline-cache and nested-function counts, then the
+/// instructions and their offsets, the handlers, the debug section, and
+/// last the nested blocks.
 fn put_block(w: &mut Writer, c: &CodeBlock) {
     w.str(&c.name);
     c.kind.put(w);
@@ -812,24 +845,11 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
     w.u16(c.param_regs);
     w.strs(&c.param_names);
     w.u8(c.keeps_arguments as u8);
-    w.len(c.instrs.len());
-    for i in &c.instrs {
-        put_instr(w, *i);
-    }
-    w.len(c.offsets.len());
-    for o in &c.offsets {
-        w.u32(*o);
-    }
-    put_debug_info(w, &c.debug);
     w.len(c.constants.len());
     for k in &c.constants {
         put_constant(w, k);
     }
     w.strs(&c.names);
-    w.len(c.functions.len());
-    for f in &c.functions {
-        put_block(w, f);
-    }
     w.len(c.scopes.len());
     for s in &c.scopes {
         s.kind.put(w);
@@ -839,13 +859,6 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
             k.put(w);
         }
         w.u8(s.is_var_scope as u8);
-    }
-    w.len(c.handlers.len());
-    for h in &c.handlers {
-        w.u32(h.start);
-        w.u32(h.end);
-        w.u32(h.target);
-        w.u16(h.env_depth);
     }
     match &c.declarations {
         None => w.u8(0),
@@ -876,14 +889,38 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
         }
     }
     w.len(c.ic.len());
+    w.len(c.functions.len());
+    w.len(c.instrs.len());
+    for i in &c.instrs {
+        put_instr(w, *i);
+    }
+    w.len(c.offsets.len());
+    for o in &c.offsets {
+        w.u32(*o);
+    }
+    w.len(c.handlers.len());
+    for h in &c.handlers {
+        w.u32(h.start);
+        w.u32(h.end);
+        w.u32(h.target);
+        w.u16(h.env_depth);
+    }
+    put_debug_section(w, &c.debug);
+    for f in &c.functions {
+        put_block(w, f);
+    }
 }
 
 /// Debug info is most of a block's metadata by count, so it is packed:
 /// statement starts as deltas from the previous one (the instruction index
 /// as an unsigned delta, the source offset zigzag-encoded, since a
 /// statement can start before the one emitted ahead of it) and locals as
-/// (name index, register, start, length), all LEB128.
-fn put_debug_info(w: &mut Writer, d: &DebugInfo) {
+/// (name index, register, start, length), all LEB128. The section is
+/// prefixed by its byte length so a loader can skip it.
+fn put_debug_section(w: &mut Writer, d: &DebugSection) {
+    let at = w.out.len();
+    w.u32(0);
+    let d = d.get().expect("encoding a block whose debug section was refused");
     w.len(d.statements.len());
     let (mut pc, mut offset) = (0u32, 0u32);
     for s in &d.statements {
@@ -900,24 +937,41 @@ fn put_debug_info(w: &mut Writer, d: &DebugInfo) {
         w.var(l.start);
         w.var(l.end.saturating_sub(l.start));
     }
+    let len = u32::try_from(w.out.len() - at - 4).expect("debug section exceeds u32");
+    w.out[at..at + 4].copy_from_slice(&len.to_le_bytes());
 }
 
-/// Kept out of line so `get_block`'s instruction loop compiles as before.
-#[inline(never)]
-fn get_debug_info(r: &mut Reader) -> Result<DebugInfo> {
+/// Decode and verify a block's packed debug section ([`DebugSection::get`]
+/// calls this on first use). Statement starts must be ascending, inside
+/// the block and inside the source text; locals must name a register the
+/// block has and an instruction range inside it.
+pub(crate) fn decode_debug_info(p: &PackedDebugInfo) -> Result<DebugInfo> {
+    let mut r = Reader {
+        bytes: &p.bytes,
+        pos: 0,
+        strs: p.strs.clone(),
+        units: Vec::new(),
+        sources: Vec::new(),
+    };
+    let len = p.instr_count as usize;
     let n = r.count(2)?;
-    let mut statements = Vec::with_capacity(n);
+    let mut statements: Vec<StatementStart> = Vec::with_capacity(n);
     let (mut pc, mut offset) = (0u32, 0u32);
-    for _ in 0..n {
+    for i in 0..n {
         pc = pc.wrapping_add(r.var()?);
         let z = r.var()?;
         let delta = ((z >> 1) as i32) ^ -((z & 1) as i32);
         offset = offset.wrapping_add(delta as u32);
+        if pc as usize >= len
+            || offset > p.text_len
+            || (i > 0 && statements[i - 1].pc >= pc)
+        {
+            return invalid("statement starts out of order or outside the block");
+        }
         statements.push(StatementStart { pc, offset });
     }
     let n = r.count(4)?;
-    let mut locals = Vec::with_capacity(n);
-    for _ in 0..n {
+    let locals = collect_n(n, || {
         let name = r.var()? as usize;
         let name = r.str_at(name)?;
         let reg = u16::try_from(r.var()?)
@@ -926,7 +980,13 @@ fn get_debug_info(r: &mut Reader) -> Result<DebugInfo> {
         let end = start
             .checked_add(r.var()?)
             .ok_or_else(|| DecodeError::Invalid("local range overflows".into()))?;
-        locals.push(LocalVar { name, reg, start, end });
+        if reg >= p.register_count || end as usize > len {
+            return invalid(format!("local {name:?} outside the block"));
+        }
+        Ok(LocalVar { name, reg, start, end })
+    })?;
+    if r.pos != p.bytes.len() {
+        return Err(DecodeError::TrailingBytes);
     }
     Ok(DebugInfo { statements, locals })
 }
@@ -944,57 +1004,31 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
     let register_count = r.u16()?;
     let param_base = r.u16()?;
     let param_regs = r.u16()?;
+    if param_base as u32 + param_regs as u32 > register_count as u32 {
+        return invalid("parameter registers beyond the register count");
+    }
     let param_names = r.strs()?;
     let keeps_arguments = r.bool()?;
     let n = r.count(1)?;
-    let instrs = (0..n).map(|_| get_instr(r)).collect::<Result<Vec<_>>>()?;
-    let n = r.count(4)?;
-    let offsets = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>>>()?;
-    let debug = get_debug_info(r)?;
-    let n = r.count(1)?;
-    let constants = (0..n).map(|_| get_constant(r)).collect::<Result<_>>()?;
+    let constants = collect_n(n, || get_constant(r))?;
     let names = r.strs()?;
-    // A nested block is far larger than this; the bound only guards the
-    // allocation.
-    let n = r.count(16)?;
-    let functions = (0..n)
-        .map(|_| get_block(r, depth + 1))
-        .collect::<Result<_>>()?;
     let n = r.count(6)?;
-    let mut scopes = Vec::with_capacity(n);
-    for _ in 0..n {
+    let scopes = collect_n(n, || {
         let kind = ScopeKind::get(r)?;
         let k = r.count(5)?;
-        let bindings = (0..k)
-            .map(|_| Ok((r.str()?, BindingKind::get(r)?)))
-            .collect::<Result<_>>()?;
-        scopes.push(ScopeInfo {
+        let bindings = collect_n(k, || Ok((r.str()?, BindingKind::get(r)?)))?;
+        Ok(ScopeInfo {
             kind,
             bindings,
             is_var_scope: r.bool()?,
-        });
-    }
-    let n = r.count(14)?;
-    let handlers = (0..n)
-        .map(|_| {
-            Ok(Handler {
-                start: r.u32()?,
-                end: r.u32()?,
-                target: r.u32()?,
-                env_depth: r.u16()?,
-            })
         })
-        .collect::<Result<_>>()?;
+    })?;
     let declarations = if r.bool()? {
         let var_names = r.strs()?;
         let k = r.count(8)?;
-        let functions = (0..k)
-            .map(|_| Ok((r.str()?, r.u32()?)))
-            .collect::<Result<_>>()?;
+        let functions = collect_n(k, || Ok((r.str()?, r.u32()?)))?;
         let k = r.count(5)?;
-        let lexical = (0..k)
-            .map(|_| Ok((r.str()?, BindingKind::get(r)?)))
-            .collect::<Result<_>>()?;
+        let lexical = collect_n(k, || Ok((r.str()?, BindingKind::get(r)?)))?;
         Some(Declarations {
             var_names,
             functions,
@@ -1005,23 +1039,97 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         None
     };
     let source = r.source()?;
+    let text = &*source.text;
     let span = Span {
         start: r.u32()?,
         end: r.u32()?,
     };
+    let on_boundary = |o: u32| text.is_char_boundary(o as usize);
+    if span.start > span.end || !on_boundary(span.start) || !on_boundary(span.end) {
+        return invalid(format!("span {span:?} outside the source text"));
+    }
     let module = if r.bool()? {
         Some(Rc::new(get_module(r)?))
     } else {
         None
     };
-    let ic_len = r.u32()? as usize;
-    if ic_len > instrs.len() {
-        return invalid(format!(
-            "{ic_len} inline caches for {} instructions",
-            instrs.len()
-        ));
+    let ic_len = r.count(1)?;
+    // A nested block is far larger than this; the bound only guards the
+    // allocation.
+    let function_count = r.count(16)?;
+    if let Some(d) = &declarations {
+        if let Some((_, f)) = d
+            .functions
+            .iter()
+            .find(|(_, f)| *f as usize >= function_count)
+        {
+            return invalid(format!("declared function {f} out of range"));
+        }
     }
-    let code = CodeBlock {
+    let len = r.count(1)?;
+    if len == 0 {
+        return invalid("empty code block");
+    }
+    if ic_len > len {
+        return invalid(format!("{ic_len} inline caches for {len} instructions"));
+    }
+    let mut v = Verifier {
+        register_count,
+        constants: &constants,
+        names: names.len(),
+        functions: function_count,
+        scopes: scopes.len(),
+        ic: ic_len,
+        len,
+        pc: 0,
+    };
+    let instrs = collect_n(len, || {
+        let i = get_instr(r)?;
+        verify_operands(&mut v, i)?;
+        verify_ranges(&mut v, i)?;
+        v.pc += 1;
+        Ok(i)
+    })?;
+    if !matches!(
+        instrs[len - 1],
+        Instr::Return | Instr::Throw | Instr::Jump(_) | Instr::ThrowError { .. }
+    ) {
+        return invalid("code block can run past its last instruction");
+    }
+    let n = r.count(4)?;
+    if n != len {
+        return invalid(format!("{n} offsets for {len} instructions"));
+    }
+    let offsets = collect_n(n, || {
+        let o = r.u32()?;
+        if o as usize > text.len() {
+            return invalid(format!("source offset {o} outside the source text"));
+        }
+        Ok(o)
+    })?;
+    let n = r.count(14)?;
+    let handlers = collect_n(n, || {
+        let h = Handler {
+            start: r.u32()?,
+            end: r.u32()?,
+            target: r.u32()?,
+            env_depth: r.u16()?,
+        };
+        if h.start > h.end || h.end as usize > len || h.target as usize >= len {
+            return invalid(format!("exception handler {h:?} leaves the block"));
+        }
+        Ok(h)
+    })?;
+    let debug_len = r.count(1)?;
+    let debug = DebugSection::packed(PackedDebugInfo {
+        bytes: r.take(debug_len)?.into(),
+        strs: r.strs.clone(),
+        instr_count: len as u32,
+        register_count,
+        text_len: text.len() as u32,
+    });
+    let functions = collect_n(function_count, || get_block(r, depth + 1))?;
+    Ok(Rc::new(CodeBlock {
         name,
         kind,
         function_kind,
@@ -1046,83 +1154,7 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         module,
         ic: (0..ic_len).map(|_| Cell::new(IcEntry::EMPTY)).collect(),
         debug,
-    };
-    verify_block(&code)?;
-    Ok(Rc::new(code))
-}
-
-/// Block-level invariants the interpreter relies on.
-#[inline(never)]
-fn verify_debug_info(code: &CodeBlock, len: usize, text_len: usize) -> Result<()> {
-    let d = &code.debug;
-    if d.statements
-        .iter()
-        .any(|s| s.pc as usize >= len || s.offset as usize > text_len)
-        || d.statements.windows(2).any(|w| w[0].pc >= w[1].pc)
-    {
-        return invalid("statement starts out of order or outside the block");
-    }
-    if let Some(l) = d.locals.iter().find(|l| {
-        l.reg >= code.register_count || l.start > l.end || l.end as usize > len
-    }) {
-        return invalid(format!("local {:?} outside the block", l.name));
-    }
-    Ok(())
-}
-
-fn verify_block(code: &CodeBlock) -> Result<()> {
-    let len = code.instrs.len();
-    if len == 0 {
-        return invalid("empty code block");
-    }
-    if code.offsets.len() != len {
-        return invalid(format!(
-            "{} offsets for {len} instructions",
-            code.offsets.len()
-        ));
-    }
-    if !matches!(
-        code.instrs[len - 1],
-        Instr::Return | Instr::Throw | Instr::Jump(_) | Instr::ThrowError { .. }
-    ) {
-        return invalid("code block can run past its last instruction");
-    }
-    if code.param_base as u32 + code.param_regs as u32 > code.register_count as u32 {
-        return invalid("parameter registers beyond the register count");
-    }
-    let text = &*code.source.text;
-    let on_boundary = |o: u32| text.is_char_boundary(o as usize);
-    if code.span.start > code.span.end
-        || !on_boundary(code.span.start)
-        || !on_boundary(code.span.end)
-    {
-        return invalid(format!("span {:?} outside the source text", code.span));
-    }
-    if let Some(o) = code.offsets.iter().find(|o| **o as usize > text.len()) {
-        return invalid(format!("source offset {o} outside the source text"));
-    }
-    verify_debug_info(code, len, text.len())?;
-    for h in &code.handlers {
-        if h.start > h.end || h.end as usize > len || h.target as usize >= len {
-            return invalid(format!("exception handler {h:?} leaves the block"));
-        }
-    }
-    if let Some(d) = &code.declarations {
-        if let Some((_, f)) = d
-            .functions
-            .iter()
-            .find(|(_, f)| *f as usize >= code.functions.len())
-        {
-            return invalid(format!("declared function {f} out of range"));
-        }
-    }
-    let mut v = Verifier { code, pc: 0 };
-    for (pc, i) in code.instrs.iter().enumerate() {
-        v.pc = pc;
-        verify_operands(&mut v, *i)?;
-        verify_ranges(&mut v, *i)?;
-    }
-    Ok(())
+    }))
 }
 
 // ---- entry points -------------------------------------------------------------------------------
@@ -1167,33 +1199,33 @@ pub fn decode(bytes: &[u8]) -> Result<Rc<CodeBlock>> {
     let mut r = Reader {
         bytes,
         pos: 0,
-        strs: Vec::new(),
+        strs: Rc::from(Vec::new()),
         units: Vec::new(),
         sources: Vec::new(),
     };
     let n = r.count(4)?;
-    for _ in 0..n {
+    let strs = collect_n(n, || {
         let len = r.u32()? as usize;
-        let s = std::str::from_utf8(r.take(len)?)
-            .map_err(|_| DecodeError::Invalid("string table entry is not UTF-8".into()))?;
-        r.strs.push(Rc::from(s));
-    }
+        std::str::from_utf8(r.take(len)?)
+            .map(Rc::from)
+            .map_err(|_| DecodeError::Invalid("string table entry is not UTF-8".into()))
+    })?;
+    r.strs = Rc::from(strs);
     let n = r.count(4)?;
-    for _ in 0..n {
+    r.units = collect_n(n, || {
         let len = r.u32()? as usize;
         let raw = r.take(len.checked_mul(2).ok_or(DecodeError::Truncated)?)?;
-        let units: Vec<u16> = raw
+        Ok(raw
             .chunks_exact(2)
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        r.units.push(Rc::from(units));
-    }
+            .collect::<Rc<[u16]>>())
+    })?;
     let n = r.count(8)?;
-    for _ in 0..n {
+    r.sources = collect_n(n, || {
         let name = r.str()?;
         let text = r.str()?;
-        r.sources.push(Rc::new(SourceText { name, text }));
-    }
+        Ok(Rc::new(SourceText { name, text }))
+    })?;
     let code = get_block(&mut r, 0)?;
     if r.pos != bytes.len() {
         return Err(DecodeError::TrailingBytes);
