@@ -43,6 +43,7 @@ name = "agnijs-js-compiler"
 version = "0.1.0"
 dependencies = [
  "agnijs-js-parser",
+ "foldhash",
 ]
 
 [[package]]
@@ -92,6 +93,7 @@ name = "agnijs-js-parser"
 version = "0.1.0"
 dependencies = [
  "agnijs-js-regex",
+ "foldhash",
  "unicode-id-start",
 ]
 

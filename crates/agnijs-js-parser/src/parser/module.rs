@@ -5,7 +5,7 @@ use super::Parser;
 use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::{Punct, TokenKind};
-use std::collections::{HashMap, HashSet};
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use std::rc::Rc;
 
 impl<'s> Parser<'s> {

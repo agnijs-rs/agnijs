@@ -9,3 +9,4 @@ description = "agnijs-js-compiler"
 
 [dependencies]
 agnijs-js-parser.workspace = true
+foldhash.workspace = true

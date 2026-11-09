@@ -14,7 +14,7 @@
 //! even when an intermediate scope shadows it.
 
 use agnijs_js_parser::ast::*;
-use std::collections::{HashMap, HashSet};
+use foldhash::{HashMap, HashSet};
 use std::rc::Rc;
 
 #[derive(Default, Debug, Clone)]

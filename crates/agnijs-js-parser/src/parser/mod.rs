@@ -20,7 +20,7 @@ use crate::error::{Result, SyntaxError};
 use crate::lexer::{Lexer, LexerState, Punct, Token, TokenKind};
 use crate::span::Span;
 use scope::{PrivateEnv, ScopeStack};
-use std::collections::HashMap;
+use foldhash::{HashSet, HashSetExt};
 use std::rc::Rc;
 
 /// The function-level context. Saved and replaced at every function
@@ -95,7 +95,8 @@ pub struct Parser<'s> {
     /// The expression just parsed contained a `yield`/`await` or was
     /// otherwise invalid as parameters: tracked per paren level.
     private_envs: Vec<PrivateEnv>,
-    names: HashMap<Box<str>, Rc<str>>,
+    /// Every identifier name seen so far, shared by all its `Ident`s.
+    names: HashSet<Rc<str>>,
     /// Set when a direct `eval(...)` call appears in the current function.
     has_direct_eval: bool,
     /// Start offset of the last `await` identifier seen, so that
@@ -131,7 +132,7 @@ impl<'s> Parser<'s> {
             pending_cover: None,
             pending_yield_await: None,
             private_envs: Vec::new(),
-            names: HashMap::new(),
+            names: HashSet::new(),
             has_direct_eval: false,
             last_await: None,
             eval_private_env: false,
@@ -149,7 +150,7 @@ impl<'s> Parser<'s> {
             return n.clone();
         }
         let rc: Rc<str> = Rc::from(name);
-        self.names.insert(name.into(), rc.clone());
+        self.names.insert(rc.clone());
         rc
     }
 

@@ -18,7 +18,7 @@ use crate::bytecode::*;
 use crate::CompileError;
 use agnijs_js_parser::ast::*;
 use agnijs_js_parser::span::Span;
-use std::collections::HashMap;
+use foldhash::{HashMap, HashMapExt};
 use std::rc::Rc;
 
 pub(crate) const THIS: &str = "*this*";

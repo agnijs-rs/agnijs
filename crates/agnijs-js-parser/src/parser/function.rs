@@ -5,7 +5,7 @@ use crate::ast::*;
 use crate::error::Result;
 use crate::lexer::{Punct, TokenKind};
 use crate::span::Span;
-use std::collections::HashSet;
+use foldhash::{HashSet, HashSetExt};
 
 /// What kind of function body is being parsed; selects the context rules.
 #[derive(Clone, Copy)]

@@ -9,4 +9,5 @@ description = "agnijs-js-parser"
 
 [dependencies]
 unicode-id-start.workspace = true
+foldhash.workspace = true
 agnijs-js-regex.workspace = true

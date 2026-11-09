@@ -4,7 +4,7 @@
 
 use crate::error::{Result, SyntaxError};
 use crate::span::Span;
-use std::collections::{HashMap, HashSet};
+use foldhash::{HashMap, HashMapExt, HashSet, HashSetExt};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
