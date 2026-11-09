@@ -5,8 +5,9 @@
 //!
 //! - a string table (`Rc<str>`: names, bindings, specifiers' local names),
 //!   a UTF-16 table (`Rc<[u16]>`: string constants, template strings,
-//!   module specifiers and export names) and a source table (script name and
-//!   text, stored once and shared by every function compiled from it);
+//!   module specifiers and export names) and a source table (script name,
+//!   text and lone-surrogate table, stored once and shared by every function
+//!   compiled from it);
 //! - the root code block, with nested functions inline, every string an
 //!   index into the tables.
 //!
@@ -42,6 +43,7 @@
 
 use crate::bytecode::*;
 use agnijs_js_parser::ast::FunctionKind;
+use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
 use std::collections::HashMap;
 use std::fmt;
@@ -1217,6 +1219,11 @@ pub fn encode(code: &CodeBlock) -> Vec<u8> {
         let at = w.out.len();
         w.str(&s.name);
         w.str(&s.text);
+        w.len(s.lone_surrogates.len());
+        for l in s.lone_surrogates.iter() {
+            w.u32(l.offset);
+            w.u16(l.unit);
+        }
         source_refs.extend_from_slice(&w.out[at..]);
     }
     w.out.clear();
@@ -1269,7 +1276,29 @@ pub fn decode(bytes: &[u8]) -> Result<Rc<CodeBlock>> {
     r.sources = collect_n(n, || {
         let name = r.str()?;
         let text = r.str()?;
-        Ok(Rc::new(SourceText { name, text }))
+        let n = r.count(6)?;
+        let mut lone = Vec::with_capacity(n);
+        for _ in 0..n {
+            let offset = r.u32()?;
+            let unit = r.u16()?;
+            let at = offset as usize;
+            // In order, a surrogate, and standing on a U+FFFD of the text.
+            let in_order = lone
+                .last()
+                .is_none_or(|l: &LoneSurrogate| l.offset < offset);
+            let on_placeholder = text.get(at..at.saturating_add(3)) == Some("\u{FFFD}");
+            if !in_order || !(0xD800..0xE000).contains(&unit) || !on_placeholder {
+                return invalid(format!(
+                    "lone surrogate {unit:#x} at {offset} does not fit the source text"
+                ));
+            }
+            lone.push(LoneSurrogate { offset, unit });
+        }
+        Ok(Rc::new(SourceText {
+            name,
+            text,
+            lone_surrogates: Rc::from(lone),
+        }))
     })?;
     let code = get_block(&mut r, 0)?;
     if r.pos != bytes.len() {

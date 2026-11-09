@@ -45,7 +45,7 @@ impl<'a> Compiler<'a> {
             }
             Expression::String(s) => self.emit_load_str(&s.value),
             Expression::RegExp(r) => {
-                let p = self.const_str(&r.pattern);
+                let p = self.const_string(&r.pattern);
                 let f = self.const_str(&r.flags);
                 self.emit(Instr::CreateRegExp {
                     pattern: p,
@@ -210,7 +210,7 @@ impl<'a> Compiler<'a> {
         let raw: Vec<Rc<[u16]>> = t
             .quasis
             .iter()
-            .map(|q| Rc::from(q.raw.encode_utf16().collect::<Vec<u16>>()))
+            .map(|q| q.raw.clone())
             .collect();
         let fs = self.fs();
         let i = fs.constants.len() as ConstIdx;

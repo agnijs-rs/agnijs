@@ -72,19 +72,21 @@ pub fn create_dynamic_function(
         a.new_target
     };
     let n = a.len();
-    let mut params = String::new();
-    let mut body = String::new();
+    // Code units, so lone surrogates reach the lexer (TASK-100.15).
+    let mut params: Vec<u16> = Vec::new();
+    let mut body: Vec<u16> = Vec::new();
     if n > 0 {
         for (i, p) in a.args[..n - 1].iter().enumerate() {
             if i > 0 {
-                params.push(',');
+                params.push(u16::from(b','));
             }
-            let s = vm.to_rust_string(*p)?;
-            params.push_str(&s);
+            let s = vm.to_string(*p)?;
+            params.extend(vm.heap.units(s).iter());
         }
-        body = vm.to_rust_string(a.args[n - 1])?;
+        let s = vm.to_string(a.args[n - 1])?;
+        body.extend(vm.heap.units(s).iter());
     }
-    let (code, _source) = match agnijs_js_compiler::compile_dynamic_function(&params, &body, kind) {
+    let code = match agnijs_js_compiler::compile_dynamic_function_utf16(&params, &body, kind) {
         Ok(r) => r,
         Err(e) => return vm.syntax_error(&e.message),
     };
@@ -173,7 +175,14 @@ pub fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let text: String = match &vm.heap.obj(o).class {
         Class::Function(fd) => {
             let span = fd.code.span;
-            let text = &fd.code.source.text;
+            let source = &fd.code.source;
+            if !source.lone_surrogates.is_empty() {
+                // Source from a JavaScript string: put its lone surrogates
+                // back (TASK-100.15).
+                let units = source.units(span.start as usize, span.end as usize);
+                return Ok(vm.str_from_units(units));
+            }
+            let text = &source.text;
             let start = (span.start as usize).min(text.len());
             let end = (span.end as usize).clamp(start, text.len());
             text[start..end].to_string()

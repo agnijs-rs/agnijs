@@ -1014,7 +1014,7 @@ impl<'s> Parser<'s> {
                 };
                 let (pattern, flags) = (pattern.clone(), flags.clone());
                 let span = self.tok.span;
-                if let Err(msg) = agnijs_js_regex::syntax::validate(&pattern, &flags) {
+                if let Err(msg) = agnijs_js_regex::syntax::validate_literal(&pattern, &flags) {
                     return self.err(format!("invalid regular expression: {msg}"), span);
                 }
                 self.advance()?;

@@ -3,7 +3,8 @@
 
 use agnijs_js_compiler::serialize::{decode, encode, DecodeError};
 use agnijs_js_compiler::{
-    compile_module, compile_script, BinOp, CodeBlock, DebugInfo, DebugSection, Instr,
+    compile_eval_utf16, compile_module, compile_script, BinOp, CodeBlock, Constant, DebugInfo,
+    DebugSection, EvalOptions, Instr,
 };
 use std::rc::Rc;
 
@@ -146,6 +147,46 @@ fn the_source_text_is_stored_once_and_shared_by_nested_functions() {
     assert_eq!(&*back.source.text, src.as_str());
 }
 
+/// Eval code from a JavaScript string can hold lone surrogates (TASK-100.15):
+/// they survive in constants and in the source text a function's
+/// `toString` reads, and a table that does not fit the text is refused.
+#[test]
+fn lone_surrogates_in_eval_source_round_trip() {
+    let mut src: Vec<u16> = "(function f() { return '".encode_utf16().collect();
+    src.push(0xD800);
+    src.extend("' + `".encode_utf16());
+    src.push(0xDFFF);
+    src.extend("`; })".encode_utf16());
+    let code = compile_eval_utf16(&src, "eval", &EvalOptions::default()).unwrap();
+    assert_round_trips(&code);
+    let back = decode(&encode(&code)).unwrap();
+    assert_eq!(back.source.units(0, back.source.text.len()), src);
+    let inner = &back.functions[0];
+    let has = |unit: u16| {
+        inner
+            .constants
+            .iter()
+            .any(|c| matches!(c, Constant::String(s) if s.contains(&unit)))
+    };
+    assert!(has(0xD800) && has(0xDFFF), "{:?}", inner.constants);
+
+    // Every lone surrogate must name a U+FFFD of the text, in order.
+    let mut bytes = encode(&code);
+    let text_len = back.source.text.len();
+    let entry = bytes
+        .windows(6)
+        .rposition(|w| w[4..6] == 0xDFFFu16.to_le_bytes())
+        .expect("the table entry for U+DFFF");
+    for (offset, unit) in [(0u32, 0xDFFFu16), (text_len as u32, 0xDFFF), (u32::MAX, 0xDFFF)] {
+        let mut bad = bytes.clone();
+        bad[entry..entry + 4].copy_from_slice(&offset.to_le_bytes());
+        bad[entry + 4..entry + 6].copy_from_slice(&unit.to_le_bytes());
+        assert!(matches!(decode(&bad), Err(DecodeError::Invalid(_))), "offset {offset}");
+    }
+    bytes[entry + 4..entry + 6].copy_from_slice(&0x41u16.to_le_bytes());
+    assert!(matches!(decode(&bytes), Err(DecodeError::Invalid(_))));
+}
+
 #[test]
 fn inline_caches_start_empty_after_decode() {
     let code = compile_script("var o = { a: 1 }; o.a; o.a = 2;", "ic.js").unwrap();
@@ -195,6 +236,7 @@ fn debug_info_round_trips_including_backward_offsets_and_multi_byte_values() {
     owned.source = Rc::new(agnijs_js_compiler::SourceText {
         name: owned.source.name.clone(),
         text: format!("{}{}", owned.source.text, " ".repeat(300_000)).into(),
+        lone_surrogates: owned.source.lone_surrogates.clone(),
     });
     let last = debug.statements.len() - 1;
     debug.statements[last].offset = 299_999;

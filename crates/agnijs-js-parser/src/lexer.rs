@@ -3,9 +3,12 @@
 //! drives it: [`Lexer::next_token`] lexes the next token for the operator
 //! context, and the parser asks for a re-scan when it knows better.
 //!
-//! Positions are byte offsets into the UTF-8 source.
+//! Positions are byte offsets into the UTF-8 source. Source that came from
+//! a JavaScript string carries its lone surrogates in a side table (see
+//! [`crate::source`]); literal values put them back.
 
 use crate::error::{Result, SyntaxError};
+use crate::source::{self, LoneSurrogate};
 use crate::span::Span;
 use std::borrow::Cow;
 
@@ -36,11 +39,12 @@ pub enum TokenKind<'s> {
     /// templates).
     Template {
         cooked: Option<Box<[u16]>>,
-        raw: Box<str>,
+        raw: Box<[u16]>,
         tail: bool,
     },
+    /// The pattern is UTF-16 code units: it may hold lone surrogates.
     RegExp {
-        pattern: Box<str>,
+        pattern: Box<[u16]>,
         flags: Box<str>,
     },
     Punct(Punct),
@@ -138,6 +142,9 @@ pub struct LexerState {
 pub struct Lexer<'s> {
     src: &'s str,
     bytes: &'s [u8],
+    /// The lone surrogates standing as U+FFFD in `src` (empty for source
+    /// that was a Rust `str`).
+    lone: &'s [LoneSurrogate],
     pos: usize,
     /// Whether the only things so far on the current line are whitespace
     /// and comments (for the Annex B `-->` comment).
@@ -168,9 +175,20 @@ pub fn is_id_continue(c: char) -> bool {
 
 impl<'s> Lexer<'s> {
     pub fn new(src: &'s str, module: bool) -> Lexer<'s> {
+        Lexer::with_lone_surrogates(src, &[], module)
+    }
+
+    /// A lexer over source converted from UTF-16 by
+    /// [`source::from_utf16`].
+    pub fn with_lone_surrogates(
+        src: &'s str,
+        lone: &'s [LoneSurrogate],
+        module: bool,
+    ) -> Lexer<'s> {
         let mut lx = Lexer {
             src,
             bytes: src.as_bytes(),
+            lone,
             pos: 0,
             at_line_start: true,
             module,
@@ -184,6 +202,23 @@ impl<'s> Lexer<'s> {
 
     pub fn source(&self) -> &'s str {
         self.src
+    }
+
+    pub fn lone_surrogates(&self) -> &'s [LoneSurrogate] {
+        self.lone
+    }
+
+    /// Append the code units of `c`, which starts at byte `at`: a U+FFFD
+    /// listed in the lone-surrogate table is that surrogate.
+    fn push_char(&self, out: &mut Vec<u16>, c: char, at: usize) {
+        if c == '\u{FFFD}' {
+            if let Some(u) = source::lone_at(self.lone, at) {
+                out.push(u);
+                return;
+            }
+        }
+        let mut buf = [0u16; 2];
+        out.extend_from_slice(c.encode_utf16(&mut buf));
     }
 
     pub fn state(&self) -> LexerState {
@@ -810,10 +845,7 @@ impl<'s> Lexer<'s> {
                     }
                 }
                 '\n' | '\r' => return self.err("unterminated string literal", start),
-                c => {
-                    let mut buf = [0u16; 2];
-                    value.extend_from_slice(c.encode_utf16(&mut buf));
-                }
+                c => self.push_char(&mut value, c, self.pos - c.len_utf8()),
             }
         }
         Ok(TokenKind::String {
@@ -897,6 +929,12 @@ impl<'s> Lexer<'s> {
                     }
                 }
             }
+            '\u{FFFD}' if !self.lone.is_empty() => {
+                // NonEscapeCharacter: a lone surrogate escapes to itself.
+                let mut units = Vec::with_capacity(1);
+                self.push_char(&mut units, '\u{FFFD}', self.pos - 3);
+                Escape::Units(Units::one(units[0]))
+            }
             c => {
                 let mut buf = [0u16; 2];
                 let len = c.encode_utf16(&mut buf).len() as u8;
@@ -909,7 +947,7 @@ impl<'s> Lexer<'s> {
     /// substitution. Stops after `${` or the closing backtick.
     fn lex_template_part(&mut self, start: usize) -> Result<TokenKind<'s>> {
         let mut cooked: Option<Vec<u16>> = Some(Vec::new());
-        let mut raw = String::new();
+        let mut raw: Vec<u16> = Vec::new();
         loop {
             let Some(c) = self.peek() else {
                 return self.err("unterminated template literal", start);
@@ -919,7 +957,7 @@ impl<'s> Lexer<'s> {
                     self.pos += 1;
                     return Ok(TokenKind::Template {
                         cooked: cooked.map(Vec::into_boxed_slice),
-                        raw: raw.into_boxed_str(),
+                        raw: raw.into_boxed_slice(),
                         tail: true,
                     });
                 }
@@ -927,7 +965,7 @@ impl<'s> Lexer<'s> {
                     self.pos += 2;
                     return Ok(TokenKind::Template {
                         cooked: cooked.map(Vec::into_boxed_slice),
-                        raw: raw.into_boxed_str(),
+                        raw: raw.into_boxed_slice(),
                         tail: false,
                     });
                 }
@@ -949,22 +987,27 @@ impl<'s> Lexer<'s> {
                     }
                     // Raw text: the source, with CRLF and CR normalised to LF.
                     let text = &self.src[esc_start..self.pos];
-                    raw.push_str(&text.replace("\r\n", "\n").replace('\r', "\n"));
+                    if text.contains('\r') {
+                        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                        raw.extend(text.encode_utf16());
+                    } else {
+                        source::push_units(&mut raw, text, esc_start, self.lone);
+                    }
                 }
                 '\r' => {
                     self.pos += 1;
                     self.eat('\n');
-                    raw.push('\n');
+                    raw.push(0x0A);
                     if let Some(ck) = cooked.as_mut() {
                         ck.push(0x0A);
                     }
                 }
                 c => {
+                    let at = self.pos;
                     self.pos += c.len_utf8();
-                    raw.push(c);
+                    self.push_char(&mut raw, c, at);
                     if let Some(ck) = cooked.as_mut() {
-                        let mut buf = [0u16; 2];
-                        ck.extend_from_slice(c.encode_utf16(&mut buf));
+                        self.push_char(ck, c, at);
                     }
                 }
             }
@@ -1008,7 +1051,7 @@ impl<'s> Lexer<'s> {
                 _ => {}
             }
         }
-        let pattern = &self.src[start + 1..self.pos - 1];
+        let pattern = source::units_of(self.src, start + 1, self.pos - 1, self.lone);
         let flags_start = self.pos;
         while let Some(c) = self.peek() {
             if c == '\\' {
@@ -1023,7 +1066,7 @@ impl<'s> Lexer<'s> {
         let flags = &self.src[flags_start..self.pos];
         Ok(Token {
             kind: TokenKind::RegExp {
-                pattern: pattern.into(),
+                pattern: pattern.into_boxed_slice(),
                 flags: flags.into(),
             },
             span: Span::new(start as u32, self.pos as u32),
@@ -1214,7 +1257,7 @@ mod tests {
             matches!(&toks[0], TokenKind::String { value, legacy_octal: false } if value.len() == 4)
         );
         assert!(matches!(&toks[1], TokenKind::String { value, .. } if **value == [0x41, 0x0A]));
-        assert!(matches!(&toks[2], TokenKind::Template { tail: true, raw, .. } if &**raw == "x"));
+        assert!(matches!(&toks[2], TokenKind::Template { tail: true, raw, .. } if **raw == [0x78]));
         // after `${`, the parser lexes `1` then sees `}`; rescanning is the parser's job.
         assert!(matches!(
             &toks[3],
@@ -1234,13 +1277,14 @@ mod tests {
         let rb = lx.next_token().unwrap();
         assert_eq!(rb.kind, TokenKind::Punct(Punct::RBrace));
         let cont = lx.rescan_template_continuation(&rb).unwrap();
-        assert!(matches!(cont.kind, TokenKind::Template { tail: true, raw, .. } if &*raw == "b"));
+        assert!(matches!(cont.kind, TokenKind::Template { tail: true, raw, .. } if *raw == [0x62]));
 
         let mut lx = Lexer::new("/[/]a\\/b/gi", false);
         let slash = lx.next_token().unwrap();
         let re = lx.rescan_regexp(&slash).unwrap();
+        let units: Vec<u16> = "[/]a\\/b".encode_utf16().collect();
         assert!(
-            matches!(re.kind, TokenKind::RegExp { pattern, flags } if &*pattern == "[/]a\\/b" && &*flags == "gi")
+            matches!(re.kind, TokenKind::RegExp { pattern, flags } if *pattern == *units && &*flags == "gi")
         );
     }
 

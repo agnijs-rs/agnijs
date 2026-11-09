@@ -18,6 +18,7 @@ mod stmt;
 use crate::ast::*;
 use crate::error::{Result, SyntaxError};
 use crate::lexer::{Lexer, LexerState, Punct, Token, TokenKind};
+use crate::source::LoneSurrogate;
 use crate::span::Span;
 use scope::{PrivateEnv, ScopeStack};
 use foldhash::{HashSet, HashSetExt};
@@ -117,7 +118,17 @@ pub(crate) struct Saved {
 
 impl<'s> Parser<'s> {
     pub fn new(source: &'s str, module: bool) -> Result<Parser<'s>> {
-        let mut lexer = Lexer::new(source, module);
+        Parser::with_lone_surrogates(source, &[], module)
+    }
+
+    /// A parser over source converted from UTF-16 by
+    /// [`crate::source::from_utf16`].
+    pub fn with_lone_surrogates(
+        source: &'s str,
+        lone: &'s [LoneSurrogate],
+        module: bool,
+    ) -> Result<Parser<'s>> {
+        let mut lexer = Lexer::with_lone_surrogates(source, lone, module);
         let tok = lexer.next_token()?;
         Ok(Parser {
             lexer,
@@ -546,6 +557,11 @@ pub fn parse_script(source: &str) -> Result<Program> {
     Parser::new(source, false)?.parse_program()
 }
 
+/// Parse a script converted from UTF-16 by [`crate::source::from_utf16`].
+pub fn parse_script_with(source: &str, lone: &[LoneSurrogate]) -> Result<Program> {
+    Parser::with_lone_surrogates(source, lone, false)?.parse_program()
+}
+
 /// Parse a module.
 pub fn parse_module(source: &str) -> Result<Program> {
     Parser::new(source, true)?.parse_program()
@@ -573,7 +589,17 @@ pub struct EvalOptions {
 /// Parse eval code. The result is a script whose `strict` flag reflects
 /// both the options and a "use strict" directive.
 pub fn parse_eval(source: &str, options: &EvalOptions) -> Result<Program> {
-    let mut p = Parser::new(source, false)?;
+    parse_eval_with(source, &[], options)
+}
+
+/// [`parse_eval`] for eval code converted from UTF-16 by
+/// [`crate::source::from_utf16`].
+pub fn parse_eval_with(
+    source: &str,
+    lone: &[LoneSurrogate],
+    options: &EvalOptions,
+) -> Result<Program> {
+    let mut p = Parser::with_lone_surrogates(source, lone, false)?;
     p.ctx.strict = options.strict;
     p.ctx.new_target = options.in_function;
     p.ctx.super_property = options.in_method;

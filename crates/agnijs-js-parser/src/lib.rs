@@ -15,10 +15,12 @@ pub mod error;
 pub mod lexer;
 pub mod number;
 pub mod parser;
+pub mod source;
 pub mod span;
 
 pub use error::SyntaxError;
-pub use parser::{parse_eval, parse_module, parse_script, EvalOptions};
+pub use parser::{parse_eval, parse_eval_with, parse_module, parse_script, parse_script_with, EvalOptions};
+pub use source::LoneSurrogate;
 pub use span::{LineCol, LineTable, Span};
 
 #[cfg(test)]

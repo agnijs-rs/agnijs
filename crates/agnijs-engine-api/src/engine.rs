@@ -66,6 +66,11 @@ pub trait Engine {
 
     /// Evaluate a classic script. `name` identifies the script to the
     /// debugger and in stack traces.
+    ///
+    /// Source from the host is a Rust `str`, so it cannot hold a lone
+    /// surrogate; write one as an escape (`"\uD800"`). Source that script
+    /// builds at run time (`eval`, `Function`) is a JavaScript string and
+    /// keeps its lone surrogates.
     fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Value>;
 
     /// Load and evaluate a module by specifier through the host's module
@@ -115,7 +120,10 @@ pub trait Engine {
 
     fn type_of(&mut self, value: &Value) -> TypeOf;
     fn strict_equals(&mut self, a: &Value, b: &Value) -> bool;
-    /// `ToString`; may call user code.
+    /// `ToString`; may call user code. The result is a Rust `String`, so
+    /// each lone surrogate becomes U+FFFD (as [`crate::JsString::to_string_lossy`]);
+    /// a host that needs the exact code units reads a [`Value::String`]
+    /// instead, which keeps them both ways.
     fn to_string(&mut self, realm: RealmId, value: &Value) -> Result<String>;
     /// `ToNumber`; may call user code.
     fn to_number(&mut self, realm: RealmId, value: &Value) -> Result<f64>;

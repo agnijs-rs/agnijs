@@ -39,6 +39,8 @@ The maintainer cannot test on macOS. Everything is pure Rust with no platform-sp
 
 Dual representation: one-byte (Latin-1) and two-byte (UTF-16 code units) strings, as in V8, JSC and QuickJS. JS strings can contain lone surrogates, so WTF-8 is rejected (it makes `length` and indexing expensive). Concatenation builds ropes that flatten on demand. Property keys are interned atoms. Symbols and BigInts are separate heap types.
 
+Source text is lexed as UTF-8. Source built from a JavaScript string (`eval`, `Function`) is converted once: each lone surrogate stands as U+FFFD (three bytes, as in WTF-8, so byte offsets match) and is listed by offset in a side table that the lexer consults only for literal values (strings, templates cooked and raw, regular expression bodies) and that `Function.prototype.toString` uses to rebuild the source; lone surrogates are never identifier characters, so everywhere else U+FFFD and a lone surrogate lex alike. Host source is a Rust `str` with an empty table. At the engine interface strings are `JsString` (UTF-16, lossless both ways); only conversions to Rust text (`to_string`, `to_string_lossy`) replace lone surrogates with U+FFFD (TASK-100.15).
+
 ## 5. Garbage collection
 
 - Precise, non-moving mark-sweep on a single thread with size-class allocation.

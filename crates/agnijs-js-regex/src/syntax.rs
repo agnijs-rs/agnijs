@@ -15,6 +15,13 @@ use std::collections::HashSet;
 /// Validate a regular expression literal. `pattern` is the literal's body
 /// (between the slashes), `flags` its flag string.
 pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
+    let units: Vec<u16> = pattern.encode_utf16().collect();
+    validate_literal(&units, flags)
+}
+
+/// [`validate`] for a literal whose body is UTF-16 code units (source text
+/// from a JavaScript string can put lone surrogates in it).
+pub fn validate_literal(pattern: &[u16], flags: &str) -> Result<(), String> {
     let mut seen = [false; 128];
     let mut unicode = false;
     let mut sets = false;
@@ -36,8 +43,7 @@ pub fn validate(pattern: &str, flags: &str) -> Result<(), String> {
     if unicode && sets {
         return Err("regular expression flags 'u' and 'v' are mutually exclusive".into());
     }
-    let units: Vec<u16> = pattern.encode_utf16().collect();
-    validate_units(&units, unicode, sets)
+    validate_units(pattern, unicode, sets)
 }
 
 /// [`validate`] for a pattern given as UTF-16 code units (so lone

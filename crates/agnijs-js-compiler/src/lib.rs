@@ -16,6 +16,7 @@ pub use bytecode::*;
 pub use agnijs_js_parser::EvalOptions;
 
 use agnijs_js_parser::ast::{Expression, Statement};
+use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
 use agnijs_js_parser::SyntaxError;
 use std::fmt;
@@ -48,9 +49,14 @@ impl From<SyntaxError> for CompileError {
 pub type Result<T> = std::result::Result<T, CompileError>;
 
 fn source_text(name: &str, text: &str) -> Rc<SourceText> {
+    source_text_with(name, text, &[])
+}
+
+fn source_text_with(name: &str, text: &str, lone: &[LoneSurrogate]) -> Rc<SourceText> {
     Rc::new(SourceText {
         name: Rc::from(name),
         text: Rc::from(text),
+        lone_surrogates: Rc::from(lone),
     })
 }
 
@@ -73,15 +79,29 @@ pub fn compile_module(source: &str, name: &str) -> Result<Rc<CodeBlock>> {
 /// Parse and compile eval code. For direct eval the options describe the
 /// calling context; indirect eval uses `EvalOptions::default()`.
 pub fn compile_eval(source: &str, name: &str, options: &EvalOptions) -> Result<Rc<CodeBlock>> {
-    let program = agnijs_js_parser::parse_eval(source, options)?;
+    compile_eval_with(source, &[], name, options)
+}
+
+/// [`compile_eval`] for eval code given as UTF-16 code units (a JavaScript
+/// string), lone surrogates included.
+pub fn compile_eval_utf16(
+    source: &[u16],
+    name: &str,
+    options: &EvalOptions,
+) -> Result<Rc<CodeBlock>> {
+    let (text, lone) = agnijs_js_parser::source::from_utf16(source);
+    compile_eval_with(&text, &lone, name, options)
+}
+
+fn compile_eval_with(
+    source: &str,
+    lone: &[LoneSurrogate],
+    name: &str,
+    options: &EvalOptions,
+) -> Result<Rc<CodeBlock>> {
+    let program = agnijs_js_parser::parse_eval_with(source, lone, options)?;
     let analyses = analysis::analyse_program(&program);
-    let direct = options.in_function
-        || options.in_method
-        || options.strict
-        || !options.private_names.is_empty()
-        || options.in_class_field_initializer;
-    let _ = direct;
-    let mut c = compile::Compiler::new(source_text(name, source), &analyses, true);
+    let mut c = compile::Compiler::new(source_text_with(name, source, lone), &analyses, true);
     c.compile_eval(&program, name)
 }
 
@@ -103,21 +123,63 @@ pub fn compile_dynamic_function(
     body: &str,
     kind: DynamicFunctionKind,
 ) -> Result<(Rc<CodeBlock>, String)> {
+    let cb = compile_dynamic_function_with((params, &[]), (body, &[]), kind)?;
+    let text = cb.source.text.to_string();
+    // `(` + source + `)`
+    Ok((cb, text[1..text.len() - 1].to_string()))
+}
+
+/// [`compile_dynamic_function`] for parameters and body given as UTF-16
+/// code units (JavaScript strings), lone surrogates included. Returns the
+/// code block; its source text is the synthesised function in parentheses.
+pub fn compile_dynamic_function_utf16(
+    params: &[u16],
+    body: &[u16],
+    kind: DynamicFunctionKind,
+) -> Result<Rc<CodeBlock>> {
+    let (params, params_lone) = agnijs_js_parser::source::from_utf16(params);
+    let (body, body_lone) = agnijs_js_parser::source::from_utf16(body);
+    compile_dynamic_function_with((&params, &params_lone), (&body, &body_lone), kind)
+}
+
+/// Source text with its lone surrogates (see `agnijs_js_parser::source`).
+type Piece<'a> = (&'a str, &'a [LoneSurrogate]);
+
+fn compile_dynamic_function_with(
+    (params, params_lone): Piece,
+    (body, body_lone): Piece,
+    kind: DynamicFunctionKind,
+) -> Result<Rc<CodeBlock>> {
+    // The tables of `params` and `body`, moved to where each sits in a
+    // synthesised text.
+    fn shifted(parts: &[(&[LoneSurrogate], usize)]) -> Vec<LoneSurrogate> {
+        let mut out = Vec::new();
+        for (lone, at) in parts {
+            out.extend(lone.iter().map(|l| LoneSurrogate {
+                offset: l.offset + *at as u32,
+                unit: l.unit,
+            }));
+        }
+        out
+    }
     let prefix = match kind {
         DynamicFunctionKind::Normal => "function",
         DynamicFunctionKind::Generator => "function*",
         DynamicFunctionKind::Async => "async function",
         DynamicFunctionKind::AsyncGenerator => "async function*",
     };
-    let source = format!("{prefix} anonymous({params}\n) {{\n{body}\n}}");
     // Parameters and body must each parse on their own, so that neither
     // can inject syntax into the other.
+    let params_at = prefix.len() + " anonymous(".len() + 1;
     let params_only = format!("({prefix} anonymous({params}\n) {{}})");
-    agnijs_js_parser::parse_script(&params_only)?;
+    agnijs_js_parser::parse_script_with(&params_only, &shifted(&[(params_lone, params_at)]))?;
     let body_only = format!("({prefix} anonymous() {{\n{body}\n}})");
-    agnijs_js_parser::parse_script(&body_only)?;
-    let wrapped = format!("({source})");
-    let program = agnijs_js_parser::parse_script(&wrapped)?;
+    let body_at = prefix.len() + " anonymous() {\n".len() + 1;
+    agnijs_js_parser::parse_script_with(&body_only, &shifted(&[(body_lone, body_at)]))?;
+    let wrapped = format!("({prefix} anonymous({params}\n) {{\n{body}\n}})");
+    let body_at = params_at + params.len() + "\n) {\n".len();
+    let lone = shifted(&[(params_lone, params_at), (body_lone, body_at)]);
+    let program = agnijs_js_parser::parse_script_with(&wrapped, &lone)?;
     let func = match program.body.as_slice() {
         [Statement::Expression(e)] => match e.expression.unparen() {
             Expression::Function(f) => f,
@@ -136,9 +198,9 @@ pub fn compile_dynamic_function(
         }
     };
     let analyses = analysis::analyse_program(&program);
-    let mut c = compile::Compiler::new(source_text("anonymous", &wrapped), &analyses, false);
-    let cb = c.compile_standalone_function(func, &program)?;
-    Ok((cb, source))
+    let source = source_text_with("anonymous", &wrapped, &lone);
+    let mut c = compile::Compiler::new(source, &analyses, false);
+    c.compile_standalone_function(func, &program)
 }
 
 #[cfg(test)]

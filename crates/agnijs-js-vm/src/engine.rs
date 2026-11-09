@@ -2,7 +2,7 @@
 //! the interface, host functions and objects, and the bytecode container.
 //!
 //! Bytecode container (ADR 0010): the shared `AGJS` container with the
-//! `agnijs-bc-5` tag around a kind byte, a checksum and the serialised code
+//! `agnijs-bc-6` tag around a kind byte, a checksum and the serialised code
 //! tree, so loading precompiled code skips parsing and compiling. Any other
 //! container, including the M2 source-payload container, is rejected; the
 //! host recompiles from source.
@@ -23,7 +23,7 @@ use std::rc::Rc;
 /// a kind byte, then the serialised code tree (`agnijs_js_compiler::serialize`).
 /// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
 /// constant pool or the serialiser's layout changes it.
-pub const FORMAT: &str = "agnijs-bc-5";
+pub const FORMAT: &str = "agnijs-bc-6";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;

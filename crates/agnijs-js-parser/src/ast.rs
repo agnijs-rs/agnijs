@@ -412,7 +412,8 @@ pub struct StringLiteral {
 
 #[derive(Debug)]
 pub struct RegExpLiteral {
-    pub pattern: Box<str>,
+    /// UTF-16 code units: a pattern may hold lone surrogates.
+    pub pattern: Box<[u16]>,
     pub flags: Box<str>,
     pub span: Span,
 }
@@ -428,7 +429,7 @@ pub struct TemplateLiteral {
 #[derive(Debug)]
 pub struct TemplateElement {
     pub cooked: Option<Rc<[u16]>>,
-    pub raw: Rc<str>,
+    pub raw: Rc<[u16]>,
     pub span: Span,
 }
 

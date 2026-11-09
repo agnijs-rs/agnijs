@@ -12,6 +12,7 @@
 
 use crate::serialize::DecodeError;
 use agnijs_js_parser::ast::FunctionKind;
+use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
 use std::cell::{Cell, OnceCell};
 use std::fmt;
@@ -829,6 +830,27 @@ pub enum CodeKind {
 pub struct SourceText {
     pub name: Rc<str>,
     pub text: Rc<str>,
+    /// The lone surrogates of source that came from a JavaScript string
+    /// (eval, `Function`), standing as U+FFFD in `text`
+    /// ([`agnijs_js_parser::source`]). Empty for source from a Rust `str`.
+    pub lone_surrogates: Rc<[LoneSurrogate]>,
+}
+
+impl SourceText {
+    /// The code units of `text[start..end]` (byte offsets, clamped to the
+    /// text and to character boundaries), lone surrogates included.
+    pub fn units(&self, start: usize, end: usize) -> Vec<u16> {
+        let text = &*self.text;
+        let mut start = start.min(text.len());
+        while !text.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = end.clamp(start, text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        agnijs_js_parser::source::units_of(text, start, end, &self.lone_surrogates)
+    }
 }
 
 /// Index of an inline cache in `CodeBlock::ic`; `NO_IC` when the function

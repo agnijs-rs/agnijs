@@ -12,7 +12,10 @@ use std::fmt;
 use std::rc::Rc;
 
 /// A UTF-16 JavaScript string. May contain lone surrogates, which is why it
-/// is not a Rust `String`.
+/// is not a Rust `String`. Strings cross the host boundary as this type
+/// in both directions without loss; only the conversions to Rust text
+/// ([`JsString::to_string_lossy`], `Display`, [`crate::Engine::to_string`])
+/// replace lone surrogates with U+FFFD.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct JsString(Rc<[u16]>);
 

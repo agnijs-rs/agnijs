@@ -1236,6 +1236,25 @@ impl Vm {
 
     // ---- eval ---------------------------------------------------------------------
 
+    /// Compile eval code from a string. A two-byte string goes over as its
+    /// code units, so lone surrogates in it reach the lexer (TASK-100.15);
+    /// a one-byte string is Latin-1 and cannot hold any.
+    fn compile_eval_string(
+        &mut self,
+        s: crate::value::StrId,
+        options: &EvalOptions,
+    ) -> agnijs_js_compiler::Result<Rc<CodeBlock>> {
+        match self.heap.units(s) {
+            crate::string::Units::Two(u) => {
+                agnijs_js_compiler::compile_eval_utf16(u, "eval", options)
+            }
+            one => {
+                let text = one.to_string_lossy();
+                agnijs_js_compiler::compile_eval(&text, "eval", options)
+            }
+        }
+    }
+
     /// PerformEval for a direct call from frame `fi`.
     pub(crate) fn direct_eval(&mut self, fi: usize, arg: Value, strict: bool) -> JsResult<Value> {
         let Value::String(s) = arg else {
@@ -1248,9 +1267,8 @@ impl Vm {
                 "Code generation from strings disallowed for this context",
             ));
         }
-        let source = self.heap.str_to_string(s);
         let options = self.eval_options(fi, strict);
-        let code = match agnijs_js_compiler::compile_eval(&source, "eval", &options) {
+        let code = match self.compile_eval_string(s, &options) {
             Ok(c) => c,
             Err(e) => return Err(self.throw_syntax(&e.message)),
         };
@@ -1279,9 +1297,8 @@ impl Vm {
                 "Code generation from strings disallowed for this context",
             ));
         }
-        let source = self.heap.str_to_string(s);
         let options = EvalOptions::default();
-        let code = match agnijs_js_compiler::compile_eval(&source, "eval", &options) {
+        let code = match self.compile_eval_string(s, &options) {
             Ok(c) => c,
             Err(e) => return Err(self.throw_syntax(&e.message)),
         };
