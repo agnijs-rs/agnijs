@@ -8,7 +8,8 @@ use std::sync::OnceLock;
 use crate::charset::{CharSet, MAX_CODE_POINT};
 use crate::unicode_tables as t;
 
-pub(crate) use t::UNICODE_VERSION;
+#[cfg(test)]
+use t::UNICODE_VERSION;
 
 /// Members of the General_Category groups, by short name.
 const GC_GROUPS: &[(&str, &[&str])] = &[

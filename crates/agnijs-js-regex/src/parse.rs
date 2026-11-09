@@ -79,8 +79,6 @@ pub(crate) enum Node {
         behind: bool,
         negate: bool,
         body: Box<Node>,
-        first: usize,
-        count: usize,
     },
 }
 
@@ -342,8 +340,6 @@ impl Parser<'_> {
                 behind: lookbehind,
                 negate,
                 body: Box::new(body),
-                first: groups_before + 1,
-                count: self.groups_seen - groups_before,
             };
             // Annex B: a lookahead may be quantified outside unicode mode.
             return if lookahead && !self.u {

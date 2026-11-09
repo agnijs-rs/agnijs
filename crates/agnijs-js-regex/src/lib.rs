@@ -3,36 +3,44 @@
 //! The `syntax` module validates regular expression literals at parse
 //! time (ES2025 pattern grammar plus Annex B). [`Regex`] is the matcher
 //! seam the VM codes against: compile a pattern under a set of flags, then
-//! run it against UTF-16 code units from a start index. The engine behind
-//! the seam is `regress` (ADR 0013); nothing outside this crate names it.
+//! run it against UTF-16 code units from a start index.
+//!
+//! Behind the seam is the engine's own regex implementation (ADR 0013,
+//! TASK-100.31): `parse` turns a validated pattern into a tree with every
+//! compile-time decision made (names, modifiers, case folding, v-mode set
+//! operations, Annex B), and two matchers compile from that tree: the
+//! backtracking matcher (`backtrack`), which handles every pattern, and
+//! the linear-time matcher (`linear`), for patterns without
+//! backreferences or lookaround. [`MatcherMode`] picks between them.
 
 // ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
 #![forbid(unsafe_code)]
 
 pub mod syntax;
 
-// TASK-100.31: the engine's own regex parser, character sets and Unicode
-// tables. The matchers move onto them in the next commits.
-#[allow(dead_code)]
+mod backtrack;
 mod charset;
-#[allow(dead_code)]
 mod parse;
-#[allow(dead_code)]
 mod unicode;
 #[rustfmt::skip]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::type_complexity)]
 mod unicode_tables;
 
 #[cfg(feature = "linear")]
 mod linear;
 
+use std::cell::RefCell;
+use std::sync::Arc;
+
 /// How compiled patterns are matched (ADR 0013 addendum). The mode never
 /// changes what matches, only which matcher finds it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum MatcherMode {
-    /// Patterns without backreferences or lookaround run on the
-    /// linear-time matcher unless the backtracking matcher's estimated
-    /// worst case for this input is small; everything else backtracks.
+    /// Patterns without backreferences or lookaround backtrack under a
+    /// step budget proportional to what the linear-time matcher would
+    /// spend, and finish on the linear-time matcher if it runs out;
+    /// patterns on which backtracking can be exponential go straight to
+    /// the linear-time matcher. Everything else backtracks.
     #[default]
     Auto,
     /// Every pattern backtracks, as in V8 and most other engines.
@@ -42,11 +50,14 @@ pub enum MatcherMode {
     LinearWhenEligible,
 }
 
-/// Under [`MatcherMode::Auto`], an eligible pattern stays on the
-/// backtracking matcher when its estimated worst case for the input is at
-/// most this many steps (a few milliseconds).
+/// Under [`MatcherMode::Auto`], how many backtracking steps an attempt
+/// may take per linear-matcher step it would otherwise cost (program size
+/// times input length) before it hands over to the linear matcher, and
+/// the least it may always take.
 #[cfg(feature = "linear")]
-const BACKTRACK_BUDGET: u64 = 1 << 20;
+const BACKTRACK_STEPS_PER_LINEAR_STEP: u64 = 16;
+#[cfg(feature = "linear")]
+const BACKTRACK_MIN_BUDGET: u64 = 1 << 12;
 
 /// The eight ECMAScript flags, parsed and validated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -100,6 +111,7 @@ impl Flags {
     }
 
     /// The canonical flags string, in `dgimsuvy` order.
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         let mut s = String::new();
         for (on, c) in [
@@ -120,26 +132,29 @@ impl Flags {
     }
 }
 
-/// A compiled pattern.
-pub struct Regex {
-    inner: regress::Regex,
-    /// `(?:P)()|` for sticky attempts, compiled on first use (see
-    /// [`Regex::exec_sticky`]).
-    anchored: std::cell::OnceCell<regress::Regex>,
-    /// The numbered-groups pattern and backend flags `inner` came from.
-    source: Vec<u32>,
-    backend_flags: regress::Flags,
-    unicode_mode: bool,
+/// A compiled pattern, independent of the matcher mode: what bytecode
+/// serializes (ADR 0010).
+#[derive(Debug, PartialEq, Eq)]
+struct Program {
     /// Capture-group names by group number (1-based groups at index
     /// `n - 1`); `None` for unnamed groups.
     names: Vec<Option<String>>,
-    mode: MatcherMode,
     /// Every alternative begins with a `^` outside the m flag, so a match
     /// can only start at index 0 (see [`Regex::starts_anchored`]).
     starts_anchored: bool,
+    backtrack: backtrack::Prog,
     /// The linear-time program, or why the pattern is not eligible.
     #[cfg(feature = "linear")]
     linear: Result<linear::Linear, &'static str>,
+}
+
+/// A compiled pattern under a matcher mode, with its working memory.
+pub struct Regex {
+    program: Arc<Program>,
+    mode: MatcherMode,
+    bt_scratch: RefCell<backtrack::Scratch>,
+    #[cfg(feature = "linear")]
+    lin_scratch: RefCell<Option<linear::Scratch>>,
 }
 
 /// One successful match: `ranges[0]` is the whole match, `ranges[n]` the
@@ -148,6 +163,19 @@ pub struct Regex {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Captures {
     pub ranges: Vec<Option<(usize, usize)>>,
+}
+
+/// Whether every path through `n` begins with a non-multiline `^`, looking
+/// through groups but not through quantifiers or lookaround.
+fn starts_anchored(n: &parse::Node) -> bool {
+    use parse::{Assertion, Node};
+    match n {
+        Node::Assert(Assertion::Start { multiline: false }) => true,
+        Node::Capture(_, b) => starts_anchored(b),
+        Node::Concat(v) => v.first().is_some_and(starts_anchored),
+        Node::Alt(v) => v.iter().all(starts_anchored),
+        _ => false,
+    }
 }
 
 impl Regex {
@@ -160,53 +188,36 @@ impl Regex {
 
     /// [`Regex::compile`] under an explicit matcher mode.
     pub fn compile_with(pattern: &[u16], flags: &Flags, mode: MatcherMode) -> Result<Regex, String> {
-        let unicode_mode = flags.unicode_mode();
-        // Our own grammar check first, so literals and `new RegExp` report
-        // the same errors.
+        // The grammar check first, so literals and `new RegExp` report the
+        // same errors; the parser then only sees valid patterns.
         syntax::validate_units(pattern, flags.unicode, flags.unicode_sets)?;
-        let code_points = pattern_code_points(pattern, unicode_mode);
-        let rflags = regress::Flags {
-            icase: flags.ignore_case,
-            multiline: flags.multiline,
-            dot_all: flags.dot_all,
-            no_opt: false,
-            unicode: flags.unicode,
-            unicode_sets: flags.unicode_sets,
-        };
-        let names = group_names(&code_points, unicode_mode);
-        // The matcher sees only numbered groups: names and `\k<name>`
-        // references are resolved here (ES2025 duplicate-name semantics
-        // included), so the backend needs no named-group support.
-        let stripped = strip_group_names(&code_points, unicode_mode, &names);
-        let inner = regress::Regex::from_unicode(stripped.iter().copied(), rflags)
-            .map_err(|e| format!("Invalid regular expression: {}", e.text))?;
-        #[cfg(feature = "linear")]
-        let linear = if mode == MatcherMode::BacktrackingOnly {
-            Err("the matcher mode is backtracking only")
-        } else {
-            linear::Linear::compile(
-                &stripped,
-                names.len(),
-                flags.ignore_case,
-                flags.multiline,
-                flags.dot_all,
-                flags.unicode,
-                flags.unicode_sets,
-            )
-        };
-        let starts_anchored = !flags.multiline && starts_anchored(&stripped, flags.unicode_sets);
-        Ok(Regex {
-            inner,
-            anchored: std::cell::OnceCell::new(),
-            source: stripped,
-            backend_flags: rflags,
-            unicode_mode,
-            starts_anchored,
-            names,
-            mode,
+        let code_points = parse::pattern_code_points(pattern, flags.unicode_mode());
+        let parsed = parse::parse(
+            &code_points,
+            flags.ignore_case,
+            flags.multiline,
+            flags.dot_all,
+            flags.unicode,
+            flags.unicode_sets,
+        )?;
+        let program = Program {
+            starts_anchored: starts_anchored(&parsed.node),
+            backtrack: backtrack::Prog::compile(&parsed),
             #[cfg(feature = "linear")]
-            linear,
-        })
+            linear: linear::Linear::compile(&parsed),
+            names: parsed.names,
+        };
+        Ok(Regex::from_program(Arc::new(program), mode))
+    }
+
+    fn from_program(program: Arc<Program>, mode: MatcherMode) -> Regex {
+        Regex {
+            program,
+            mode,
+            bt_scratch: RefCell::new(backtrack::Scratch::default()),
+            #[cfg(feature = "linear")]
+            lin_scratch: RefCell::new(None),
+        }
     }
 
     /// Whether every alternative of the pattern begins with a `^` that the
@@ -217,7 +228,7 @@ impl Regex {
     /// modifier groups that do not add `m`, never through lookaround or a
     /// quantified group.
     pub fn starts_anchored(&self) -> bool {
-        self.starts_anchored
+        self.program.starts_anchored
     }
 
     /// The matcher mode this pattern was compiled under.
@@ -230,7 +241,10 @@ impl Regex {
     pub fn linear_eligibility(&self) -> Result<(), &'static str> {
         #[cfg(feature = "linear")]
         {
-            self.linear.as_ref().map(|_| ()).map_err(|e| *e)
+            if self.mode == MatcherMode::BacktrackingOnly {
+                return Err("the matcher mode is backtracking only");
+            }
+            self.program.linear.as_ref().map(|_| ()).map_err(|e| *e)
         }
         #[cfg(not(feature = "linear"))]
         {
@@ -238,503 +252,118 @@ impl Regex {
         }
     }
 
-    /// Whether a search over `input` from `start` would run on the
-    /// linear-time matcher (the routing rule, exposed for tests).
+    /// Whether a search over `input` from `start` begins on the linear-time
+    /// matcher (the routing rule, exposed for tests). Under
+    /// [`MatcherMode::Auto`] a search that begins on the backtracking
+    /// matcher can still finish on the linear one when it runs out of
+    /// steps.
     pub fn uses_linear_matcher(&self, input_len: usize, start: usize, sticky: bool) -> bool {
+        let _ = (input_len, start, sticky);
         #[cfg(feature = "linear")]
         {
-            self.linear_for(input_len, start, sticky).is_some()
+            matches!(self.route(input_len.saturating_sub(start)), Route::Linear(_))
         }
         #[cfg(not(feature = "linear"))]
         {
-            let _ = (input_len, start, sticky);
             false
         }
     }
 
-    #[cfg(feature = "linear")]
-    fn linear_for(&self, input_len: usize, start: usize, sticky: bool) -> Option<&linear::Linear> {
-        let lin = self.linear.as_ref().ok()?;
-        match self.mode {
-            MatcherMode::BacktrackingOnly => None,
-            MatcherMode::LinearWhenEligible => Some(lin),
-            MatcherMode::Auto => {
-                let len = input_len.saturating_sub(start);
-                let starts = if sticky { 1 } else { len + 1 };
-                (!lin.backtracking_is_bounded(len, starts, BACKTRACK_BUDGET)).then_some(lin)
-            }
-        }
-    }
-
-    #[cfg(feature = "linear")]
-    fn exec_linear(&self, input: &[u16], start: usize, sticky: bool) -> Option<Option<Captures>> {
-        let lin = self.linear_for(input.len(), start, sticky)?;
-        Some(lin.exec(input, start, sticky).map(|ranges| Captures { ranges }))
-    }
-
     /// Number of capturing groups (not counting the whole match).
     pub fn group_count(&self) -> usize {
-        self.names.len()
+        self.program.names.len()
     }
 
     /// Capture-group names, index `i` for group `i + 1`.
     pub fn group_names(&self) -> &[Option<String>] {
-        &self.names
+        &self.program.names
     }
 
     /// Whether any group is named.
     pub fn has_named_groups(&self) -> bool {
-        self.names.iter().any(|n| n.is_some())
+        self.program.names.iter().any(|n| n.is_some())
     }
 
     /// Find the leftmost match starting at or after `start`.
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
-        if self.starts_anchored {
+        if self.program.starts_anchored {
             // Only index 0 can begin a match, so one exact-start attempt
             // there decides it; from anywhere else the answer is no.
             // Without this a failed `/^x/` tried every position.
-            return if start == 0 { self.exec_sticky(input, 0) } else { None };
+            return if start == 0 { self.search(input, 0, true) } else { None };
         }
-        #[cfg(feature = "linear")]
-        if let Some(found) = self.exec_linear(input, start, false) {
-            return found;
-        }
-        let m = self.find(&self.inner, input, start)?;
-        Some(self.captures(&m, m.captures.len()))
-    }
-
-    fn find(&self, re: &regress::Regex, input: &[u16], start: usize) -> Option<regress::Match> {
-        if start > input.len() {
-            return None;
-        }
-        if self.unicode_mode {
-            re.find_from_utf16(input, start).next()
-        } else {
-            re.find_from_ucs2(input, start).next()
-        }
-    }
-
-    /// The match's whole range and its first `groups` captures.
-    fn captures(&self, m: &regress::Match, groups: usize) -> Captures {
-        let mut ranges = Vec::with_capacity(groups + 1);
-        ranges.push(Some((m.range.start, m.range.end)));
-        for c in &m.captures[..groups] {
-            ranges.push(c.as_ref().map(|r| (r.start, r.end)));
-        }
-        // Groups the parser saw but the matcher did not report (it never
-        // happens, but keep the arrays the same length either way).
-        while ranges.len() < self.names.len() + 1 {
-            ranges.push(None);
-        }
-        Captures { ranges }
+        self.search(input, start, false)
     }
 
     /// Find a match that starts exactly at `start` (sticky semantics).
-    ///
-    /// The backend only searches leftmost, so a plain search would walk the
-    /// rest of the input before failing: quadratic for a tokenizer probing
-    /// every position. The search runs `(?:P)()|` instead: at `start`
-    /// either `P` matches, and the trailing empty group (numbered after all
-    /// of `P`'s groups) participates, or the empty alternative matches
-    /// right there. Either way the search stops at `start`.
     pub fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
+        self.search(input, start, true)
+    }
+
+    fn search(&self, input: &[u16], start: usize, sticky: bool) -> Option<Captures> {
+        if start > input.len() {
+            return None;
+        }
         #[cfg(feature = "linear")]
-        if let Some(found) = self.exec_linear(input, start, true) {
-            return found;
-        }
-        let anchored = self.anchored.get_or_init(|| {
-            let mut p: Vec<u32> = "(?:".chars().map(|c| c as u32).collect();
-            p.extend(pin_group_count_escapes(&self.source, self.names.len(), self.backend_flags.unicode_sets));
-            p.extend(")()|".chars().map(|c| c as u32));
-            regress::Regex::from_unicode(p.into_iter(), self.backend_flags)
-                .expect("a pattern that compiled still compiles inside a group")
-        });
-        let m = self.find(anchored, input, start)?;
-        let groups = m.captures.len() - 1;
-        if m.range.start != start || m.captures[groups].is_none() {
-            return None;
-        }
-        Some(self.captures(&m, groups))
-    }
-}
-
-/// Whether every alternative of the numbered-groups pattern `p` begins
-/// with a `^` (see [`Regex::starts_anchored`]). `p` has passed the grammar
-/// check, so parentheses balance and escapes are complete.
-fn starts_anchored(p: &[u32], unicode_sets: bool) -> bool {
-    let mut i = 0;
-    anchored_disjunction(p, &mut i, unicode_sets)
-}
-
-/// Read a Disjunction from `*i` up to and including its closing `)` (or
-/// the end of the pattern): whether every alternative is anchored.
-fn anchored_disjunction(p: &[u32], i: &mut usize, unicode_sets: bool) -> bool {
-    let mut all = true;
-    loop {
-        all &= anchored_alternative(p, i, unicode_sets);
-        match p.get(*i) {
-            Some(&c) if c == '|' as u32 => *i += 1,
-            Some(_) => {
-                // The group's closing `)`.
-                *i += 1;
-                return all;
-            }
-            None => return all,
-        }
-    }
-}
-
-/// Read one Alternative from `*i` up to its `|` or the enclosing `)` (not
-/// consumed): whether its first term is a non-multiline `^`, directly or
-/// inside an unquantified group that does not add the `m` modifier.
-fn anchored_alternative(p: &[u32], i: &mut usize, unicode_sets: bool) -> bool {
-    let anchored = match p.get(*i) {
-        Some(&c) if c == '^' as u32 => true,
-        Some(&c) if c == '(' as u32 => match group_opening(p, *i) {
-            Some(body) => {
-                *i = body;
-                let inner = anchored_disjunction(p, i, unicode_sets);
-                let quantified = matches!(p.get(*i), Some(&q) if q == '*' as u32 || q == '+' as u32 || q == '?' as u32 || q == '{' as u32);
-                inner && !quantified
-            }
-            None => false,
-        },
-        _ => false,
-    };
-    skip_alternative(p, i, unicode_sets);
-    anchored
-}
-
-/// For a group opening at `p[i] == '('`, the index of its body when the
-/// group is capturing, non-capturing or a modifier group that does not
-/// turn `m` on; `None` for lookaround and for groups that add `m`.
-fn group_opening(p: &[u32], i: usize) -> Option<usize> {
-    if p.get(i + 1) != Some(&('?' as u32)) {
-        return Some(i + 1);
-    }
-    let mut j = i + 2;
-    if p.get(j) == Some(&(':' as u32)) {
-        return Some(j + 1);
-    }
-    // `(?flags-flags:`; anything else (`(?=`, `(?!`, `(?<=`, `(?<!`) is
-    // lookaround.
-    let mut adding = true;
-    while let Some(&c) = p.get(j) {
-        if c == ':' as u32 {
-            return Some(j + 1);
-        } else if c == '-' as u32 {
-            adding = false;
-        } else if c == 'm' as u32 {
-            if adding {
-                return None;
-            }
-        } else if c != 'i' as u32 && c != 's' as u32 {
-            return None;
-        }
-        j += 1;
-    }
-    None
-}
-
-/// Advance `*i` to the `|` or `)` that ends the current alternative, or to
-/// the end of the pattern. Escapes, classes (nested in `v` mode) and
-/// nested groups are stepped over.
-fn skip_alternative(p: &[u32], i: &mut usize, unicode_sets: bool) {
-    let mut depth = 0usize;
-    let mut class_depth = 0usize;
-    while let Some(&c) = p.get(*i) {
-        if c == '\\' as u32 {
-            *i += 2;
-            continue;
-        }
-        if class_depth > 0 {
-            if c == ']' as u32 {
-                class_depth -= 1;
-            } else if c == '[' as u32 && unicode_sets {
-                class_depth += 1;
-            }
-        } else if c == '[' as u32 {
-            class_depth = 1;
-        } else if c == '(' as u32 {
-            depth += 1;
-        } else if c == ')' as u32 {
-            if depth == 0 {
-                return;
-            }
-            depth -= 1;
-        } else if c == '|' as u32 && depth == 0 {
-            return;
-        }
-        *i += 1;
-    }
-}
-
-/// The pattern as the code points the grammar sees: surrogate pairs join
-/// in unicode mode, every code unit stands alone otherwise.
-fn pattern_code_points(pattern: &[u16], unicode_mode: bool) -> Vec<u32> {
-    let mut out = Vec::with_capacity(pattern.len());
-    let mut i = 0;
-    while i < pattern.len() {
-        let u = pattern[i] as u32;
-        if unicode_mode && (0xD800..0xDC00).contains(&u) && i + 1 < pattern.len() {
-            let l = pattern[i + 1] as u32;
-            if (0xDC00..0xE000).contains(&l) {
-                out.push(0x10000 + ((u - 0xD800) << 10) + (l - 0xDC00));
-                i += 2;
-                continue;
-            }
-        }
-        out.push(u);
-        i += 1;
-    }
-    out
-}
-
-/// Capture-group names in group order, from a pattern the grammar has
-/// already accepted. Escapes are skipped, character classes (including
-/// nested `v`-mode classes) are skipped, `(?<=` and `(?<!` are lookbehinds,
-/// `(?:` and `(?flags:` do not capture.
-fn group_names(p: &[u32], unicode_sets: bool) -> Vec<Option<String>> {
-    let mut names = Vec::new();
-    let mut i = 0;
-    let mut class_depth = 0usize;
-    while i < p.len() {
-        let c = p[i];
-        if c == '\\' as u32 {
-            i += 2;
-            continue;
-        }
-        if class_depth > 0 {
-            if c == ']' as u32 {
-                class_depth -= 1;
-            } else if c == '[' as u32 && unicode_sets {
-                class_depth += 1;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '[' as u32 {
-            class_depth = 1;
-            i += 1;
-            continue;
-        }
-        if c == '(' as u32 {
-            if p.get(i + 1) == Some(&('?' as u32)) {
-                if p.get(i + 2) == Some(&('<' as u32))
-                    && !matches!(p.get(i + 3), Some(&x) if x == '=' as u32 || x == '!' as u32)
-                {
-                    let (name, next) = read_group_name(p, i + 3);
-                    names.push(Some(name));
-                    i = next;
-                    continue;
-                }
-                // Non-capturing, lookaround or modifier group.
-                i += 2;
-                continue;
-            }
-            names.push(None);
-        }
-        i += 1;
-    }
-    names
-}
-
-/// Read a GroupName starting at `start` (just after `<`) up to and
-/// including the closing `>`; returns the name and the index after `>`.
-/// Escapes (`\u{...}`, `\uXXXX` with surrogate pairs) and raw surrogate
-/// pairs (non-unicode mode keeps them as two units) are decoded.
-fn read_group_name(p: &[u32], start: usize) -> (String, usize) {
-    let mut j = start;
-    let mut name = String::new();
-    while j < p.len() && p[j] != '>' as u32 {
-        let (cp, next) = if p[j] == '\\' as u32 {
-            name_escape(p, j)
-        } else if (0xD800..0xDC00).contains(&p[j])
-            && matches!(p.get(j + 1), Some(&l) if (0xDC00..0xE000).contains(&l))
-        {
-            (0x10000 + ((p[j] - 0xD800) << 10) + (p[j + 1] - 0xDC00), j + 2)
-        } else {
-            (p[j], j + 1)
+        let budget = match self.route(input.len() - start) {
+            Route::Linear(lin) => return self.exec_linear(lin, input, start, sticky),
+            Route::Backtrack(budget) => budget,
         };
-        if let Some(ch) = char::from_u32(cp) {
-            name.push(ch);
+        #[cfg(not(feature = "linear"))]
+        let budget = u64::MAX;
+        let outcome = match self.bt_scratch.try_borrow_mut() {
+            Ok(mut s) => self.program.backtrack.exec(&mut s, input, start, sticky, budget),
+            Err(_) => self.program.backtrack.exec(&mut Default::default(), input, start, sticky, budget),
+        };
+        match outcome {
+            backtrack::Outcome::Match(ranges) => Some(Captures { ranges }),
+            backtrack::Outcome::NoMatch => None,
+            backtrack::Outcome::Exhausted(_at) => {
+                #[cfg(feature = "linear")]
+                if let Ok(lin) = &self.program.linear {
+                    // Every start before `_at` has failed, so the leftmost
+                    // match from `_at` is the leftmost match from `start`.
+                    return self.exec_linear(lin, input, _at, sticky);
+                }
+                unreachable!("only budgeted searches run out of steps")
+            }
         }
-        j = next;
     }
-    (name, j + 1)
+
+    #[cfg(feature = "linear")]
+    fn route(&self, len: usize) -> Route<'_> {
+        let Ok(lin) = &self.program.linear else { return Route::Backtrack(u64::MAX) };
+        match self.mode {
+            MatcherMode::BacktrackingOnly => Route::Backtrack(u64::MAX),
+            MatcherMode::LinearWhenEligible => Route::Linear(lin),
+            MatcherMode::Auto if lin.nested => Route::Linear(lin),
+            MatcherMode::Auto => {
+                let linear_cost = lin.size().saturating_mul(len as u64 + 1);
+                Route::Backtrack(
+                    linear_cost.saturating_mul(BACKTRACK_STEPS_PER_LINEAR_STEP).max(BACKTRACK_MIN_BUDGET),
+                )
+            }
+        }
+    }
+
+    #[cfg(feature = "linear")]
+    fn exec_linear(&self, lin: &linear::Linear, input: &[u16], start: usize, sticky: bool) -> Option<Captures> {
+        let ranges = match self.lin_scratch.try_borrow_mut() {
+            Ok(mut s) => {
+                let s = s.get_or_insert_with(|| lin.scratch());
+                lin.exec(s, input, start, sticky)
+            }
+            Err(_) => lin.exec(&mut lin.scratch(), input, start, sticky),
+        }?;
+        Some(Captures { ranges })
+    }
 }
 
-/// Rewrite `(?<name>` as `(` and `\k<name>` as the numbered references
-/// of every group with that name, wrapped in a non-capturing group so a
-/// following digit cannot extend the number. Duplicate names live in
-/// different alternatives, so at most one of them holds a capture at any
-/// time and concatenating the references (`\1\2`) matches exactly the
-/// participating group (unset groups match the empty string).
-fn strip_group_names(p: &[u32], unicode_sets: bool, names: &[Option<String>]) -> Vec<u32> {
-    if names.iter().all(|n| n.is_none()) {
-        return p.to_vec();
-    }
-    let mut out = Vec::with_capacity(p.len());
-    let mut i = 0;
-    let mut class_depth = 0usize;
-    while i < p.len() {
-        let c = p[i];
-        if c == '\\' as u32 {
-            if class_depth == 0 && p.get(i + 1) == Some(&('k' as u32)) && p.get(i + 2) == Some(&('<' as u32)) {
-                let (name, next) = read_group_name(p, i + 3);
-                out.extend("(?:".chars().map(|c| c as u32));
-                for (idx, n) in names.iter().enumerate() {
-                    if n.as_deref() == Some(name.as_str()) {
-                        out.push('\\' as u32);
-                        out.extend((idx + 1).to_string().chars().map(|c| c as u32));
-                    }
-                }
-                out.push(')' as u32);
-                i = next;
-                continue;
-            }
-            out.push(c);
-            if let Some(&n) = p.get(i + 1) {
-                out.push(n);
-            }
-            i += 2;
-            continue;
-        }
-        if class_depth > 0 {
-            if c == ']' as u32 {
-                class_depth -= 1;
-            } else if c == '[' as u32 && unicode_sets {
-                class_depth += 1;
-            }
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '[' as u32 {
-            class_depth = 1;
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == '(' as u32
-            && p.get(i + 1) == Some(&('?' as u32))
-            && p.get(i + 2) == Some(&('<' as u32))
-            && !matches!(p.get(i + 3), Some(&x) if x == '=' as u32 || x == '!' as u32)
-        {
-            let (_, next) = read_group_name(p, i + 3);
-            out.push('(' as u32);
-            i = next;
-            continue;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// `p` (with `groups` capture groups) rewritten so that one more group
-/// appended to it changes nothing: outside unicode mode, `\N` with
-/// N = groups + 1 is an Annex B octal or identity escape, which the extra
-/// group would turn into a backreference. Such an escape is spelled out
-/// (`\xHH` for the octal part, then the remaining digits as literals).
-fn pin_group_count_escapes(p: &[u32], groups: usize, unicode_sets: bool) -> Vec<u32> {
-    let digit = |x: Option<&u32>| x.and_then(|&d| char::from_u32(d)?.to_digit(10));
-    let mut out = Vec::with_capacity(p.len());
-    let mut i = 0;
-    let mut class_depth = 0usize;
-    while i < p.len() {
-        let c = p[i];
-        if c == '\\' as u32 {
-            if class_depth == 0 && matches!(digit(p.get(i + 1)), Some(1..=9)) {
-                let mut end = i + 1;
-                let mut value = 0usize;
-                while let Some(d) = digit(p.get(end)) {
-                    value = value.saturating_mul(10).saturating_add(d as usize);
-                    end += 1;
-                }
-                if value == groups + 1 {
-                    let mut j = i + 1;
-                    let first = digit(p.get(j)).unwrap_or(0);
-                    if first <= 7 {
-                        // LegacyOctalEscapeSequence: up to three digits from
-                        // 0-3, up to two from 4-7.
-                        let max = if first <= 3 { 3 } else { 2 };
-                        let mut octal = 0u32;
-                        while j < end && j - (i + 1) < max && matches!(digit(p.get(j)), Some(0..=7)) {
-                            octal = octal * 8 + digit(p.get(j)).unwrap_or(0);
-                            j += 1;
-                        }
-                        out.extend(format!("\\x{octal:02X}").chars().map(|c| c as u32));
-                    }
-                    // An 8 or 9 (IdentityEscape) and any digits past the
-                    // octal escape are literal.
-                    out.extend_from_slice(&p[j..end]);
-                    i = end;
-                    continue;
-                }
-                out.extend_from_slice(&p[i..end]);
-                i = end;
-                continue;
-            }
-            out.push(c);
-            if let Some(&n) = p.get(i + 1) {
-                out.push(n);
-            }
-            i += 2;
-            continue;
-        }
-        if class_depth > 0 {
-            if c == ']' as u32 {
-                class_depth -= 1;
-            } else if c == '[' as u32 && unicode_sets {
-                class_depth += 1;
-            }
-        } else if c == '[' as u32 {
-            class_depth = 1;
-        }
-        out.push(c);
-        i += 1;
-    }
-    out
-}
-
-/// Decode `\u{XXXX}` or `\uXXXX` (with a possible trailing surrogate
-/// escape) at `p[i] == '\\'`; returns the code point and the next index.
-fn name_escape(p: &[u32], i: usize) -> (u32, usize) {
-    let hex = |j: usize, n: usize| -> Option<u32> {
-        let mut v = 0u32;
-        for k in 0..n {
-            let d = char::from_u32(*p.get(j + k)?)?.to_digit(16)?;
-            v = v * 16 + d;
-        }
-        Some(v)
-    };
-    if p.get(i + 1) != Some(&('u' as u32)) {
-        return (p.get(i + 1).copied().unwrap_or(0), i + 2);
-    }
-    if p.get(i + 2) == Some(&('{' as u32)) {
-        let mut j = i + 3;
-        let mut v = 0u32;
-        while j < p.len() && p[j] != '}' as u32 {
-            v = v
-                .saturating_mul(16)
-                .saturating_add(char::from_u32(p[j]).and_then(|c| c.to_digit(16)).unwrap_or(0));
-            j += 1;
-        }
-        return (v, j + 1);
-    }
-    let hi = hex(i + 2, 4).unwrap_or(0);
-    if (0xD800..0xDC00).contains(&hi)
-        && p.get(i + 6) == Some(&('\\' as u32))
-        && p.get(i + 7) == Some(&('u' as u32))
-    {
-        if let Some(lo) = hex(i + 8, 4) {
-            if (0xDC00..0xE000).contains(&lo) {
-                return (0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00), i + 12);
-            }
-        }
-    }
-    (hi, i + 6)
+#[cfg(feature = "linear")]
+enum Route<'a> {
+    Linear(&'a linear::Linear),
+    /// Backtrack with this many steps.
+    Backtrack(u64),
 }
 
 #[cfg(test)]
@@ -787,8 +416,7 @@ mod tests {
     #[test]
     fn sticky_matching_keeps_escapes_that_name_no_group() {
         // `\2` and `\8` with one group are an octal and an identity escape
-        // (Annex B); the sticky wrapper's extra group must not turn them
-        // into backreferences.
+        // (Annex B), not backreferences.
         let bt = |p: &str| Regex::compile_with(&u(p), &Flags::default(), MatcherMode::BacktrackingOnly).unwrap();
         let re = bt("(a)\\8");
         assert!(re.exec_sticky(&u("a"), 0).is_none());
@@ -808,9 +436,7 @@ mod tests {
     #[test]
     fn a_failed_sticky_match_does_not_search_the_rest_of_the_input() {
         // A tokenizer probes `/[a-z]+/y` at every position of a long line;
-        // each failed probe must cost O(1), not O(rest of the input). The
-        // old leftmost-search-then-filter took minutes here, the anchored
-        // attempt takes milliseconds even in a debug build.
+        // each failed probe must cost O(1), not O(rest of the input).
         let input: Vec<u16> = "'".repeat(200_000).encode_utf16().collect();
         let re = Regex::compile(&u("[a-z]+"), &Flags { sticky: true, ..Flags::default() }).unwrap();
         let t = std::time::Instant::now();
@@ -823,10 +449,7 @@ mod tests {
     #[test]
     fn group_names_follow_group_order() {
         let re = Regex::compile(&u("(?<y>a)|(?<y>b)(c)(?:d)(?<=d)[(?<z>]"), &Flags::default()).unwrap();
-        assert_eq!(
-            re.group_names(),
-            &[Some("y".into()), Some("y".into()), None]
-        );
+        assert_eq!(re.group_names(), &[Some("y".into()), Some("y".into()), None]);
         let c = re.exec(&u("bcd("), 0).unwrap();
         assert_eq!(c.ranges[2], Some((0, 1)));
     }

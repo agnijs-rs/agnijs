@@ -1,37 +1,45 @@
-//! Differential fuzzing: the linear-time matcher against the backtracking
-//! matcher (ADR 0013 addendum).
+//! Differential fuzzing of the matchers (ADR 0013 addendum, TASK-100.31).
 //!
 //! Random patterns from an ECMAScript grammar subset (captures, named and
 //! duplicate-named groups, modifiers, every quantifier form, assertions,
-//! classes, escapes, Annex B forms, `u` and `v` mode syntax) run over random
-//! short inputs under random flags. Each eligible pattern is matched with
-//! both matchers from every start index, sticky from every index, and
+//! lookaround, backreferences, classes, escapes, Annex B forms, `u` and `v`
+//! mode syntax) run over random short inputs under random flags. Each
+//! pattern is matched from every start index, sticky from every index, and
 //! through a global `lastIndex` loop that advances past empty matches the
 //! way `RegExpBuiltinExec` and `AdvanceStringIndex` do. Any difference in
-//! the match or in any capture fails the test with the reproduction. A
-//! pattern anchored by `^` is also compared with the same pattern behind
-//! an empty `(?:)`, which disables the index-0 shortcut (TASK-100.30).
+//! the match or in any capture fails the test with the reproduction.
 //!
-//! `cargo test` (and so CI) runs [`MIN_CASES`] eligible patterns, each on
+//! - [`matchers_agree`]: the backtracking matcher against the linear one
+//!   (every eligible pattern) and against `Auto`, which mixes them under a
+//!   step budget. A pattern anchored by `^` is also compared with the same
+//!   pattern behind an empty `(?:)`, which disables the index-0 shortcut
+//!   (TASK-100.30). Quantifiers nest three deep here: the backtracking
+//!   matcher guards empty iterations, so `(?:(_|)+){2}K` finishes.
+//! - [`backtracking_agrees_with_regress`]: the backtracking matcher against
+//!   `regress`, the matcher it replaced, kept as a test-only reference
+//!   (`tests/reference`). The generator keeps regress's limits here (two
+//!   nested quantifiers, single-character atoms at the second level) since
+//!   regress never finishes some deeper patterns (TASK-108), and
+//!   [`regress_bug`] skips the patterns where regress is known to be wrong
+//!   (TASK-105, TASK-106, TASK-107).
+//!
+//! `cargo test` (and so CI) runs [`MIN_CASES`] patterns per test, each on
 //! [`INPUTS_PER_PATTERN`] inputs, with a fixed seed. `AGNIJS_REGEX_FUZZ_CASES`
 //! changes the count, `AGNIJS_REGEX_FUZZ_SEED` picks another seed and
-//! `AGNIJS_REGEX_FUZZ_TRACE` prints each pattern before it runs. About 15 s
-//! in a debug build. Keep heavier runs bounded (one process, a raised
-//! count, a timeout) rather than looping locally. A watchdog aborts the
-//! run, naming the pattern, when any single case hangs.
-//!
-//! The generator nests quantifiers at most two deep, and a quantified atom
-//! inside a quantified group is a single character. Deeper nesting reaches
-//! patterns the backtracking matcher itself never finishes (for example
-//! `(?:(_|)+){2}K` on `"__"`), where there is no reference result to
-//! compare against.
+//! `AGNIJS_REGEX_FUZZ_TRACE` prints each pattern before it runs. Keep
+//! heavier runs bounded (one process, a raised count, a timeout) rather
+//! than looping locally. A watchdog aborts the run, naming the pattern,
+//! when any single case hangs.
 
 // Both matchers are needed; without the `linear` feature there is only one.
 #![cfg(feature = "linear")]
 
-use agnijs_js_regex::{Captures, Flags, MatcherMode, Regex};
+mod reference;
 
-/// Eligible patterns compared per run in CI, each against several inputs.
+use agnijs_js_regex::{Captures, Flags, MatcherMode, Regex};
+use reference::Reference;
+
+/// Patterns compared per test in CI, each against several inputs.
 const MIN_CASES: usize = 10_000;
 const INPUTS_PER_PATTERN: usize = 6;
 
@@ -69,6 +77,11 @@ struct Gen<'r> {
     names: usize,
     /// Quantifiers enclosing the atom being generated.
     quantifiers: usize,
+    /// How many quantifiers may nest.
+    max_quantifiers: usize,
+    /// Whether the innermost allowed quantifier applies to single
+    /// characters only (regress's limit, see the module comment).
+    simple_innermost: bool,
 }
 
 const LITERALS: &[&str] = &["a", "b", "c", "A", "B", " ", "1", "_", "\u{17F}", "\u{212A}", "\u{E9}", "k", "s"];
@@ -86,11 +99,11 @@ const LEGACY_ONLY: &[&str] = &[
 ];
 const UNICODE_ONLY: &[&str] = &[
     "\\u{1F600}", "\u{1F600}", "\\uD83D\\uDE00", "\\uD83D", "\\uDE00", "\\p{Lu}", "\\P{Lu}", "\\p{L}",
-    "\\p{Script=Greek}", "[\\p{Ll}\\d]", "[^\\p{Lu}]", "[\\u{1F600}-\\u{1F64F}]", "\\p{ASCII}", "[😀a]",
+    "\\p{Script=Greek}", "[\\p{Ll}\\d]", "[^\\p{Lu}]", "[\\u{1F600}-\\u{1F64F}]", "\\p{ASCII}", "[ðŸ˜€a]",
 ];
 const SETS_ONLY: &[&str] = &[
     "[\\w--[a]]", "[[a-c]&&[b-d]]", "[\\p{L}--[a-z]]", "[[ab][c]]", "[^[ab]]", "[\\d\\q{1}]", "[\\q{ab|c}]",
-    "\\p{RGI_Emoji}", "[a&&a]",
+    "\\p{RGI_Emoji}", "[a&&a]", "[\\q{abc|a|}b]",
 ];
 const ASSERTIONS: &[&str] = &["^", "$", "\\b", "\\B"];
 const QUANTIFIERS: &[&str] = &["*", "+", "?", "{0,2}", "{2}", "{1,}", "{0,1}", "{2,3}", "{0}", "{1,2}"];
@@ -114,11 +127,7 @@ impl Gen<'_> {
         if self.rng.chance(10) {
             return self.rng.pick(ASSERTIONS).to_string();
         }
-        // At most two quantifiers nest: deeper nesting makes the
-        // backtracking reference itself exponential on short inputs
-        // (`((?:b*)*){2}` inside `{1,2}` runs for minutes on 8 b's), which
-        // is the problem being solved, not something to compare against.
-        let quantify = self.quantifiers < 2 && self.rng.chance(40);
+        let quantify = self.quantifiers < self.max_quantifiers && self.rng.chance(40);
         if quantify {
             self.quantifiers += 1;
         }
@@ -134,11 +143,8 @@ impl Gen<'_> {
     }
 
     fn atom(&mut self, depth: usize) -> String {
-        // A second-level quantifier applies to a single-character atom
-        // only: a quantified group inside a quantified group can hang the
-        // backtracking reference outright (`(?:(_|)+){2}K` on "__" never
-        // returns).
-        let r = if self.quantifiers >= 2 { self.rng.below(60) } else { self.rng.below(100) };
+        let simple = self.simple_innermost && self.quantifiers >= self.max_quantifiers;
+        let r = if simple { self.rng.below(60) } else { self.rng.below(100) };
         if r < 30 || depth >= 3 {
             return self.rng.pick(LITERALS).to_string();
         }
@@ -167,27 +173,30 @@ impl Gen<'_> {
         }
         let body = self.disjunction(depth + 1);
         match self.rng.below(8) {
-            0 | 1 | 2 => format!("({body})"),
+            0..=2 => format!("({body})"),
             3 | 4 => format!("(?:{body})"),
             5 => {
                 self.names += 1;
                 // Reuse a name sometimes: duplicates are legal only in
                 // different alternatives, so some of these fail to compile
-                // and are skipped.
+                // and are skipped. `\k<name>` follows some of them.
                 let n = if self.names > 1 && self.rng.chance(30) { self.names - 1 } else { self.names };
-                format!("(?<g{n}>{body})")
-            }
-            6 => format!("(?{}:{body})", self.rng.pick(&["i", "-i", "m", "s", "-s", "i-m", "-ms"])),
-            _ => {
-                // Ineligible constructs stay in the mix to exercise routing.
-                let k = self.rng.below(6);
-                match k {
-                    0 => format!("(?={body})"),
-                    1 => format!("(?<!{body})"),
-                    2 => format!("({body})\\1"),
-                    _ => format!("({body})"),
+                if self.rng.chance(20) {
+                    format!("(?<g{n}>{body})\\k<g{n}>")
+                } else {
+                    format!("(?<g{n}>{body})")
                 }
             }
+            6 => format!("(?{}:{body})", self.rng.pick(&["i", "-i", "m", "s", "-s", "i-m", "-ms"])),
+            _ => match self.rng.below(7) {
+                0 => format!("(?={body})"),
+                1 => format!("(?!{body})"),
+                2 => format!("(?<={body})"),
+                3 => format!("(?<!{body})"),
+                4 => format!("({body})\\1"),
+                5 => format!("\\1({body})"),
+                _ => format!("({body})"),
+            },
         }
     }
 }
@@ -226,10 +235,34 @@ fn random_flags(rng: &mut Rng, mode: Mode) -> String {
     f
 }
 
+/// The matching operations a fuzzed matcher offers.
+trait Matcher {
+    fn exec(&self, input: &[u16], start: usize) -> Option<Captures>;
+    fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures>;
+}
+
+impl Matcher for Regex {
+    fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
+        Regex::exec(self, input, start)
+    }
+    fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
+        Regex::exec_sticky(self, input, start)
+    }
+}
+
+impl Matcher for Reference {
+    fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
+        Reference::exec(self, input, start)
+    }
+    fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
+        Reference::exec_sticky(self, input, start)
+    }
+}
+
 /// Every observable outcome of matching `re` against `input`: a search
 /// from every index, a sticky attempt at every index, and the global or
 /// sticky `lastIndex` loop.
-fn outcomes(re: &Regex, input: &[u16], flags: &Flags) -> Vec<Option<Captures>> {
+fn outcomes(re: &dyn Matcher, input: &[u16], flags: &Flags) -> Vec<Option<Captures>> {
     let mut out = Vec::new();
     let unicode = flags.unicode_mode();
     let mid_pair = |i: usize| {
@@ -256,15 +289,7 @@ fn outcomes(re: &Regex, input: &[u16], flags: &Flags) -> Vec<Option<Captures>> {
         if last > input.len() {
             break;
         }
-        let mut attempt = last;
-        if unicode
-            && attempt > 0
-            && attempt < input.len()
-            && (0xDC00..0xE000).contains(&input[attempt])
-            && (0xD800..0xDC00).contains(&input[attempt - 1])
-        {
-            attempt -= 1;
-        }
+        let attempt = if mid_pair(last) { last - 1 } else { last };
         let m = if flags.sticky { re.exec_sticky(input, attempt) } else { re.exec(input, attempt) };
         let Some(c) = m else {
             out.push(None);
@@ -293,8 +318,8 @@ fn show(units: &[u16]) -> String {
 }
 
 /// Aborts the run, naming the pattern, if one case takes over
-/// [`Watchdog::LIMIT`]: a hang in either matcher must fail fast rather
-/// than hold a CPU.
+/// [`Watchdog::LIMIT`]: a hang in any matcher must fail fast rather than
+/// hold a CPU.
 struct Watchdog {
     state: std::sync::Arc<std::sync::Mutex<(u64, String)>>,
 }
@@ -304,11 +329,13 @@ impl Watchdog {
 
     fn start() -> Watchdog {
         let state = std::sync::Arc::new(std::sync::Mutex::new((0u64, String::new())));
-        let s = state.clone();
+        let s = std::sync::Arc::downgrade(&state);
         std::thread::spawn(move || {
             let mut last = (u64::MAX, std::time::Instant::now());
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(500));
+                // The test finished and dropped its watchdog.
+                let Some(s) = s.upgrade() else { return };
                 let (n, p) = s.lock().unwrap().clone();
                 if n != last.0 {
                     last = (n, std::time::Instant::now());
@@ -328,8 +355,8 @@ impl Watchdog {
     }
 }
 
-#[test]
-fn linear_matcher_agrees_with_backtracking() {
+/// The run's settings from the environment (see the module comment).
+fn settings() -> (usize, Rng, bool) {
     let cases: usize = std::env::var("AGNIJS_REGEX_FUZZ_CASES")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -339,20 +366,33 @@ fn linear_matcher_agrees_with_backtracking() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0x5EED_0013);
     let trace = std::env::var_os("AGNIJS_REGEX_FUZZ_TRACE").is_some();
-    let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+    (cases, Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1), trace)
+}
+
+/// One random pattern and flags string.
+fn random_case(rng: &mut Rng, max_quantifiers: usize, simple_innermost: bool) -> (String, String) {
+    let mode = match rng.below(10) {
+        0..=5 => Mode::Legacy,
+        6..=7 => Mode::U,
+        _ => Mode::V,
+    };
+    let pattern = Gen { rng, mode, names: 0, quantifiers: 0, max_quantifiers, simple_innermost }.disjunction(0);
+    (pattern, random_flags(rng, mode))
+}
+
+fn u(s: &str) -> Vec<u16> {
+    s.encode_utf16().collect()
+}
+
+#[test]
+fn matchers_agree() {
+    let (cases, mut rng, trace) = settings();
     let watchdog = Watchdog::start();
-    let (mut eligible, mut ineligible, mut invalid, mut comparisons, mut anchored) = (0usize, 0usize, 0usize, 0usize, 0usize);
-    while eligible < cases {
-        let mode = match rng.below(10) {
-            0..=5 => Mode::Legacy,
-            6..=7 => Mode::U,
-            _ => Mode::V,
-        };
-        let pattern = Gen { rng: &mut rng, mode, names: 0, quantifiers: 0 }.disjunction(0);
-        let flags_s = random_flags(&mut rng, mode);
-        let p: Vec<u16> = pattern.encode_utf16().collect();
-        let f16: Vec<u16> = flags_s.encode_utf16().collect();
-        let flags = Flags::parse(&f16).unwrap();
+    let (mut valid, mut eligible, mut invalid, mut comparisons, mut anchored) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    while valid < cases {
+        let (pattern, flags_s) = random_case(&mut rng, 3, false);
+        let p = u(&pattern);
+        let flags = Flags::parse(&u(&flags_s)).unwrap();
         watchdog.case(&pattern, &flags_s);
         if trace {
             eprintln!("/{}/{flags_s}", pattern.escape_debug());
@@ -361,50 +401,147 @@ fn linear_matcher_agrees_with_backtracking() {
             invalid += 1;
             continue;
         };
+        valid += 1;
         let lin = Regex::compile_with(&p, &flags, MatcherMode::LinearWhenEligible).unwrap();
+        let auto = Regex::compile_with(&p, &flags, MatcherMode::Auto).unwrap();
         // A pattern anchored by `^` in every alternative tries index 0
         // only (TASK-100.30). `(?:)` in front hides the anchor from that
         // shortcut and changes nothing else, so the plain search over the
         // same matcher is the reference for it.
         let oracle = back.starts_anchored().then(|| {
-            let mut q: Vec<u16> = "(?:)".encode_utf16().collect();
+            let mut q = u("(?:)");
             q.extend_from_slice(&p);
             let o = Regex::compile_with(&q, &flags, MatcherMode::BacktrackingOnly).unwrap();
             assert!(!o.starts_anchored(), "/{}/{flags_s}", pattern.escape_debug());
             o
         });
         let is_eligible = lin.linear_eligibility().is_ok();
-        if is_eligible {
-            eligible += 1;
-        } else {
-            ineligible += 1;
-            if oracle.is_none() {
-                continue;
-            }
-        }
-        if oracle.is_some() {
-            anchored += 1;
-        }
+        eligible += is_eligible as usize;
+        anchored += oracle.is_some() as usize;
         for _ in 0..INPUTS_PER_PATTERN {
             let input = random_input(&mut rng);
             let a = outcomes(&back, &input, &flags);
+            comparisons += a.len();
             if let Some(o) = &oracle {
                 let c = outcomes(o, &input, &flags);
-                comparisons += c.len();
                 compare(("anchored shortcut", &a), ("plain search", &c), &pattern, &flags_s, &input);
             }
             if is_eligible {
                 let b = outcomes(&lin, &input, &flags);
-                comparisons += a.len();
                 compare(("backtracking", &a), ("linear", &b), &pattern, &flags_s, &input);
             }
+            let c = outcomes(&auto, &input, &flags);
+            compare(("backtracking", &a), ("auto", &c), &pattern, &flags_s, &input);
         }
     }
     println!(
-        "{eligible} eligible patterns ({comparisons} compared outcomes), {ineligible} ineligible, {invalid} invalid, {anchored} anchored"
+        "{valid} patterns ({comparisons} compared outcomes), {eligible} eligible, {invalid} invalid, {anchored} anchored"
     );
-    assert!(ineligible > 0, "the generator should also produce ineligible patterns");
+    assert!(eligible < valid, "the generator should also produce ineligible patterns");
     assert!(anchored > 0, "the generator should also produce anchored patterns");
+}
+
+/// Patterns where regress is known to be wrong, and the ticket that
+/// records each divergence. The backtracking matcher follows the
+/// specification there; tests/regress_bugs.rs pins the right answers.
+fn regress_bug(pattern: &str, flags: &Flags) -> Option<&'static str> {
+    let unicode = flags.unicode_mode();
+    let icase = may_fold(pattern, flags);
+    let lower = pattern.to_ascii_lowercase();
+    if !unicode && (lower.contains("\\ud8") || lower.contains("\\ud9") || lower.contains("\\uda") || lower.contains("\\udb")) {
+        // Escaped lead surrogates outside u mode join a following escape.
+        return Some("TASK-105");
+    }
+    if !unicode && pattern.contains("\\u{") {
+        return Some("TASK-106");
+    }
+    if unicode && icase && (pattern.contains("\\b") || pattern.contains("\\B")) {
+        return Some("TASK-107");
+    }
+    if !unicode && icase && (pattern.contains(['\u{17F}', '\u{212A}']) || pattern.contains("\\w") || pattern.contains("\\W")) {
+        // Found by this test (TASK-100.31): outside u mode, regress folds
+        // U+017F LATIN SMALL LETTER LONG S with s and U+212A KELVIN SIGN
+        // with k, as u mode does. Canonicalize keeps both as themselves
+        // there (their uppercase forms are ASCII or themselves), so /s/i
+        // must not match U+017F and /\w/i must not match U+212A. The test
+        // also leaves the two out of the inputs of such patterns.
+        return Some("U+017F and U+212A under i outside u mode");
+    }
+    if unicode && icase && pattern.contains("\\W") {
+        // Found by this test (TASK-100.31): inside a class under u and i,
+        // regress's \W keeps the characters that fold to word characters,
+        // so /[\W]/ui matches "s".
+        return Some("\\W under ui");
+    }
+    if flags.unicode_sets && icase {
+        // Found by this test (TASK-100.31): under v and i, regress does
+        // not fold U+212A KELVIN SIGN with k (/^K/vi misses it, /^K/ui
+        // does not), and it applies set operations before case folding,
+        // where v mode folds each operand first (MaybeSimpleCaseFolding),
+        // so /[\p{L}--[a-z]]/vi matches "c".
+        return Some("v mode under i");
+    }
+    if flags.unicode_sets && pattern.contains("[\\b") {
+        // Found by this test (TASK-100.31): in a v-mode class regress reads
+        // \b as b, not U+0008 BACKSPACE, so /[\b]/v matches "b".
+        return Some("[\\b] in v mode");
+    }
+    if flags.unicode_sets && pattern.contains("|}") {
+        // Found by this test (TASK-100.31): regress never matches the
+        // empty string of a class like [\q{abc|a|}b].
+        return Some("empty \\q{} string");
+    }
+    None
+}
+
+/// Whether any part of the pattern matches ignoring case (the i flag or
+/// an i modifier).
+fn may_fold(pattern: &str, flags: &Flags) -> bool {
+    flags.ignore_case || pattern.contains("(?i")
+}
+
+#[test]
+fn backtracking_agrees_with_regress() {
+    let (cases, mut rng, trace) = settings();
+    let watchdog = Watchdog::start();
+    let (mut compared, mut invalid, mut rejected, mut known, mut comparisons) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    while compared < cases {
+        let (pattern, flags_s) = random_case(&mut rng, 2, true);
+        let p = u(&pattern);
+        let flags = Flags::parse(&u(&flags_s)).unwrap();
+        watchdog.case(&pattern, &flags_s);
+        if trace {
+            eprintln!("/{}/{flags_s}", pattern.escape_debug());
+        }
+        let Ok(back) = Regex::compile_with(&p, &flags, MatcherMode::BacktrackingOnly) else {
+            invalid += 1;
+            continue;
+        };
+        if regress_bug(&pattern, &flags).is_some() {
+            known += 1;
+            continue;
+        }
+        let Some(reference) = Reference::compile(&p, &flags) else {
+            // Valid syntax regress does not support.
+            rejected += 1;
+            continue;
+        };
+        compared += 1;
+        for _ in 0..INPUTS_PER_PATTERN {
+            let mut input = random_input(&mut rng);
+            if !flags.unicode_mode() && may_fold(&pattern, &flags) {
+                // See the U+017F and U+212A case of `regress_bug`.
+                input.retain(|&c| c != 0x17F && c != 0x212A);
+            }
+            let a = outcomes(&back, &input, &flags);
+            let b = outcomes(&reference, &input, &flags);
+            comparisons += a.len();
+            compare(("backtracking", &a), ("regress", &b), &pattern, &flags_s, &input);
+        }
+    }
+    println!(
+        "{compared} patterns ({comparisons} compared outcomes), {invalid} invalid, {rejected} rejected by regress, {known} skipped as known regress bugs"
+    );
 }
 
 /// Fail with the reproduction at the first differing outcome.

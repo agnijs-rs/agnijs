@@ -21,10 +21,6 @@ fn features_the_linear_matcher_cannot_run_fall_back_to_backtracking() {
         (r"a(?!b)", ""),
         (r"(?<=a)b", ""),
         (r"(?<!a)b", ""),
-        (r"[\q{abc}]", "v"),
-        (r"\p{RGI_Emoji}", "v"),
-        (r"\u{61}", ""),
-        (r"\uD83D\uDE00", ""),
     ] {
         let r = re(pattern, flags, MatcherMode::Auto);
         assert!(r.linear_eligibility().is_err(), "/{}/{flags}", pattern.escape_debug());
@@ -38,6 +34,13 @@ fn features_the_linear_matcher_cannot_run_fall_back_to_backtracking() {
         (r"[\p{L}--[a-z]]", "v"),
         (r"\uD83D\uDE00", "u"),
         (r"\b\w+\b", "i"),
+        // Both matchers compile from one parse tree (TASK-100.31), so
+        // classes with strings and the escapes regress misread are
+        // eligible too.
+        (r"[\q{abc}]", "v"),
+        (r"\p{RGI_Emoji}", "v"),
+        (r"\u{61}", ""),
+        (r"😀", ""),
     ] {
         assert!(re(pattern, flags, MatcherMode::Auto).linear_eligibility().is_ok(), "/{pattern}/{flags}");
     }
@@ -56,16 +59,21 @@ fn auto_sends_only_patterns_that_can_blow_up_to_the_linear_matcher() {
         assert!(!r.uses_linear_matcher(100, 0, false), "{p}");
         assert!(!r.uses_linear_matcher(100, 0, true), "{p} sticky");
     }
-    // ... and polynomial ones move to linear once the input is long.
-    let r = re(r"\s+$", "", MatcherMode::Auto);
-    assert!(r.uses_linear_matcher(1 << 20, 0, false));
-    // Backtracking that is already linear in the input stays, however long
-    // the input: one loop under `^`, or a sticky scan.
-    let r = re(r"^\p{L}+$", "u", MatcherMode::Auto);
-    assert!(!r.uses_linear_matcher(1 << 20, 0, false));
-    assert!(!re(r"[a-z]+", "", MatcherMode::Auto).uses_linear_matcher(1 << 20, 0, true));
-    // A bounded, loop-free pattern never needs it.
-    assert!(!re("abc|abd", "", MatcherMode::Auto).uses_linear_matcher(1 << 24, 0, false));
+    // ... and so do polynomial ones, however long the input: they begin on
+    // backtracking with a step budget and finish on the linear matcher
+    // only if it runs out (tests/redos.rs times them).
+    for p in [r"\s+$", r"^\p{L}+$", r"[a-z]+", "abc|abd"] {
+        assert!(!re(p, "u", MatcherMode::Auto).uses_linear_matcher(1 << 24, 0, false), "{p}");
+    }
+    // A repeated alternation whose branches begin with different
+    // characters cannot blow up: each iteration's branch is decided by its
+    // first character.
+    for p in [r#""(?:[^"\\]|\\.)*""#, r"(?:a|b)*c", r"(?:ab|cd)+$"] {
+        assert!(!re(p, "", MatcherMode::Auto).uses_linear_matcher(1 << 20, 0, false), "{p}");
+    }
+    for p in [r"(?:a|ab)*c", r"(?:a|\w)+$", r"(?:a+|b)*c"] {
+        assert!(re(p, "", MatcherMode::Auto).uses_linear_matcher(10, 0, false), "{p}");
+    }
 }
 
 #[test]

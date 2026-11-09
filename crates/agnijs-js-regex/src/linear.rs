@@ -19,19 +19,13 @@
 //!   thread's state for merging, so merging stays sound.
 //! - **Counted quantifiers** are unrolled (`a{2,4}` is `aa(?:a(?:a)?)?`).
 //!
-//! What a single character matches is not decided here: each character
-//! class, escape and case-insensitive literal becomes a one-character
-//! predicate that `regress` itself evaluates (memoized per character), so
-//! case folding, `\w` under `ui`, property escapes and `v`-mode set
-//! operations agree with the backtracking matcher by construction. Classes
-//! that can match strings (`\q{..}`, properties of strings) are not
-//! eligible.
-//!
-//! Routing is conservative: anything the parser below does not recognise
-//! makes the pattern ineligible and it stays on the backtracking matcher.
+//! The program is compiled from the same parse tree as the backtracking
+//! matcher's (TASK-100.31), so what a character class matches is the same
+//! set in both; v-mode classes with strings are alternations there and
+//! are eligible like any other.
 
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use crate::charset::SetMatcher;
+use crate::parse::{Assertion, Node, Pattern};
 
 /// Largest program, in instructions, after unrolling counted quantifiers.
 const MAX_PROGRAM: usize = 20_000;
@@ -46,559 +40,10 @@ const NONE: usize = usize::MAX;
 /// Why a pattern is not eligible for the linear matcher.
 pub(crate) type Ineligible = &'static str;
 
-#[derive(Clone, Copy, Debug)]
-struct Mods {
-    i: bool,
-    m: bool,
-    s: bool,
-}
-
-#[derive(Debug)]
-enum Node {
-    Empty,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Inst {
     Lit(u32),
-    Pred(u32),
-    Dot { all: bool },
-    Start { multiline: bool },
-    End { multiline: bool },
-    Word { invert: bool, pred: u32 },
-    Group(Option<usize>, Box<Node>),
-    Concat(Vec<Node>),
-    Alt(Vec<Node>),
-    Repeat {
-        body: Box<Node>,
-        min: u32,
-        max: Option<u32>,
-        greedy: bool,
-        /// Capture groups inside the body: `first..first + count`.
-        first: usize,
-        count: usize,
-    },
-}
-
-fn nullable(n: &Node) -> bool {
-    match n {
-        Node::Empty | Node::Start { .. } | Node::End { .. } | Node::Word { .. } => true,
-        Node::Lit(_) | Node::Pred(_) | Node::Dot { .. } => false,
-        Node::Group(_, b) => nullable(b),
-        Node::Concat(v) => v.iter().all(nullable),
-        Node::Alt(v) => v.iter().any(nullable),
-        Node::Repeat { body, min, .. } => *min == 0 || nullable(body),
-    }
-}
-
-// ---- character predicates -------------------------------------------------------------------
-
-/// One character class, escape or case-insensitive literal, decided by
-/// `regress` on a one-character input and memoized.
-struct Pred {
-    re: regress::Regex,
-    unicode: bool,
-    /// ASCII answers: 0 unknown, 1 no, 2 yes.
-    ascii: [Cell<u8>; 128],
-    other: RefCell<HashMap<u32, bool>>,
-}
-
-impl Pred {
-    fn test(&self, c: u32) -> bool {
-        if c < 128 {
-            let slot = &self.ascii[c as usize];
-            match slot.get() {
-                1 => return false,
-                2 => return true,
-                _ => {}
-            }
-            let r = self.eval(c);
-            slot.set(if r { 2 } else { 1 });
-            return r;
-        }
-        if let Some(&r) = self.other.borrow().get(&c) {
-            return r;
-        }
-        let r = self.eval(c);
-        self.other.borrow_mut().insert(c, r);
-        r
-    }
-
-    fn eval(&self, c: u32) -> bool {
-        let mut buf = [0u16; 2];
-        let units: &[u16] = if c > 0xFFFF {
-            let v = c - 0x10000;
-            buf = [0xD800 + (v >> 10) as u16, 0xDC00 + (v & 0x3FF) as u16];
-            &buf
-        } else {
-            buf[0] = c as u16;
-            &buf[..1]
-        };
-        if self.unicode {
-            self.re.find_from_utf16(units, 0).next().is_some()
-        } else {
-            self.re.find_from_ucs2(units, 0).next().is_some()
-        }
-    }
-}
-
-struct PredTable {
-    preds: Vec<Pred>,
-    index: HashMap<(Vec<u32>, bool), u32>,
-    unicode: bool,
-    unicode_sets: bool,
-}
-
-impl PredTable {
-    /// The predicate for the one-character atom `src` under `icase`.
-    fn get(&mut self, src: &[u32], icase: bool) -> Result<u32, Ineligible> {
-        let key = (src.to_vec(), icase);
-        if let Some(&id) = self.index.get(&key) {
-            return Ok(id);
-        }
-        let mut p: Vec<u32> = "^(?:".chars().map(|c| c as u32).collect();
-        p.extend_from_slice(src);
-        p.extend(")$".chars().map(|c| c as u32));
-        let flags = regress::Flags {
-            icase,
-            multiline: false,
-            dot_all: false,
-            no_opt: false,
-            unicode: !self.unicode_sets && self.unicode,
-            unicode_sets: self.unicode_sets,
-        };
-        let re = regress::Regex::from_unicode(p.into_iter(), flags)
-            .map_err(|_| "a character atom did not compile on its own")?;
-        let id = self.preds.len() as u32;
-        self.preds.push(Pred {
-            re,
-            unicode: self.unicode || self.unicode_sets,
-            ascii: std::array::from_fn(|_| Cell::new(0)),
-            other: RefCell::new(HashMap::new()),
-        });
-        self.index.insert(key, id);
-        Ok(id)
-    }
-}
-
-// ---- parsing ---------------------------------------------------------------------------------
-
-const STRING_PROPS: &[&str] = &[
-    "Basic_Emoji",
-    "Emoji_Keycap_Sequence",
-    "RGI_Emoji_Modifier_Sequence",
-    "RGI_Emoji_Flag_Sequence",
-    "RGI_Emoji_Tag_Sequence",
-    "RGI_Emoji_ZWJ_Sequence",
-    "RGI_Emoji",
-];
-
-fn c(ch: char) -> u32 {
-    ch as u32
-}
-
-struct Parser<'a> {
-    p: &'a [u32],
-    i: usize,
-    /// Unicode mode (`u` or `v`).
-    u: bool,
-    v: bool,
-    ngroups: usize,
-    groups_seen: usize,
-    preds: PredTable,
-}
-
-impl Parser<'_> {
-    fn peek(&self) -> Option<u32> {
-        self.p.get(self.i).copied()
-    }
-    fn peek_at(&self, n: usize) -> Option<u32> {
-        self.p.get(self.i + n).copied()
-    }
-    fn at(&self, ch: char) -> bool {
-        self.peek() == Some(c(ch))
-    }
-    fn eat(&mut self, ch: char) -> bool {
-        if self.at(ch) {
-            self.i += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn disjunction(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let mut alts = vec![self.alternative(m)?];
-        while self.eat('|') {
-            alts.push(self.alternative(m)?);
-        }
-        Ok(if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) })
-    }
-
-    fn alternative(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let mut items = Vec::new();
-        while let Some(ch) = self.peek() {
-            if ch == c('|') || ch == c(')') {
-                break;
-            }
-            items.push(self.term(m)?);
-        }
-        Ok(match items.len() {
-            0 => Node::Empty,
-            1 => items.pop().unwrap(),
-            _ => Node::Concat(items),
-        })
-    }
-
-    fn term(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let ch = self.peek().unwrap();
-        if ch == c('^') {
-            self.i += 1;
-            return Ok(Node::Start { multiline: m.m });
-        }
-        if ch == c('$') {
-            self.i += 1;
-            return Ok(Node::End { multiline: m.m });
-        }
-        if ch == c('\\') && matches!(self.peek_at(1), Some(x) if x == c('b') || x == c('B')) {
-            let invert = self.peek_at(1) == Some(c('B'));
-            self.i += 2;
-            // The backtracking matcher adds the case-folded word
-            // characters (U+017F, U+212A) under `ui` only, not `vi`.
-            let w = [c('\\'), c('w')];
-            let pred = self.preds.get(&w, m.i && self.u && !self.v)?;
-            return Ok(Node::Word { invert, pred });
-        }
-        if ch == c('(') && self.peek_at(1) == Some(c('?')) {
-            let a = self.peek_at(2);
-            if a == Some(c('=')) || a == Some(c('!')) || a == Some(c('<')) {
-                return Err("lookaround");
-            }
-        }
-        let groups_before = self.groups_seen;
-        let atom = self.atom(m)?;
-        self.quantifier(atom, groups_before)
-    }
-
-    /// A braced quantifier `{n}`, `{n,}`, `{n,m}` at the cursor: its
-    /// length and bounds (saturated to `u32::MAX`).
-    fn braced(&self) -> Option<(usize, u32, Option<u32>)> {
-        let mut j = self.i + 1;
-        let digits = |j: &mut usize| -> Option<u32> {
-            let start = *j;
-            let mut v: u64 = 0;
-            while let Some(&d) = self.p.get(*j) {
-                if (c('0')..=c('9')).contains(&d) {
-                    v = (v * 10 + (d - c('0')) as u64).min(u32::MAX as u64);
-                    *j += 1;
-                } else {
-                    break;
-                }
-            }
-            (*j != start).then_some(v as u32)
-        };
-        let min = digits(&mut j)?;
-        let mut max = Some(min);
-        if self.p.get(j) == Some(&c(',')) {
-            j += 1;
-            max = digits(&mut j);
-        }
-        if self.p.get(j) != Some(&c('}')) {
-            return None;
-        }
-        Some((j + 1 - self.i, min, max))
-    }
-
-    fn quantifier(&mut self, atom: Node, groups_before: usize) -> Result<Node, Ineligible> {
-        let (min, max) = match self.peek() {
-            Some(x) if x == c('*') => {
-                self.i += 1;
-                (0, None)
-            }
-            Some(x) if x == c('+') => {
-                self.i += 1;
-                (1, None)
-            }
-            Some(x) if x == c('?') => {
-                self.i += 1;
-                (0, Some(1))
-            }
-            Some(x) if x == c('{') => match self.braced() {
-                Some((len, min, max)) => {
-                    self.i += len;
-                    (min, max)
-                }
-                None => return Ok(atom),
-            },
-            _ => return Ok(atom),
-        };
-        let greedy = !self.eat('?');
-        Ok(Node::Repeat {
-            body: Box::new(atom),
-            min,
-            max,
-            greedy,
-            first: groups_before + 1,
-            count: self.groups_seen - groups_before,
-        })
-    }
-
-    /// A one-character atom spelled `p[start..self.i]`.
-    fn char_atom(&mut self, start: usize, m: Mods) -> Result<Node, Ineligible> {
-        let src = self.p[start..self.i].to_vec();
-        Ok(Node::Pred(self.preds.get(&src, m.i)?))
-    }
-
-    fn atom(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let start = self.i;
-        let ch = self.peek().unwrap();
-        match char::from_u32(ch) {
-            Some('.') => {
-                self.i += 1;
-                Ok(Node::Dot { all: m.s })
-            }
-            Some('(') => self.group(m),
-            Some('[') => self.class(m),
-            Some('\\') => self.escape(m),
-            _ => {
-                self.i += 1;
-                if m.i {
-                    self.char_atom(start, m)
-                } else {
-                    Ok(Node::Lit(ch))
-                }
-            }
-        }
-    }
-
-    fn group(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        self.i += 1; // (
-        let node = if self.eat('?') {
-            if self.eat(':') {
-                Node::Group(None, Box::new(self.disjunction(m)?))
-            } else {
-                // Modifiers: (?ims-ims: ... ). Names were stripped and
-                // lookarounds rejected before this point.
-                let mut inner = m;
-                let mut on = true;
-                loop {
-                    match self.peek().and_then(char::from_u32) {
-                        Some('-') => on = false,
-                        Some('i') => inner.i = on,
-                        Some('m') => inner.m = on,
-                        Some('s') => inner.s = on,
-                        Some(':') => break,
-                        _ => return Err("unrecognised group"),
-                    }
-                    self.i += 1;
-                }
-                self.i += 1; // :
-                Node::Group(None, Box::new(self.disjunction(inner)?))
-            }
-        } else {
-            self.groups_seen += 1;
-            let idx = self.groups_seen;
-            Node::Group(Some(idx), Box::new(self.disjunction(m)?))
-        };
-        if !self.eat(')') {
-            return Err("unterminated group");
-        }
-        Ok(node)
-    }
-
-    fn class(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let start = self.i;
-        let mut j = self.i + 1;
-        if self.v {
-            let mut depth = 1;
-            while depth > 0 {
-                let ch = *self.p.get(j).ok_or("unterminated class")?;
-                if ch == c('\\') {
-                    match self.p.get(j + 1).copied() {
-                        Some(x) if x == c('q') => return Err("class string disjunction"),
-                        Some(x) if x == c('p') || x == c('P') => {
-                            if self.string_property(j + 2) {
-                                return Err("property of strings");
-                            }
-                        }
-                        _ => {}
-                    }
-                    j += 2;
-                    continue;
-                }
-                if ch == c('[') {
-                    depth += 1;
-                } else if ch == c(']') {
-                    depth -= 1;
-                }
-                j += 1;
-            }
-        } else {
-            if self.p.get(j) == Some(&c('^')) {
-                j += 1;
-            }
-            loop {
-                let ch = *self.p.get(j).ok_or("unterminated class")?;
-                if ch == c(']') {
-                    j += 1;
-                    break;
-                }
-                j += if ch == c('\\') { 2 } else { 1 };
-            }
-        }
-        self.i = j;
-        self.char_atom(start, m)
-    }
-
-    /// Whether `{Name}` at `j` names a property of strings.
-    fn string_property(&self, j: usize) -> bool {
-        if self.p.get(j) != Some(&c('{')) {
-            return false;
-        }
-        let mut name = String::new();
-        let mut k = j + 1;
-        while let Some(&ch) = self.p.get(k) {
-            if ch == c('}') {
-                break;
-            }
-            name.push(char::from_u32(ch).unwrap_or('\u{FFFD}'));
-            k += 1;
-        }
-        STRING_PROPS.contains(&name.as_str())
-    }
-
-    fn is_hex(&self, n: usize) -> bool {
-        self.peek_at(n)
-            .and_then(char::from_u32)
-            .is_some_and(|ch| ch.is_ascii_hexdigit())
-    }
-
-    fn escape(&mut self, m: Mods) -> Result<Node, Ineligible> {
-        let start = self.i;
-        self.i += 1; // backslash
-        let e = self.peek().ok_or("trailing backslash")?;
-        match char::from_u32(e) {
-            Some('1'..='9') => {
-                let mut n: usize = 0;
-                let mut j = self.i;
-                while let Some(d) = self.p.get(j).and_then(|&x| char::from_u32(x)).and_then(|x| x.to_digit(10)) {
-                    n = n.saturating_mul(10).saturating_add(d as usize);
-                    j += 1;
-                }
-                if n <= self.ngroups || self.u {
-                    return Err("backreference");
-                }
-                self.legacy_octal();
-            }
-            Some('0') => {
-                if !self.u && matches!(self.peek_at(1).and_then(char::from_u32), Some('0'..='9')) {
-                    self.legacy_octal();
-                } else {
-                    self.i += 1;
-                }
-            }
-            Some('k') if self.u => return Err("named reference"),
-            Some('p') | Some('P') if self.u => {
-                if self.v && self.string_property(self.i + 1) {
-                    return Err("property of strings");
-                }
-                while let Some(ch) = self.peek() {
-                    self.i += 1;
-                    if ch == c('}') {
-                        break;
-                    }
-                }
-            }
-            Some('c') => {
-                if self.peek_at(1).and_then(char::from_u32).is_some_and(|l| l.is_ascii_alphabetic()) {
-                    self.i += 2;
-                } else if self.u {
-                    return Err("invalid escape");
-                } else {
-                    // Annex B: a lone `\` before a `c` that starts the next atom.
-                    let src = [c('\\'), c('\\')];
-                    return Ok(if m.i {
-                        Node::Pred(self.preds.get(&src, true)?)
-                    } else {
-                        Node::Lit(c('\\'))
-                    });
-                }
-            }
-            Some('x') => {
-                self.i += 1;
-                if self.is_hex(0) && self.is_hex(1) {
-                    self.i += 2;
-                }
-            }
-            Some('u') => {
-                self.i += 1;
-                if !self.u && self.at('{') {
-                    // Annex B reads `\u{2}` as `u{2}`; the backtracking
-                    // matcher reads a code point escape.
-                    return Err("braced unicode escape outside unicode mode");
-                }
-                if self.u && self.at('{') {
-                    while let Some(ch) = self.peek() {
-                        self.i += 1;
-                        if ch == c('}') {
-                            break;
-                        }
-                    }
-                } else if (0..4).all(|k| self.is_hex(k)) {
-                    let hex = |p: &Self, from: usize| -> u32 {
-                        (0..4).fold(0, |v, k| {
-                            v * 16 + char::from_u32(p.p[from + k]).and_then(|x| x.to_digit(16)).unwrap()
-                        })
-                    };
-                    let lead = hex(self, self.i);
-                    self.i += 4;
-                    // A surrogate pair spelled as two escapes is one code
-                    // point in unicode mode.
-                    if self.u
-                        && (0xD800..0xDC00).contains(&lead)
-                        && self.at('\\')
-                        && self.peek_at(1) == Some(c('u'))
-                        && (2..6).all(|k| self.is_hex(k))
-                    {
-                        let trail = hex(self, self.i + 2);
-                        if (0xDC00..0xE000).contains(&trail) {
-                            self.i += 6;
-                        }
-                    }
-                }
-            }
-            _ => {
-                self.i += 1;
-            }
-        }
-        // Assertions (`\b`, `\B`) were handled by `term`; everything left
-        // is one character.
-        self.char_atom(start, m)
-    }
-
-    /// Annex B LegacyOctalEscapeSequence (or `\8`, `\9` identity) at the
-    /// cursor, which sits on the first digit.
-    fn legacy_octal(&mut self) {
-        let d0 = self.peek().unwrap();
-        self.i += 1;
-        if d0 == c('8') || d0 == c('9') {
-            return;
-        }
-        let is_oct = |x: Option<u32>| matches!(x, Some(x) if (c('0')..=c('7')).contains(&x));
-        if is_oct(self.peek()) {
-            let two = (d0 - c('0')) * 8 + (self.peek().unwrap() - c('0'));
-            self.i += 1;
-            if two <= 0o37 && is_oct(self.peek()) {
-                self.i += 1;
-            }
-        }
-    }
-}
-
-// ---- program -------------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug)]
-enum Inst {
-    Lit(u32),
-    Pred(u32),
-    Any,
-    AnyNoLt,
+    Set(u32),
     Split(u32, u32),
     Jmp(u32),
     Save(u32),
@@ -606,7 +51,7 @@ enum Inst {
     Reset(u32, u32),
     Start { multiline: bool },
     End { multiline: bool },
-    Word { invert: bool, pred: u32 },
+    Word { invert: bool, set: u32 },
     /// Begin an iteration of a quantifier with a nullable body at this
     /// nesting level: clear the level's consumed bit.
     Enter(u8),
@@ -615,15 +60,16 @@ enum Inst {
     Match,
 }
 
-struct Compiler {
+struct Compiler<'a> {
     prog: Vec<Inst>,
     /// Nesting level of nullable-body iterations at each instruction.
     depth_at: Vec<u8>,
     depth: u8,
     max_depth: u8,
+    sets: &'a mut Vec<crate::charset::CharSet>,
 }
 
-impl Compiler {
+impl Compiler<'_> {
     fn emit(&mut self, i: Inst) -> Result<usize, Ineligible> {
         if self.prog.len() >= MAX_PROGRAM {
             return Err("program too large");
@@ -637,35 +83,40 @@ impl Compiler {
         self.prog.len() as u32
     }
 
+    fn set(&mut self, s: &crate::charset::CharSet) -> u32 {
+        if let Some(i) = self.sets.iter().position(|x| x == s) {
+            return i as u32;
+        }
+        self.sets.push(s.clone());
+        self.sets.len() as u32 - 1
+    }
+
     fn node(&mut self, n: &Node) -> Result<(), Ineligible> {
         match n {
             Node::Empty => {}
-            Node::Lit(x) => {
-                self.emit(Inst::Lit(*x))?;
+            Node::Set(s) => {
+                let i = match s.single_member() {
+                    Some(c) => Inst::Lit(c),
+                    None => Inst::Set(self.set(s)),
+                };
+                self.emit(i)?;
             }
-            Node::Pred(p) => {
-                self.emit(Inst::Pred(*p))?;
+            Node::Assert(a) => {
+                let i = match *a {
+                    Assertion::Start { multiline } => Inst::Start { multiline },
+                    Assertion::End { multiline } => Inst::End { multiline },
+                    Assertion::Word { negate, extended } => {
+                        Inst::Word { invert: negate, set: self.set(&crate::parse::word_chars(extended)) }
+                    }
+                };
+                self.emit(i)?;
             }
-            Node::Dot { all } => {
-                self.emit(if *all { Inst::Any } else { Inst::AnyNoLt })?;
-            }
-            Node::Start { multiline } => {
-                self.emit(Inst::Start { multiline: *multiline })?;
-            }
-            Node::End { multiline } => {
-                self.emit(Inst::End { multiline: *multiline })?;
-            }
-            Node::Word { invert, pred } => {
-                self.emit(Inst::Word { invert: *invert, pred: *pred })?;
-            }
-            Node::Group(idx, body) => {
-                if let Some(k) = idx {
-                    self.emit(Inst::Save((2 * k) as u32))?;
-                }
+            Node::BackRef { .. } => return Err("backreference"),
+            Node::Look { .. } => return Err("lookaround"),
+            Node::Capture(k, body) => {
+                self.emit(Inst::Save((2 * k) as u32))?;
                 self.node(body)?;
-                if let Some(k) = idx {
-                    self.emit(Inst::Save((2 * k + 1) as u32))?;
-                }
+                self.emit(Inst::Save((2 * k + 1) as u32))?;
             }
             Node::Concat(v) => {
                 for x in v {
@@ -701,8 +152,8 @@ impl Compiler {
                     }
                     self.node(body)?;
                 }
-                let check = nullable(body);
-                let optional = |c: &mut Compiler| -> Result<(), Ineligible> {
+                let check = body.nullable();
+                let optional = |c: &mut Self| -> Result<(), Ineligible> {
                     if check {
                         if c.depth as u32 >= MAX_EMPTY_DEPTH {
                             return Err("nullable quantifiers nested too deeply");
@@ -748,68 +199,53 @@ impl Compiler {
     }
 }
 
-/// How many backtracking steps one linear-matcher step is worth, for the
-/// auto routing rule (measured with agnijs-js-bench's regex workloads).
-const LINEAR_STEP_COST: u64 = 16;
-
-/// Worst-case cost facts for the backtracking matcher, for the auto
-/// routing rule (see [`Linear::backtracking_is_bounded`]).
-#[derive(Clone, Copy, Debug, Default)]
-struct Cost {
-    /// A repeated atom contains a quantifier or an alternation: the
-    /// backtracking matcher can be exponential.
-    nested: bool,
-    /// Unbounded quantifiers (each multiplies the worst case by the input
-    /// length).
-    unbounded: u32,
-    /// Product of the bounded quantifiers' choice counts and the
-    /// alternations' widths.
-    choices: u64,
-    /// Every match must begin at input start (a leading non-multiline
-    /// `^` in each alternative), so a failed attempt anywhere else ends at
-    /// its first instruction.
-    anchored: bool,
-}
-
-/// Whether every path through `n` begins with a non-multiline `^`.
-fn anchored(n: &Node) -> bool {
-    match n {
-        Node::Start { multiline: false } => true,
-        Node::Group(_, b) => anchored(b),
-        Node::Concat(v) => v.first().is_some_and(anchored),
-        Node::Alt(v) => v.iter().all(anchored),
-        _ => false,
-    }
-}
-
-fn cost(n: &Node, acc: &mut Cost) {
-    fn repeats_or_alts(n: &Node) -> bool {
+/// Whether the backtracking matcher can be exponential on `n`: some
+/// repeated atom can match the same text in more than one way. A repeated
+/// alternation whose branches begin with disjoint characters and repeat
+/// nothing inside (`(?:[^"\\]|\\.)*`) is not counted: each iteration's
+/// branch is decided by its first character.
+fn nested(n: &Node) -> bool {
+    fn ambiguous(n: &Node) -> bool {
         match n {
-            Node::Alt(_) => true,
-            Node::Repeat { max, .. } => max.map_or(true, |m| m > 1),
-            Node::Group(_, b) => repeats_or_alts(b),
-            Node::Concat(v) => v.iter().any(repeats_or_alts),
+            Node::Alt(alts) => {
+                if alts.iter().any(|a| a.nullable() || ambiguous(a)) {
+                    return true;
+                }
+                let firsts: Vec<_> = alts.iter().map(first_chars).collect();
+                for (i, a) in firsts.iter().enumerate() {
+                    let Some(a) = a else { return true };
+                    for b in &firsts[i + 1..] {
+                        match b {
+                            Some(b) if !a.overlaps(b) => {}
+                            _ => return true,
+                        }
+                    }
+                }
+                false
+            }
+            Node::Repeat { max, .. } => max.is_none_or(|m| m > 1),
+            Node::Capture(_, b) => ambiguous(b),
+            Node::Concat(v) => v.iter().any(ambiguous),
             _ => false,
         }
     }
     match n {
-        Node::Group(_, b) => cost(b, acc),
-        Node::Concat(v) => v.iter().for_each(|x| cost(x, acc)),
-        Node::Alt(v) => {
-            acc.choices = acc.choices.saturating_mul(v.len() as u64);
-            v.iter().for_each(|x| cost(x, acc));
-        }
-        Node::Repeat { body, min, max, .. } => {
-            if max.map_or(true, |m| m > 1) && repeats_or_alts(body) {
-                acc.nested = true;
-            }
-            match max {
-                None => acc.unbounded += 1,
-                Some(m) => acc.choices = acc.choices.saturating_mul((m - min) as u64 + 1),
-            }
-            cost(body, acc);
-        }
-        _ => {}
+        Node::Repeat { body, max, .. } => (max.is_none_or(|m| m > 1) && ambiguous(body)) || nested(body),
+        Node::Capture(_, b) => nested(b),
+        Node::Concat(v) | Node::Alt(v) => v.iter().any(nested),
+        Node::Look { body, .. } => nested(body),
+        _ => false,
+    }
+}
+
+/// The characters `n` must begin with, when it cannot match empty and
+/// begins with a plain character.
+fn first_chars(n: &Node) -> Option<crate::charset::CharSet> {
+    match n {
+        Node::Set(s) => Some(s.clone()),
+        Node::Capture(_, b) => first_chars(b),
+        Node::Concat(v) => v.first().and_then(first_chars),
+        _ => None,
     }
 }
 
@@ -825,12 +261,7 @@ struct Threads {
 
 impl Threads {
     fn new(states: usize, nslots: usize) -> Threads {
-        Threads {
-            dense: vec![0; states],
-            sparse: vec![0; states],
-            len: 0,
-            slots: vec![NONE; states * nslots],
-        }
+        Threads { dense: vec![0; states], sparse: vec![0; states], len: 0, slots: vec![NONE; states * nslots] }
     }
     fn contains(&self, id: u32) -> bool {
         let s = self.sparse[id as usize] as usize;
@@ -848,7 +279,8 @@ enum Frame {
     Restore(u32, usize),
 }
 
-struct Scratch {
+/// Working memory for one regex, reused across matches.
+pub(crate) struct Scratch {
     clist: Threads,
     nlist: Threads,
     slots: Vec<usize>,
@@ -858,36 +290,21 @@ struct Scratch {
 // ---- the matcher -----------------------------------------------------------------------------
 
 /// A pattern compiled for the linear-time matcher.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Linear {
-    prog: Vec<Inst>,
-    /// Bits of the consumed mask that matter at each instruction.
-    relevant: Vec<u32>,
+    pub prog: Vec<Inst>,
+    pub sets: Vec<SetMatcher>,
     /// log2 of the states per instruction.
-    shift: u32,
-    nslots: usize,
-    preds: Vec<Pred>,
-    unicode: bool,
-    cost: Cost,
+    pub shift: u32,
+    pub nslots: usize,
+    pub unicode: bool,
+    /// The backtracking matcher can be exponential on this pattern.
+    pub nested: bool,
     /// The instructions that can consume the first character of a match,
     /// when no match can be empty: used to skip ahead between attempts.
-    first: Option<Vec<Inst>>,
-    scratch: RefCell<Option<Scratch>>,
-}
-
-/// Whether the pattern spells `\uXXXX\uXXXX` with a lead surrogate first
-/// (escapes are not decoded otherwise; a false positive only keeps the
-/// pattern on the backtracking matcher).
-fn escaped_surrogate_pair(p: &[u32]) -> bool {
-    let hex4 = |i: usize| -> Option<u32> {
-        if p.get(i) != Some(&c('\\')) || p.get(i + 1) != Some(&c('u')) {
-            return None;
-        }
-        (0..4).try_fold(0u32, |v, k| Some(v * 16 + char::from_u32(*p.get(i + 2 + k)?)?.to_digit(16)?))
-    };
-    (0..p.len()).any(|i| {
-        matches!(hex4(i), Some(h) if (0xD800..0xDC00).contains(&h))
-            && hex4(i + 6).is_some()
-    })
+    pub first: Option<Vec<Inst>>,
+    /// Bits of the consumed mask that matter at each instruction.
+    pub relevant: Vec<u32>,
 }
 
 /// Whether a code unit is a LineTerminator.
@@ -896,100 +313,49 @@ fn is_lt(u: u32) -> bool {
 }
 
 impl Linear {
-    /// Compile `pattern` (the numbered-groups pattern the backtracking
-    /// matcher also sees, already validated) or say why it is not eligible.
-    pub(crate) fn compile(
-        pattern: &[u32],
-        ngroups: usize,
-        icase: bool,
-        multiline: bool,
-        dot_all: bool,
-        unicode: bool,
-        unicode_sets: bool,
-    ) -> Result<Linear, Ineligible> {
-        if !(unicode || unicode_sets) && escaped_surrogate_pair(pattern) {
-            // The backtracking matcher joins `\uD83D\uDE00` into one code
-            // point even outside unicode mode, so it never matches the two
-            // code units the spec says it should. Leave such patterns where
-            // they are so both modes keep agreeing. An escaped lead before
-            // any other four-digit escape goes wrong too: the lead followed
-            // by an optional escaped `b` misses the lone lead in the input
-            // `a`, lead, trail.
-            return Err("escaped lead surrogate before another escape outside unicode mode");
-        }
-        let mut p = Parser {
-            p: pattern,
-            i: 0,
-            u: unicode || unicode_sets,
-            v: unicode_sets,
-            ngroups,
-            groups_seen: 0,
-            preds: PredTable { preds: Vec::new(), index: HashMap::new(), unicode, unicode_sets },
-        };
-        let ast = p.disjunction(Mods { i: icase, m: multiline, s: dot_all })?;
-        if p.i != pattern.len() || p.groups_seen != ngroups {
-            return Err("pattern not fully understood");
-        }
-        let mut cmp = Compiler { prog: Vec::new(), depth_at: Vec::new(), depth: 0, max_depth: 0 };
+    /// Compile the parsed pattern, or say why it is not eligible.
+    pub(crate) fn compile(p: &Pattern) -> Result<Linear, Ineligible> {
+        let mut sets = Vec::new();
+        let mut cmp = Compiler { prog: Vec::new(), depth_at: Vec::new(), depth: 0, max_depth: 0, sets: &mut sets };
         cmp.emit(Inst::Save(0))?;
-        cmp.node(&ast)?;
+        cmp.node(&p.node)?;
         cmp.emit(Inst::Save(1))?;
         cmp.emit(Inst::Match)?;
         let shift = cmp.max_depth as u32;
-        let nslots = 2 * (ngroups + 1);
+        let nslots = 2 * (p.group_count() + 1);
         let states = cmp.prog.len() << shift;
         if states.saturating_mul(nslots) > MAX_TABLE {
             return Err("thread table too large");
         }
         let relevant = cmp.depth_at.iter().map(|&d| (1u32 << d) - 1).collect();
-        let mut c = Cost { choices: 1, ..Cost::default() };
-        cost(&ast, &mut c);
-        c.anchored = anchored(&ast);
+        let prog = cmp.prog;
         let mut lin = Linear {
-            prog: cmp.prog,
-            relevant,
+            prog,
+            sets: sets.iter().map(SetMatcher::new).collect(),
             shift,
             nslots,
-            preds: p.preds.preds,
-            unicode: unicode || unicode_sets,
-            cost: c,
+            unicode: p.unicode,
+            nested: nested(&p.node),
             first: None,
-            scratch: RefCell::new(None),
+            relevant,
         };
         lin.first = lin.first_set();
         Ok(lin)
     }
 
     /// Program size, for the routing estimate.
-    fn size(&self) -> u64 {
+    pub(crate) fn size(&self) -> u64 {
         self.prog.len() as u64
     }
 
-    /// The auto rule: whether the backtracking matcher's worst case on
-    /// `len` units of input from `starts` start positions stays under
-    /// `budget` steps, so the (usually faster) backtracker is safe.
-    pub(crate) fn backtracking_is_bounded(&self, len: usize, starts: usize, budget: u64) -> bool {
-        let c = &self.cost;
-        if c.nested {
-            return false;
+    pub(crate) fn scratch(&self) -> Scratch {
+        let states = self.prog.len() << self.shift;
+        Scratch {
+            clist: Threads::new(states, self.nslots),
+            nlist: Threads::new(states, self.nslots),
+            slots: vec![NONE; self.nslots],
+            stack: Vec::new(),
         }
-        let per_path = self.size().saturating_mul(c.choices);
-        if c.unbounded == 0 {
-            // No unbounded loop: every attempt is bounded by the pattern,
-            // so the whole search is linear in the input already.
-            return per_path <= budget;
-        }
-        let starts = if c.anchored { 1 } else { starts };
-        let mut est = per_path.saturating_mul(starts as u64);
-        for _ in 0..c.unbounded {
-            est = est.saturating_mul(len as u64 + 1);
-        }
-        // The linear matcher's own cost is about `size × len` steps, each
-        // dearer than a backtracking step. Backtracking that is within a
-        // constant of that (one loop under `^`, say) stays: switching
-        // matchers only pays when backtracking grows faster than the input.
-        let linear = self.size().saturating_mul(len as u64 + 1).saturating_mul(LINEAR_STEP_COST);
-        est <= budget.max(linear)
     }
 
     /// Epsilon closure of the entry point, ignoring assertions: the
@@ -1003,7 +369,7 @@ impl Linear {
                 continue;
             }
             match self.prog[pc] {
-                Inst::Lit(_) | Inst::Pred(_) | Inst::Any | Inst::AnyNoLt => out.push(self.prog[pc]),
+                Inst::Lit(_) | Inst::Set(_) => out.push(self.prog[pc]),
                 Inst::Match => return None,
                 Inst::Split(a, b) => {
                     stack.push(b as usize);
@@ -1013,68 +379,38 @@ impl Linear {
                 _ => stack.push(pc + 1),
             }
         }
-        if out.iter().any(|i| matches!(i, Inst::Any)) || out.len() > 8 {
+        if out.len() > 8 {
             return None;
         }
         Some(out)
     }
 
-    /// The character at `pos` and its length in code units.
     #[inline]
     fn decode(&self, input: &[u16], pos: usize) -> Option<(u32, usize)> {
-        let u = *input.get(pos)? as u32;
-        if self.unicode && (0xD800..0xDC00).contains(&u) {
-            if let Some(&l) = input.get(pos + 1) {
-                let l = l as u32;
-                if (0xDC00..0xE000).contains(&l) {
-                    return Some((0x10000 + ((u - 0xD800) << 10) + (l - 0xDC00), 2));
-                }
-            }
-        }
-        Some((u, 1))
-    }
-
-    fn decode_left(&self, input: &[u16], pos: usize) -> Option<u32> {
-        if pos == 0 {
-            return None;
-        }
-        let u = input[pos - 1] as u32;
-        if self.unicode && (0xDC00..0xE000).contains(&u) && pos >= 2 {
-            let h = input[pos - 2] as u32;
-            if (0xD800..0xDC00).contains(&h) {
-                return Some(0x10000 + ((h - 0xD800) << 10) + (u - 0xDC00));
-            }
-        }
-        Some(u)
+        crate::backtrack::decode(input, pos, self.unicode)
     }
 
     #[inline]
     fn consumes(&self, inst: Inst, ch: u32) -> bool {
         match inst {
             Inst::Lit(x) => x == ch,
-            Inst::Pred(p) => self.preds[p as usize].test(ch),
-            Inst::Any => true,
-            Inst::AnyNoLt => !is_lt(ch),
+            Inst::Set(s) => self.sets[s as usize].contains(ch),
             _ => false,
         }
     }
 
     /// Find the leftmost match at or after `start` (or exactly at `start`
     /// when `sticky`). Returns the capture slots as ranges.
-    pub(crate) fn exec(&self, input: &[u16], start: usize, sticky: bool) -> Option<Vec<Option<(usize, usize)>>> {
+    pub(crate) fn exec(
+        &self,
+        s: &mut Scratch,
+        input: &[u16],
+        start: usize,
+        sticky: bool,
+    ) -> Option<Vec<Option<(usize, usize)>>> {
         if start > input.len() {
             return None;
         }
-        let mut guard = self.scratch.borrow_mut();
-        let s = guard.get_or_insert_with(|| {
-            let states = self.prog.len() << self.shift;
-            Scratch {
-                clist: Threads::new(states, self.nslots),
-                nlist: Threads::new(states, self.nslots),
-                slots: vec![NONE; self.nslots],
-                stack: Vec::new(),
-            }
-        });
         s.clist.len = 0;
         s.nlist.len = 0;
         let all = u32::MAX;
@@ -1204,10 +540,10 @@ impl Linear {
                         }
                         pc += 1;
                     }
-                    Inst::Word { invert, pred } => {
-                        let p = &self.preds[pred as usize];
-                        let a = self.decode_left(input, pos).is_some_and(|c| p.test(c));
-                        let b = self.decode(input, pos).is_some_and(|(c, _)| p.test(c));
+                    Inst::Word { invert, set } => {
+                        let w = &self.sets[set as usize];
+                        let a = crate::backtrack::decode_left(input, pos, self.unicode).is_some_and(|(c, _)| w.contains(c));
+                        let b = self.decode(input, pos).is_some_and(|(c, _)| w.contains(c));
                         if (a != b) == invert {
                             break;
                         }
@@ -1223,7 +559,7 @@ impl Linear {
                         }
                         pc += 1;
                     }
-                    Inst::Lit(_) | Inst::Pred(_) | Inst::Any | Inst::AnyNoLt | Inst::Match => {
+                    Inst::Lit(_) | Inst::Set(_) | Inst::Match => {
                         let base = id as usize * self.nslots;
                         list.slots[base..base + self.nslots].copy_from_slice(slots);
                         break;

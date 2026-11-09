@@ -69,6 +69,7 @@ impl CharSet {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn len(&self) -> u64 {
         self.ranges.iter().map(|&(a, b)| (b - a) as u64 + 1).sum()
     }
@@ -77,12 +78,6 @@ impl CharSet {
         let r = &self.ranges;
         let i = r.partition_point(|&(_, hi)| hi < c);
         i < r.len() && r[i].0 <= c
-    }
-
-    pub(crate) fn add(&mut self, lo: u32, hi: u32) {
-        let mut v = std::mem::take(&mut self.ranges);
-        v.push((lo, hi));
-        *self = CharSet::from_unsorted(v);
     }
 
     pub(crate) fn union(&self, other: &CharSet) -> CharSet {
@@ -198,6 +193,7 @@ impl SetMatcher {
     }
 
     /// The set back as ranges (for serialization).
+    #[allow(dead_code)] // Program serialization, the next step of TASK-100.31.
     pub(crate) fn to_set(&self) -> CharSet {
         let mut v = Vec::new();
         for c in 0..256u32 {

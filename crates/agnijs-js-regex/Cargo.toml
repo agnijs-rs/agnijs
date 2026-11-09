@@ -14,5 +14,9 @@ default = ["linear"]
 linear = []
 
 [dependencies]
-regress.workspace = true
 unicode-id-start.workspace = true
+
+[dev-dependencies]
+# The previous matcher (ADR 0013), now only the reference that
+# tests/differential.rs compares against (TASK-100.31).
+regress.workspace = true
