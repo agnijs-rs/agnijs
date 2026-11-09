@@ -1,0 +1,161 @@
+//! BigInt storage and the numeric conversions the operators need. The
+//! arithmetic itself is `num-bigint`; this module adds the ECMAScript
+//! conversions (number <-> BigInt, string parsing with radix prefixes,
+//! `asIntN`/`asUintN`).
+
+use num_bigint::{BigInt, Sign};
+use num_traits::{Signed, ToPrimitive, Zero};
+
+pub struct BigIntData(pub BigInt);
+
+impl BigIntData {
+    pub fn is_zero(&self) -> bool {
+        self.0.is_zero()
+    }
+}
+
+/// `NumberToBigInt`: exact integral doubles only.
+pub fn from_f64(n: f64) -> Option<BigInt> {
+    if !n.is_finite() || n.fract() != 0.0 {
+        return None;
+    }
+    if n.abs() < 9.007_199_254_740_992e15 {
+        return Some(BigInt::from(n as i64));
+    }
+    // Decompose the double exactly.
+    let bits = n.to_bits();
+    let sign = if bits >> 63 == 1 {
+        Sign::Minus
+    } else {
+        Sign::Plus
+    };
+    let exp = ((bits >> 52) & 0x7ff) as i64;
+    let mantissa = (bits & ((1u64 << 52) - 1)) | (1u64 << 52);
+    let shift = exp - 1075;
+    let mut v = BigInt::from(mantissa);
+    if shift > 0 {
+        v <<= shift as usize;
+    } else {
+        v >>= (-shift) as usize;
+    }
+    if sign == Sign::Minus {
+        v = -v;
+    }
+    Some(v)
+}
+
+/// BigInt to the nearest double (ties to even), as `Number(bigint)`.
+pub fn to_f64(b: &BigInt) -> f64 {
+    if let Some(i) = b.to_i64() {
+        return i as f64;
+    }
+    // num-bigint's to_f64 rounds correctly for large values and returns
+    // infinities when out of range.
+    b.to_f64().unwrap_or(if b.is_negative() {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    })
+}
+
+/// `StringToBigInt`: an optional sign-less integer literal with radix
+/// prefix, surrounded by whitespace. Empty string is 0n. `None` is a
+/// SyntaxError for the caller.
+pub fn parse(units: impl Iterator<Item = u16>) -> Option<BigInt> {
+    let s: Vec<u16> = units.collect();
+    let (start, end) = crate::string::trim_range(&crate::string::Units::Two(&s), true, true);
+    let s = &s[start..end];
+    if s.is_empty() {
+        return Some(BigInt::zero());
+    }
+    let (radix, digits): (u32, &[u16]) = if s.len() > 2 && s[0] == b'0' as u16 {
+        match s[1] {
+            x if x == b'x' as u16 || x == b'X' as u16 => (16, &s[2..]),
+            x if x == b'o' as u16 || x == b'O' as u16 => (8, &s[2..]),
+            x if x == b'b' as u16 || x == b'B' as u16 => (2, &s[2..]),
+            _ => (10, s),
+        }
+    } else {
+        (10, s)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let (neg, digits) = if radix == 10 && (digits[0] == b'-' as u16 || digits[0] == b'+' as u16) {
+        (digits[0] == b'-' as u16, &digits[1..])
+    } else {
+        (false, digits)
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut v = BigInt::zero();
+    for &u in digits {
+        let c = char::from_u32(u as u32)?;
+        let d = c.to_digit(radix)?;
+        v = v * radix + d;
+    }
+    Some(if neg { -v } else { v })
+}
+
+/// Parse a literal from the compiler's constant pool (already validated by
+/// the lexer; may carry a radix prefix, no sign).
+pub fn parse_literal(text: &str) -> BigInt {
+    parse(text.encode_utf16()).expect("invalid BigInt literal in constant pool")
+}
+
+/// `BigInt.asUintN(bits, x)`.
+pub fn as_uint_n(bits: u64, x: &BigInt) -> BigInt {
+    if bits == 0 {
+        return BigInt::zero();
+    }
+    let modulus = BigInt::from(1) << (bits as usize);
+    let r = x % &modulus;
+    if r.is_negative() {
+        r + modulus
+    } else {
+        r
+    }
+}
+
+/// `BigInt.asIntN(bits, x)`.
+pub fn as_int_n(bits: u64, x: &BigInt) -> BigInt {
+    if bits == 0 {
+        return BigInt::zero();
+    }
+    let modulus = BigInt::from(1) << (bits as usize);
+    let half = BigInt::from(1) << ((bits - 1) as usize);
+    let r = as_uint_n(bits, x);
+    if r >= half {
+        r - modulus
+    } else {
+        r
+    }
+}
+
+/// `BigInt::toString(radix)`.
+pub fn to_string_radix(b: &BigInt, radix: u32) -> String {
+    b.to_str_radix(radix)
+}
+
+/// Exponentiation with a non-negative exponent (RangeError otherwise is the
+/// caller's job). `None` when the exponent does not fit.
+pub fn pow(base: &BigInt, exp: &BigInt) -> Option<BigInt> {
+    let e = exp.to_u32()?;
+    Some(num_traits::pow::Pow::pow(base, e))
+}
+
+/// The low 128 bits of `b` in two's complement (for typed-array stores).
+pub fn to_i128_wrapping(b: &BigInt) -> i128 {
+    let m = as_int_n(128, b);
+    // as_int_n yields a value in [-2^127, 2^127), which fits i128 exactly.
+    let (sign, digits) = m.to_u64_digits();
+    let mut v: u128 = 0;
+    for (i, d) in digits.iter().enumerate().take(2) {
+        v |= (*d as u128) << (64 * i);
+    }
+    match sign {
+        num_bigint::Sign::Minus => (v as i128).wrapping_neg(),
+        _ => v as i128,
+    }
+}

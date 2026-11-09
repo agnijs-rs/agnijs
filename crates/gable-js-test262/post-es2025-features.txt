@@ -1,0 +1,26 @@
+# Features listed in the "Standard" section of test262's features.txt at the
+# pinned commit that reached Stage 4 after the ES2025 (16th edition) cut.
+# The ES2025 gate is: standard section minus this list. Review this file
+# when the pin moves (the runner reports names that no longer exist).
+#
+# ES2026 (17th edition)
+Array.fromAsync
+Atomics.pause
+Error.isError
+explicit-resource-management
+iterator-sequencing
+json-parse-with-source
+Math.sumPrecise
+uint8array-base64
+upsert
+#
+# Reached Stage 4 after ES2026 was frozen, or unclear edition; treated as
+# post-2025 until a maintainer confirms otherwise.
+iterator-chunking
+iterator-includes
+joint-iteration
+Temporal
+canonical-tz
+#
+# ECMA-402 (intl402 directory only; listed so the cut is explicit)
+Intl.DurationFormat

@@ -1,0 +1,12 @@
+[package]
+name = "gable-js-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "gable-js-parser"
+
+[dependencies]
+unicode-id-start.workspace = true
+gable-js-regex.workspace = true
