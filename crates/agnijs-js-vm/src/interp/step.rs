@@ -45,6 +45,13 @@ impl Vm {
         code.names[idx as usize].clone()
     }
 
+    /// The generic semantics of every instruction (ADR 0019 J3). The
+    /// dispatch loop (`Vm::run`) handles the hot, non-allocating,
+    /// non-faulting cases itself and calls this for the rest, with
+    /// `frames[fi].pc` (already advanced past `instr`) and `frames[fi].acc`
+    /// written back; it reloads both afterwards. Kept out of line so the
+    /// loop's own stack frame and register allocation stay small.
+    #[inline(never)]
     pub(crate) fn step(
         &mut self,
         instr: Instr,
@@ -1670,7 +1677,7 @@ pub enum ArithOp {
     BitXor,
 }
 
-fn instr_arith(i: Instr) -> ArithOp {
+pub(crate) fn instr_arith(i: Instr) -> ArithOp {
     match i {
         Instr::Sub(_) => ArithOp::Sub,
         Instr::Mul(_) => ArithOp::Mul,

@@ -135,27 +135,39 @@ impl Vm {
         name: u32,
         or_undefined: bool,
     ) -> JsResult<Value> {
+        if let Some(v) = self.load_global_cached(code, name) {
+            return Ok(v);
+        }
+        self.load_global_slow(code, name, or_undefined)
+    }
+
+    /// The cached read of a global binding, when the entry for `name` still
+    /// applies: no interning, no hashing, no allocation and no fault (the
+    /// dispatch loop's fast path).
+    #[inline]
+    pub(crate) fn load_global_cached(&self, code: &CodeBlock, name: u32) -> Option<Value> {
         let realm = self.current_realm;
         let e = code.globals()[name as usize].get();
-        if e.realm == realm.0 {
-            let r = &self.realms[realm.0 as usize];
-            if e.kind == GlobalEntry::LEXICAL {
-                if let Some((_, b)) = r.global_lexicals.get_index(e.index as usize) {
-                    if !b.value.is_empty() {
-                        return Ok(b.value);
-                    }
+        if e.realm != realm.0 {
+            return None;
+        }
+        let r = &self.realms[realm.0 as usize];
+        if e.kind == GlobalEntry::LEXICAL {
+            if let Some((_, b)) = r.global_lexicals.get_index(e.index as usize) {
+                if !b.value.is_empty() {
+                    return Some(b.value);
                 }
-            } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
-                if let Some(d) = &self.heap.obj(r.global).dict {
-                    if let Some((_, p)) = d.get_index(e.index as usize) {
-                        if let PropSlot::Data(v) = p.slot {
-                            return Ok(v);
-                        }
+            }
+        } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
+            if let Some(d) = &self.heap.obj(r.global).dict {
+                if let Some((_, p)) = d.get_index(e.index as usize) {
+                    if let PropSlot::Data(v) = p.slot {
+                        return Some(v);
                     }
                 }
             }
         }
-        self.load_global_slow(code, name, or_undefined)
+        None
     }
 
     #[inline(never)]
@@ -205,32 +217,43 @@ impl Vm {
         v: Value,
         strict: bool,
     ) -> JsResult<()> {
+        if self.store_global_cached(code, name, v) {
+            return Ok(());
+        }
+        self.store_global_slow(code, name, v, strict)
+    }
+
+    /// The cached write of a global binding; `true` when done. Like
+    /// [`Self::load_global_cached`], it never allocates or faults.
+    #[inline]
+    pub(crate) fn store_global_cached(&mut self, code: &CodeBlock, name: u32, v: Value) -> bool {
         let realm = self.current_realm;
         let e = code.globals()[name as usize].get();
-        if e.realm == realm.0 {
-            let r = &mut self.realms[realm.0 as usize];
-            if e.kind == GlobalEntry::LEXICAL {
-                if let Some((_, b)) = r.global_lexicals.get_index_mut(e.index as usize) {
-                    if !b.value.is_empty() && !b.kind.is_const() {
-                        b.value = v;
-                        return Ok(());
-                    }
+        if e.realm != realm.0 {
+            return false;
+        }
+        let r = &mut self.realms[realm.0 as usize];
+        if e.kind == GlobalEntry::LEXICAL {
+            if let Some((_, b)) = r.global_lexicals.get_index_mut(e.index as usize) {
+                if !b.value.is_empty() && !b.kind.is_const() {
+                    b.value = v;
+                    return true;
                 }
-            } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
-                let global = r.global;
-                if let Some(d) = &mut self.heap.obj_mut(global).dict {
-                    if let Some((_, p)) = d.get_index_mut(e.index as usize) {
-                        if p.attrs.writable() {
-                            if let PropSlot::Data(slot) = &mut p.slot {
-                                *slot = v;
-                                return Ok(());
-                            }
+            }
+        } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
+            let global = r.global;
+            if let Some(d) = &mut self.heap.obj_mut(global).dict {
+                if let Some((_, p)) = d.get_index_mut(e.index as usize) {
+                    if p.attrs.writable() {
+                        if let PropSlot::Data(slot) = &mut p.slot {
+                            *slot = v;
+                            return true;
                         }
                     }
                 }
             }
         }
-        self.store_global_slow(code, name, v, strict)
+        false
     }
 
     #[inline(never)]

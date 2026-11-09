@@ -444,7 +444,8 @@ impl Vm {
 
         self.heap.live_bytes = self.heap.approx_live_bytes();
         self.heap.allocated_since_gc = 0;
-        self.heap.gc_threshold = (self.heap.live_bytes * 2).max(8 * 1024 * 1024);
+        self.heap.rearm_threshold();
+        self.refresh_attention();
     }
 
     fn mark_from(&mut self, t: &mut Tracer, work: &mut Vec<Work>) {

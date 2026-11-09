@@ -515,7 +515,7 @@ impl Engine for Vm {
     }
 
     fn set_memory_limit(&mut self, bytes: Option<usize>) {
-        self.heap.memory_limit = bytes;
+        self.heap.set_memory_limit(bytes);
     }
 
     fn memory_usage(&mut self) -> MemoryUsage {
@@ -530,7 +530,7 @@ impl Engine for Vm {
             self.handles.reclaim();
             self.collect();
         } else {
-            self.gc_requested = true;
+            self.request_gc();
         }
     }
 

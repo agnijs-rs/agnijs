@@ -1021,6 +1021,7 @@ impl Debuggee for Vm {
             exception: None,
         }));
         self.debug_hot = true;
+        self.refresh_attention();
         // Scripts the engine still holds become known now, oldest first.
         let mut known: Vec<(Rc<CodeBlock>, ScriptKind, RealmId)> = self
             .scripts
@@ -1036,6 +1037,7 @@ impl Debuggee for Vm {
     fn detach(&mut self) {
         self.debug = None;
         self.debug_hot = false;
+        self.refresh_attention();
     }
 
     fn is_attached(&self) -> bool {

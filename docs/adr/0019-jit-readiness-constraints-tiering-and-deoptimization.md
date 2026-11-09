@@ -29,7 +29,6 @@ The current engine (checked at `59fb104`, 2026-11-09) is already close:
 - The heap is precise, non-moving and index-based, and collects only at safe points.
 - The engine interface (`agnijs-engine-api`) exposes no interpreter type, only opaque bytecode bytes.
 - No engine crate uses `unsafe`; the only uses are in the QuickJS-NG FFI adapter and the benchmark's process-memory probe.
-
 The gaps are listed in the spec, section 14.
 
 ## Decision
@@ -75,7 +74,7 @@ These hold for every engine change from now on. The six tickets above carry a JI
   - Heap ids that machine code embeds as constants are rooted from the code object, or re-validated on use by identity and shape the way the inline cache does (ADR 0012).
   - There is no write barrier today. If an incremental or generational collector adds one, it is a single `Heap` function that every store of a value into the heap goes through, with an inline fast check a JIT can emit.
   - A moving collector reopens this ADR, because it needs either stack maps or handle indirection in machine code.
-- **J7. One attention word.** Interrupt requests, the memory limit, GC requests, GC stress mode and the debugger all funnel into one word at a fixed field of `Vm` (TASK-100.17). Every tier polls it at function entry, at loop back-edges and after a call returns. Each poll is a load, a compare and a branch, and the slow path is shared Rust code.
+- **J7. One attention word.** Interrupt requests, the memory limit, GC requests, GC stress mode and the debugger all funnel into one word at a fixed field of `Vm` (TASK-100.17). Every tier polls it at function entry, at loop back-edges and after a call returns. Each poll is a load, a compare and a branch, and the slow path is shared Rust code. As built by TASK-100.17 the word is `Heap::attention` (`ATTENTION_GC`, `ATTENTION_DEBUG`); `Heap` is a by-value field of `Vm`, so the word sits at a fixed offset from the `Vm` pointer, and it lives in the heap because the allocator is its most frequent writer.
 - **J8. One way into JavaScript, one way to push a frame, faults as values.**
   - Natives, host entry points, jobs and `call`/`apply` reach JavaScript through one function, which is where tier selection lives. JavaScript-to-JavaScript calls push frames through one path, and arguments are a slice of the caller's register window (TASK-100.19).
   - A fault is a returned `Fault`. Handler lookup runs on the interpreter frame at the written-back `pc`. Machine code returns a fault to the runtime and never unwinds the Rust stack.

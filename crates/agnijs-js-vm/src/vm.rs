@@ -797,14 +797,50 @@ impl Vm {
 
     // ---- host -----------------------------------------------------------------------
 
-    /// Poll the host's interrupt hook every so often.
+    /// Poll the host's interrupt hook every so often. The interpreter polls
+    /// at function entry, at loop back-edges and after a call returns (ADR
+    /// 0019 J7); the host hook itself runs once per 4096 polls.
     #[inline]
     pub fn poll_interrupt(&mut self) -> JsResult<()> {
         self.interrupt_counter = self.interrupt_counter.wrapping_add(1);
-        if self.interrupt_counter & 0xfff == 0 && self.host.interrupt() {
+        if self.interrupt_counter & 0xfff == 0 {
+            return self.ask_host_interrupt();
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn ask_host_interrupt(&mut self) -> JsResult<()> {
+        if self.host.interrupt() {
             return Err(Fault::Interrupt);
         }
         Ok(())
+    }
+
+    /// Ask for a collection at the next safe point.
+    pub(crate) fn request_gc(&mut self) {
+        self.gc_requested = true;
+        self.heap.attention |= crate::heap::ATTENTION_GC;
+    }
+
+    /// Recompute the attention word (`Heap::attention`, ADR 0019 J7) from
+    /// its sources. The collection bit is dropped while a native frame
+    /// defers collection and the threshold alone asks for one: the next
+    /// allocation raises it again (`Heap::charge`), so a deferred collection
+    /// costs one slow pass per allocating instruction, not per instruction.
+    pub(crate) fn refresh_attention(&mut self) {
+        let mut a = 0;
+        if self.debug_hot {
+            a |= crate::heap::ATTENTION_DEBUG;
+        }
+        if self.heap.stress
+            || self.gc_requested
+            || (self.native_depth == 0 && self.heap.allocated_since_gc >= self.heap.gc_threshold)
+        {
+            a |= crate::heap::ATTENTION_GC;
+        }
+        self.heap.attention = a;
     }
 
     /// Run `f` as a native frame: the collector is deferred while it runs.

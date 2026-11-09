@@ -606,20 +606,7 @@ impl Vm {
         let ln = self.to_numeric(l)?;
         let rn = self.to_numeric(r)?;
         match (ln, rn) {
-            (Value::Number(a), Value::Number(b)) => {
-                let x = f64_to_int32(a);
-                let y = f64_to_uint32(b);
-                let res = match op {
-                    ArithOp::Shl => (x.wrapping_shl(y & 31)) as f64,
-                    ArithOp::Shr => (x >> (y & 31)) as f64,
-                    ArithOp::UShr => ((x as u32) >> (y & 31)) as f64,
-                    ArithOp::BitAnd => (x & y as i32) as f64,
-                    ArithOp::BitOr => (x | y as i32) as f64,
-                    ArithOp::BitXor => (x ^ y as i32) as f64,
-                    _ => unreachable!(),
-                };
-                Ok(Value::Number(res))
-            }
+            (Value::Number(a), Value::Number(b)) => Ok(Value::Number(number_bitwise(op, a, b))),
             (Value::BigInt(a), Value::BigInt(b)) => {
                 let x = self.heap.bigint(a).0.clone();
                 let y = self.heap.bigint(b).0.clone();
@@ -770,7 +757,27 @@ impl Vm {
     }
 }
 
-fn number_arith(op: ArithOp, a: f64, b: f64) -> f64 {
+/// A shift or bitwise operator on two numbers (the Number case of
+/// [`Vm::op_bitwise`], shared with the dispatch loop's fast path).
+#[inline]
+pub(crate) fn number_bitwise(op: ArithOp, a: f64, b: f64) -> f64 {
+    let x = f64_to_int32(a);
+    let y = f64_to_uint32(b);
+    match op {
+        ArithOp::Shl => (x.wrapping_shl(y & 31)) as f64,
+        ArithOp::Shr => (x >> (y & 31)) as f64,
+        ArithOp::UShr => ((x as u32) >> (y & 31)) as f64,
+        ArithOp::BitAnd => (x & y as i32) as f64,
+        ArithOp::BitOr => (x | y as i32) as f64,
+        ArithOp::BitXor => (x ^ y as i32) as f64,
+        _ => unreachable!(),
+    }
+}
+
+/// An arithmetic operator on two numbers (the Number case of
+/// [`Vm::op_arith`], shared with the dispatch loop's fast path).
+#[inline]
+pub(crate) fn number_arith(op: ArithOp, a: f64, b: f64) -> f64 {
     match op {
         ArithOp::Sub => a - b,
         ArithOp::Mul => a * b,

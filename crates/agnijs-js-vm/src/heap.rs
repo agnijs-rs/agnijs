@@ -161,6 +161,14 @@ const OBJECT_BYTES: usize = 160;
 const ENV_BYTES: usize = 64;
 const SYMBOL_BYTES: usize = 32;
 const STRING_BYTES: usize = 40;
+const DEFAULT_GC_THRESHOLD: usize = 8 * 1024 * 1024;
+
+/// Attention bit: a collection is wanted at the next safe point (threshold
+/// or memory limit reached, requested by the host, or stress mode).
+pub const ATTENTION_GC: u32 = 1;
+/// Attention bit: a debugger client is attached, so every instruction is a
+/// potential pause.
+pub const ATTENTION_DEBUG: u32 = 2;
 /// One dense element (a `Value`).
 pub(crate) const ELEMENT_BYTES: usize = 16;
 /// One shape-described property slot.
@@ -183,9 +191,23 @@ pub struct Heap {
     pub key_tables: Vec<KeyTable>,
     /// Interned strings (atoms), weakly held: the sweep removes dead ones.
     intern: HashTable<StrId>,
-    /// Bytes allocated since the last collection (approximate).
+    /// The VM's attention word (ADR 0019 J7): non-zero when the dispatch
+    /// loop must leave its fast path before the next instruction, for a
+    /// collection ([`ATTENTION_GC`]: the threshold or the memory limit was
+    /// reached, the host or `$262.gc()` asked, or stress mode is on) or for
+    /// the debugger ([`ATTENTION_DEBUG`]: a client is attached). It lives in
+    /// the heap because the allocator is its most frequent setter; it is one
+    /// word at a fixed offset of `Vm` all the same. `Vm::refresh_attention`
+    /// recomputes it from its sources.
+    pub attention: u32,
+    /// Bytes allocated since the last collection (approximate). Grown only
+    /// through [`Heap::charge`], which raises the attention word when the
+    /// threshold is reached.
     pub allocated_since_gc: usize,
-    /// Collect when `allocated_since_gc` passes this.
+    /// Collect when `allocated_since_gc` passes this: twice the live bytes
+    /// after the last collection, at least 8 MiB, and never more than the
+    /// distance to the memory limit, so a limit is noticed as soon as it is
+    /// reached (`rearm_threshold`).
     pub gc_threshold: usize,
     /// Approximate live bytes after the last collection.
     pub live_bytes: usize,
@@ -223,8 +245,9 @@ impl Heap {
             shapes: Vec::new(),
             key_tables: vec![KeyTable::default()],
             intern: HashTable::new(),
+            attention: if stress_every.is_some() { ATTENTION_GC } else { 0 },
             allocated_since_gc: 0,
-            gc_threshold: 8 * 1024 * 1024,
+            gc_threshold: DEFAULT_GC_THRESHOLD,
             live_bytes: 0,
             stress: stress_every.is_some(),
             stress_every: stress_every.unwrap_or(1),
@@ -266,7 +289,37 @@ impl Heap {
     /// collection and the memory limit.
     #[inline]
     pub fn note_growth(&mut self, bytes: usize) {
+        self.charge(bytes);
+    }
+
+    /// Count `bytes` of new storage towards the next collection, and ask
+    /// the dispatch loop for a safe point once the threshold is reached.
+    #[inline]
+    pub fn charge(&mut self, bytes: usize) {
         self.allocated_since_gc += bytes;
+        if self.allocated_since_gc >= self.gc_threshold {
+            self.attention |= ATTENTION_GC;
+        }
+    }
+
+    /// Set the threshold for the next collection from the live bytes of the
+    /// last one and the memory limit; called after a collection and when
+    /// the limit changes.
+    pub fn rearm_threshold(&mut self) {
+        let mut t = (self.live_bytes * 2).max(DEFAULT_GC_THRESHOLD);
+        if let Some(limit) = self.memory_limit {
+            // The limit is exceeded when live + allocated > limit.
+            t = t.min(limit.saturating_sub(self.live_bytes) + 1);
+        }
+        self.gc_threshold = t;
+        if self.allocated_since_gc >= t {
+            self.attention |= ATTENTION_GC;
+        }
+    }
+
+    pub fn set_memory_limit(&mut self, bytes: Option<usize>) {
+        self.memory_limit = bytes;
+        self.rearm_threshold();
     }
 
     // ---- objects -----------------------------------------------------------
@@ -274,7 +327,7 @@ impl Heap {
     /// An object arrives with whatever elements and slots its creator
     /// filled in (array literals, `new_array`), so that storage counts here.
     pub fn alloc_object(&mut self, data: ObjectData) -> ObjId {
-        self.allocated_since_gc += OBJECT_BYTES + data.extra_bytes();
+        self.charge(OBJECT_BYTES + data.extra_bytes());
         ObjId(self.objects.alloc(data))
     }
 
@@ -291,7 +344,7 @@ impl Heap {
     // ---- environments ------------------------------------------------------
 
     pub fn alloc_env(&mut self, env: Environment) -> EnvId {
-        self.allocated_since_gc += ENV_BYTES + env.slot_count() * 16;
+        self.charge(ENV_BYTES + env.slot_count() * 16);
         EnvId(self.envs.alloc(env))
     }
 
@@ -308,7 +361,7 @@ impl Heap {
     // ---- symbols -----------------------------------------------------------
 
     pub fn alloc_symbol(&mut self, data: SymbolData) -> SymId {
-        self.allocated_since_gc += SYMBOL_BYTES;
+        self.charge(SYMBOL_BYTES);
         SymId(self.symbols.alloc(data))
     }
 
@@ -325,7 +378,7 @@ impl Heap {
     // ---- bigints -------------------------------------------------------------
 
     pub fn alloc_bigint(&mut self, data: BigIntData) -> BigId {
-        self.allocated_since_gc += 32 + data.0.bits() as usize / 8;
+        self.charge(32 + data.0.bits() as usize / 8);
         BigId(self.bigints.alloc(data))
     }
 
@@ -355,7 +408,7 @@ impl Heap {
     // ---- strings -------------------------------------------------------------
 
     fn alloc_string(&mut self, data: StringData) -> StrId {
-        self.allocated_since_gc += STRING_BYTES + data.byte_len();
+        self.charge(STRING_BYTES + data.byte_len());
         StrId(self.strings.alloc(data))
     }
 
