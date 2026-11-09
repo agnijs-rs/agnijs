@@ -119,6 +119,8 @@ impl<'a> Compiler<'a> {
                     FuncCtx::default(),
                     &analysis,
                 )?;
+                self.set_pos(e.span());
+                self.mark_statement();
                 self.expr(e)?;
                 self.emit_return();
                 while self.scopes.len() > self.fs_ref().scope_base {

@@ -791,6 +791,18 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
     for o in &c.offsets {
         w.u32(*o);
     }
+    w.len(c.debug.statements.len());
+    for s in &c.debug.statements {
+        w.u32(s.pc);
+        w.u32(s.offset);
+    }
+    w.len(c.debug.locals.len());
+    for l in &c.debug.locals {
+        w.str(&l.name);
+        w.u16(l.reg);
+        w.u32(l.start);
+        w.u32(l.end);
+    }
     w.len(c.constants.len());
     for k in &c.constants {
         put_constant(w, k);
@@ -867,6 +879,26 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
     let instrs = (0..n).map(|_| get_instr(r)).collect::<Result<Vec<_>>>()?;
     let n = r.count(4)?;
     let offsets = (0..n).map(|_| r.u32()).collect::<Result<Vec<_>>>()?;
+    let n = r.count(8)?;
+    let statements = (0..n)
+        .map(|_| {
+            Ok(StatementStart {
+                pc: r.u32()?,
+                offset: r.u32()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let n = r.count(11)?;
+    let locals = (0..n)
+        .map(|_| {
+            Ok(LocalVar {
+                name: r.str()?,
+                reg: r.u16()?,
+                start: r.u32()?,
+                end: r.u32()?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
     let n = r.count(1)?;
     let constants = (0..n).map(|_| get_constant(r)).collect::<Result<_>>()?;
     let names = r.strs()?;
@@ -961,6 +993,7 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         span,
         module,
         ic: (0..ic_len).map(|_| Cell::new(IcEntry::EMPTY)).collect(),
+        debug: DebugInfo { statements, locals },
     };
     verify_block(&code)?;
     Ok(Rc::new(code))
@@ -997,6 +1030,20 @@ fn verify_block(code: &CodeBlock) -> Result<()> {
     }
     if let Some(o) = code.offsets.iter().find(|o| **o as usize > text.len()) {
         return invalid(format!("source offset {o} outside the source text"));
+    }
+    if code
+        .debug
+        .statements
+        .iter()
+        .any(|s| s.pc as usize >= len || s.offset as usize > text.len())
+        || code.debug.statements.windows(2).any(|w| w[0].pc >= w[1].pc)
+    {
+        return invalid("statement starts out of order or outside the block");
+    }
+    if let Some(l) = code.debug.locals.iter().find(|l| {
+        l.reg >= code.register_count || l.start > l.end || l.end as usize > len
+    }) {
+        return invalid(format!("local {:?} outside the block", l.name));
     }
     for h in &code.handlers {
         if h.start > h.end || h.end as usize > len || h.target as usize >= len {

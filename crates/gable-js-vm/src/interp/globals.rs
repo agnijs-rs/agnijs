@@ -1113,6 +1113,7 @@ impl Vm {
             Ok(c) => c,
             Err(e) => return Err(self.throw_syntax(&e.message)),
         };
+        self.debug_script_compiled(&code, gable_js_debugger::ScriptKind::Eval);
         let env = self.frames[fi].env;
         let realm = self.frames[fi].realm;
         let this = self.frames[fi].this;
@@ -1143,6 +1144,7 @@ impl Vm {
             Ok(c) => c,
             Err(e) => return Err(self.throw_syntax(&e.message)),
         };
+        self.debug_script_compiled(&code, gable_js_debugger::ScriptKind::Eval);
         let env = self.realm_of(realm).global_env;
         let global = self.realm_of(realm).global;
         self.run_eval_code(
@@ -1157,7 +1159,7 @@ impl Vm {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn run_eval_code(
+    pub(crate) fn run_eval_code(
         &mut self,
         code: Rc<CodeBlock>,
         env: Option<EnvId>,
@@ -1197,7 +1199,7 @@ impl Vm {
     }
 
     /// The parser context of a direct eval at frame `fi`.
-    fn eval_options(&mut self, fi: usize, strict: bool) -> EvalOptions {
+    pub(crate) fn eval_options(&mut self, fi: usize, strict: bool) -> EvalOptions {
         let code = self.frames[fi].code.clone();
         let env = self.frames[fi].env;
         let mut opts = EvalOptions {

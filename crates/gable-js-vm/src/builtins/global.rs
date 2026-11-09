@@ -412,6 +412,9 @@ fn global_unescape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 // ---- console ---------------------------------------------------------------------------
 
 fn console_emit(vm: &mut Vm, a: &CallArgs, level: ConsoleLevel) -> JsResult<Value> {
+    if vm.debug_hot {
+        vm.debug_console(level, a.args);
+    }
     let mut parts = Vec::with_capacity(a.len());
     for &v in a.args {
         let s = match v {

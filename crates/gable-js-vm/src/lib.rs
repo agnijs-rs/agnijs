@@ -8,6 +8,7 @@
 pub mod bigint;
 pub mod builtins;
 pub mod convert;
+pub mod debug;
 pub mod engine;
 pub mod env;
 pub mod gc;
@@ -22,6 +23,7 @@ pub mod symbol;
 pub mod value;
 pub mod vm;
 
+pub use debug::make_debuggee;
 pub use engine::make_engine;
 pub use vm::Vm;
 

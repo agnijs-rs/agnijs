@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "gable-js-debugger"
+description = "The engine-neutral debugger interface: breakpoints, stepping, frame and scope inspection, async stacks, script source and source maps"
 
 [dependencies]
+gable-engine-api.workspace = true
+serde_json.workspace = true

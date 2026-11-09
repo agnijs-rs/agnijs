@@ -249,6 +249,12 @@ dependencies = [
 [[package]]
 name = "gable-js-cdp"
 version = "0.1.0"
+dependencies = [
+ "gable-engine-api",
+ "gable-js-debugger",
+ "gable-js-vm",
+ "serde_json",
+]
 
 [[package]]
 name = "gable-js-compiler"
@@ -260,6 +266,10 @@ dependencies = [
 [[package]]
 name = "gable-js-debugger"
 version = "0.1.0"
+dependencies = [
+ "gable-engine-api",
+ "serde_json",
+]
 
 [[package]]
 name = "gable-js-intl"
@@ -335,6 +345,7 @@ version = "0.1.0"
 dependencies = [
  "gable-engine-api",
  "gable-js-compiler",
+ "gable-js-debugger",
  "gable-js-intl",
  "gable-js-parser",
  "gable-js-regex",

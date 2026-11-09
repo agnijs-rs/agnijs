@@ -310,8 +310,9 @@ pub struct Vm {
     pub symbol_registry: HashMap<StrId, SymId>,
     pub jobs: VecDeque<Job>,
     pub engine_id: EngineId,
-    /// Script sources by name (`Engine::script_source`).
-    pub scripts: HashMap<String, Rc<str>>,
+    /// Scripts and source modules by name (`Engine::script_source`), with
+    /// their code so an attached debugger can list and break in them.
+    pub scripts: HashMap<String, crate::debug::ScriptEntry>,
     /// Module records by resolved specifier (per realm).
     pub modules: HashMap<(RealmId, String), ObjId>,
     pub interrupt_counter: u32,
@@ -344,6 +345,10 @@ pub struct Vm {
     pub gc_count: u64,
     /// Set by `collect_garbage` requests from the host or `$262.gc()`.
     pub gc_requested: bool,
+    /// Debugger state; `None` unless a client is attached.
+    pub(crate) debug: Option<Box<crate::debug::DebugState>>,
+    /// Tested on the dispatch loop's slow path: a client is attached.
+    pub(crate) debug_hot: bool,
 }
 
 impl Vm {
@@ -384,6 +389,8 @@ impl Vm {
             pending_finalizers: Vec::new(),
             gc_count: 0,
             gc_requested: false,
+            debug: None,
+            debug_hot: false,
         };
         let main = vm.create_realm();
         vm.current_realm = main;

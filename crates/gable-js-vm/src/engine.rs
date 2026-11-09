@@ -2,7 +2,7 @@
 //! the interface, host functions and objects, and the bytecode container.
 //!
 //! Bytecode container (ADR 0010): the shared `GBJS` container with the
-//! `gable-bc-2` tag around a kind byte and the serialised code tree, so
+//! `gable-bc-3` tag around a kind byte and the serialised code tree, so
 //! loading precompiled code skips parsing and compiling. The M2
 //! source-payload container (`GBLC`, `gable-bc-1`) still loads for one
 //! release.
@@ -23,7 +23,7 @@ use std::rc::Rc;
 /// a kind byte, then the serialised code tree (`gable_js_compiler::serialize`).
 /// The tag pins the compiler: any change to `Instr`, `CodeBlock`, the
 /// constant pool or the serialiser's layout changes it.
-pub const FORMAT: &str = "gable-bc-2";
+pub const FORMAT: &str = "gable-bc-3";
 
 /// The M2 container (ADR 0010): `GBLC` magic, `gable-bc-1`, a kind byte, the
 /// name and the source text, recompiled on load. Still accepted for one
@@ -262,7 +262,7 @@ impl Vm {
 
     /// `name` and `message` of a thrown value, without running user code
     /// that could throw again.
-    fn exception_name_message(&mut self, v: Value) -> (String, String) {
+    pub(crate) fn exception_name_message(&mut self, v: Value) -> (String, String) {
         match v {
             Value::Object(o) => {
                 let name_key = PropKey::Str(self.names.name);
@@ -284,7 +284,7 @@ impl Vm {
     }
 
     /// Prototype-chain lookup that reads data properties only.
-    fn lookup_data_property(&self, mut o: ObjId, key: PropKey) -> Option<Value> {
+    pub(crate) fn lookup_data_property(&self, mut o: ObjId, key: PropKey) -> Option<Value> {
         for _ in 0..64 {
             if let Some(p) = self.heap.get_own_property(o, key) {
                 return p.value();
@@ -337,10 +337,14 @@ impl Vm {
         self.current_realm = realm;
         let r = f(self);
         self.current_realm = saved;
-        match r {
+        let r = match r {
             Ok(v) => Ok(v),
             Err(fault) => Err(self.fault_to_error(fault)),
+        };
+        if self.debug_hot && self.frames.is_empty() {
+            self.debug_run_ended(r.as_ref().err());
         }
+        r
     }
 
     fn syntax_error_value(&mut self, realm: RealmId, message: &str) -> Error {
@@ -348,7 +352,11 @@ impl Vm {
         self.current_realm = realm;
         let v = self.make_error(ErrorType::SyntaxError, message);
         self.current_realm = saved;
-        self.fault_to_error(Fault::Throw(v))
+        let e = self.fault_to_error(Fault::Throw(v));
+        if self.debug_hot && self.frames.is_empty() {
+            self.debug_run_ended(Some(&e));
+        }
+        e
     }
 
     /// Run host finalisers for host objects collected since the last call.
@@ -435,7 +443,7 @@ impl Engine for Vm {
             Ok(c) => c,
             Err(e) => return Err(self.syntax_error_value(realm, &e.message)),
         };
-        self.scripts.insert(name.to_string(), Rc::from(source));
+        self.note_script(&code, gable_js_debugger::ScriptKind::Script, realm);
         self.realms[realm.0 as usize]
             .script_names
             .push(name.to_string());
@@ -465,7 +473,7 @@ impl Engine for Vm {
     }
 
     fn script_source(&mut self, _realm: RealmId, name: &str) -> Option<String> {
-        self.scripts.get(name).map(|s| s.to_string())
+        self.scripts.get(name).map(|s| s.code.source.text.to_string())
     }
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {
@@ -493,8 +501,7 @@ impl Engine for Vm {
         self.check_realm(realm)?;
         match decode_bytecode(bytecode, false)? {
             Decoded::Script(code) => {
-                let name = code.source.name.to_string();
-                self.scripts.insert(name, Rc::from(&*code.source.text));
+                self.note_script(&code, gable_js_debugger::ScriptKind::Script, realm);
                 let v = self.enter(realm, |vm| vm.run_script(code))?;
                 Ok(self.to_api_value(v))
             }

@@ -759,6 +759,49 @@ pub struct CodeBlock {
     pub module: Option<Rc<ModuleInfo>>,
     /// Inline caches, one per GetNamed / SetNamed site; filled by the VM.
     pub ic: Box<[Cell<IcEntry>]>,
+    /// Statement starts and register-resident bindings, for the debugger.
+    pub debug: DebugInfo,
+}
+
+/// What a debugger needs beyond `offsets`: where statements start (the
+/// places a breakpoint or a step can stop) and which registers hold which
+/// named bindings over which instruction ranges. Captured bindings are
+/// already named by [`ScopeInfo`].
+#[derive(Clone, Debug, Default)]
+pub struct DebugInfo {
+    /// Statement starts, by ascending and distinct instruction index.
+    pub statements: Vec<StatementStart>,
+    /// Register bindings, in declaration order.
+    pub locals: Vec<LocalVar>,
+}
+
+/// A statement's first instruction and the source offset of the
+/// statement (which can precede the instruction's own offset, e.g. the
+// `const` of a declaration whose first instruction evaluates its
+/// initialiser).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StatementStart {
+    pub pc: u32,
+    pub offset: u32,
+}
+
+/// A binding kept in a register: `name` is in register `reg` while
+/// `start <= pc < end`.
+#[derive(Clone, Debug)]
+pub struct LocalVar {
+    pub name: Rc<str>,
+    pub reg: Reg,
+    pub start: u32,
+    pub end: u32,
+}
+
+impl DebugInfo {
+    /// Whether instruction `pc` starts a statement.
+    pub fn is_statement(&self, pc: usize) -> bool {
+        self.statements
+            .binary_search_by_key(&(pc as u32), |s| s.pc)
+            .is_ok()
+    }
 }
 
 /// Static module structure (ES Module Record fields).

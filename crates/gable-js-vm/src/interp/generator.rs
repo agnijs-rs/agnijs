@@ -442,6 +442,9 @@ impl Vm {
         };
         let on_ok = self.new_native_closure("", 1, async_fulfilled, vec![Value::Object(go)]);
         let on_err = self.new_native_closure("", 1, async_rejected, vec![Value::Object(go)]);
+        if self.debug_hot {
+            self.debug_note_await();
+        }
         promise::perform_then(self, p, Value::Object(on_ok), Value::Object(on_err), None)?;
         Ok(())
     }

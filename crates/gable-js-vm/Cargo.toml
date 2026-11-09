@@ -13,6 +13,7 @@ gable-js-parser.workspace = true
 gable-js-compiler.workspace = true
 gable-js-regex.workspace = true
 gable-js-intl.workspace = true
+gable-js-debugger.workspace = true
 hashbrown = "0.14"
 indexmap = "2"
 num-bigint = "0.4"

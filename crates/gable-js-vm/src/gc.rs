@@ -309,6 +309,9 @@ impl Vm {
         roots.values(&self.regs);
         roots.values(&self.roots);
         roots.values(&self.keep_alive);
+        if let Some(d) = &self.debug {
+            roots.values(&d.roots());
+        }
         for s in self.heap.single_chars.iter().flatten() {
             roots.str(*s);
         }

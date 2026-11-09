@@ -228,8 +228,7 @@ impl Vm {
                     Ok(c) => c,
                     Err(e) => return self.syntax_error(&e.message),
                 };
-                self.scripts
-                    .insert(resolved.clone(), Rc::from(text.as_str()));
+                self.note_script(&code, gable_js_debugger::ScriptKind::Module, realm);
                 self.new_module_record(realm, &resolved, Some(code), None)
             }
             ModuleSource::Bytecode(bytes) => {

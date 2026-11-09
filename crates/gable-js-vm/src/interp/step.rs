@@ -1247,7 +1247,12 @@ impl Vm {
                     }
                 }
             }
-            Instr::Debugger | Instr::Nop => {}
+            Instr::Nop => {}
+            Instr::Debugger => {
+                if self.debug_hot {
+                    self.debug_statement();
+                }
+            }
         }
         Ok(Flow::Next)
     }

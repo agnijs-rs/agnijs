@@ -81,6 +81,7 @@ pub fn create_dynamic_function(
         Ok(r) => r,
         Err(e) => return vm.syntax_error(&e.message),
     };
+    vm.debug_script_compiled(&code, gable_js_debugger::ScriptKind::Function);
     let fallback = match kind {
         DynamicFunctionKind::Normal => Intrinsic::FunctionPrototype,
         DynamicFunctionKind::Generator => Intrinsic::GeneratorFunctionPrototype,

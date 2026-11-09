@@ -376,6 +376,9 @@ impl<'a> Compiler<'a> {
 
     pub(crate) fn stmt(&mut self, s: &Statement) -> CResult<()> {
         self.set_pos(s.span());
+        if !matches!(s, Statement::Block(_) | Statement::Empty(_)) {
+            self.mark_statement();
+        }
         match s {
             Statement::Block(b) => self.block(&b.body),
             Statement::Empty(_) => Ok(()),

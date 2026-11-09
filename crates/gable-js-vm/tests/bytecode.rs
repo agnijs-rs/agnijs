@@ -31,9 +31,9 @@ fn eval(e: &mut dyn Engine, realm: RealmId, src: &str) -> Value {
 #[test]
 fn the_engine_names_its_bytecode_format_and_uses_the_shared_container() {
     let (_host, mut e, realm) = engine();
-    assert_eq!(e.info().bytecode_format, "gable-bc-2");
+    assert_eq!(e.info().bytecode_format, "gable-bc-3");
     let bytes = e.compile_script(realm, "a.js", "1 + 1").unwrap();
-    assert!(bytecode::unwrap("gable-bc-2", &bytes).is_ok());
+    assert!(bytecode::unwrap("gable-bc-3", &bytes).is_ok());
 }
 
 const PROGRAM: &str = r#"
@@ -143,7 +143,7 @@ fn another_engines_bytecode_is_a_version_mismatch() {
     let foreign = bytecode::wrap("quickjs-ng-0.16", b"\x02\x00");
     match e.eval_bytecode(realm, &foreign) {
         Err(Error::BytecodeMismatch { expected, found }) => {
-            assert_eq!(expected, "gable-bc-2");
+            assert_eq!(expected, "gable-bc-3");
             assert_eq!(found, "quickjs-ng-0.16");
         }
         other => panic!("{other:?}"),
@@ -163,11 +163,11 @@ fn another_engines_bytecode_is_a_version_mismatch() {
 fn a_future_format_of_this_engine_is_a_version_mismatch() {
     let (_host, mut e, realm) = engine();
     let bytes = e.compile_script(realm, "a.js", "1").unwrap();
-    let payload = bytecode::unwrap("gable-bc-2", &bytes).unwrap().to_vec();
-    let newer = bytecode::wrap("gable-bc-3", &payload);
+    let payload = bytecode::unwrap("gable-bc-3", &bytes).unwrap().to_vec();
+    let newer = bytecode::wrap("gable-bc-4", &payload);
     assert!(matches!(
         e.eval_bytecode(realm, &newer),
-        Err(Error::BytecodeMismatch { found, .. }) if found == "gable-bc-3"
+        Err(Error::BytecodeMismatch { found, .. }) if found == "gable-bc-4"
     ));
 }
 
@@ -211,7 +211,7 @@ fn a_corrupt_payload_is_refused_without_running() {
             "globalThis.ran = true; [1, 2].map(x => x * 2)",
         )
         .unwrap();
-    let header = bytes.len() - bytecode::unwrap("gable-bc-2", &bytes).unwrap().len();
+    let header = bytes.len() - bytecode::unwrap("gable-bc-3", &bytes).unwrap().len();
     // Truncated.
     for cut in [header, header + 1, bytes.len() / 2, bytes.len() - 1] {
         assert!(

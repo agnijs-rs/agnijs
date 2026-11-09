@@ -45,6 +45,9 @@ pub struct Reaction {
     pub kind: ReactionKind,
     /// The handler, or `Undefined` for the default behaviour.
     pub handler: Value,
+    /// Where the reaction was registered, while a debugger collects async
+    /// stacks.
+    pub async_parent: Option<Rc<gable_js_debugger::AsyncStackTrace>>,
 }
 
 impl Reaction {
@@ -366,15 +369,22 @@ pub fn perform_then(
     } else {
         Value::Undefined
     };
+    let async_parent = if vm.debug_hot {
+        vm.debug_async_parent()
+    } else {
+        None
+    };
     let fr = Reaction {
         capability: cap.clone(),
         kind: ReactionKind::Fulfill,
         handler: on_fulfilled,
+        async_parent: async_parent.clone(),
     };
     let rr = Reaction {
         capability: cap.clone(),
         kind: ReactionKind::Reject,
         handler: on_rejected,
+        async_parent,
     };
     let (status, result, was_handled) = {
         let d = promise_data_mut(vm, promise);
@@ -414,30 +424,40 @@ pub fn perform_then(
 // ---- jobs -----------------------------------------------------------------------------------
 
 impl Vm {
+    /// Run a PromiseReactionJob.
+    #[inline]
+    fn run_reaction(&mut self, reaction: Reaction, argument: Value) -> JsResult<()> {
+        let result: Result<Value, Value> = if reaction.handler.is_undefined() {
+            match reaction.kind {
+                ReactionKind::Fulfill => Ok(argument),
+                ReactionKind::Reject => Err(argument),
+            }
+        } else {
+            match self.call_value(reaction.handler, Value::Undefined, &[argument]) {
+                Ok(v) => Ok(v),
+                Err(Fault::Throw(e)) => Err(e),
+                Err(f) => return Err(f),
+            }
+        };
+        if let Some(cap) = reaction.capability {
+            match result {
+                Ok(v) => resolve_capability(self, &cap, v)?,
+                Err(e) => reject_capability(self, &cap, e)?,
+            }
+        }
+        Ok(())
+    }
+
     /// Run one job from the queue.
     pub fn run_job(&mut self, job: Job) -> JsResult<()> {
         match job {
-            Job::Reaction { reaction, argument } => {
-                let result: Result<Value, Value> = if reaction.handler.is_undefined() {
-                    match reaction.kind {
-                        ReactionKind::Fulfill => Ok(argument),
-                        ReactionKind::Reject => Err(argument),
-                    }
-                } else {
-                    match self.call_value(reaction.handler, Value::Undefined, &[argument]) {
-                        Ok(v) => Ok(v),
-                        Err(Fault::Throw(e)) => Err(e),
-                        Err(f) => return Err(f),
-                    }
-                };
-                if let Some(cap) = reaction.capability {
-                    match result {
-                        Ok(v) => resolve_capability(self, &cap, v)?,
-                        Err(e) => reject_capability(self, &cap, e)?,
-                    }
-                }
-                Ok(())
+            Job::Reaction { reaction, argument } if self.debug_hot => {
+                let previous = self.debug_enter_async(reaction.async_parent.clone());
+                let r = self.run_reaction(reaction, argument);
+                self.debug_enter_async(previous);
+                r
             }
+            Job::Reaction { reaction, argument } => self.run_reaction(reaction, argument),
             Job::ResolveThenable {
                 promise,
                 thenable,

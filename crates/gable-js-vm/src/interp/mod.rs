@@ -97,7 +97,11 @@ impl Vm {
             if self.heap.stress
                 || self.gc_requested
                 || self.heap.allocated_since_gc >= self.heap.gc_threshold
+                || self.debug_hot
             {
+                if self.debug_hot {
+                    self.debug_check(fi);
+                }
                 // The stress interval is counted inside maybe_collect.
                 self.maybe_collect();
                 if let Some(limit) = self.heap.memory_limit {
@@ -136,6 +140,9 @@ impl Vm {
     /// `Ok` means execution continues at a handler; `Err` means the exit
     /// frame was popped and the fault propagates to the Rust caller.
     pub(crate) fn handle_fault(&mut self, fault: Fault) -> JsResult<()> {
+        if self.debug_hot {
+            self.debug_fault(&fault);
+        }
         loop {
             let fi = self.frames.len() - 1;
             let skip = std::mem::take(&mut self.uncatchable);

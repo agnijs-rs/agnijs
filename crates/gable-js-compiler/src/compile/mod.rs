@@ -63,6 +63,8 @@ pub(crate) struct ScopeFrame {
     /// Function-level scopes: where eval `var`s land.
     pub is_var_scope: bool,
     pub scope_idx: Option<ScopeIdx>,
+    /// Indices into `FnState::locals` of this scope's register bindings.
+    pub locals: Vec<usize>,
     /// The environment was created by the caller (module env, eval
     /// scope handled by the VM): no `PushEnv` is emitted.
     pub env_by_host: bool,
@@ -82,6 +84,7 @@ impl ScopeFrame {
             reg_mark,
             is_var_scope: false,
             scope_idx: None,
+            locals: Vec::new(),
             env_by_host: false,
         }
     }
@@ -190,6 +193,11 @@ pub(crate) struct FnState {
     pub scope_base: usize,
     pub ctl: Vec<Ctl>,
     pub cur_pos: u32,
+    /// The next emitted instruction starts a statement.
+    pub stmt_pending: Option<u32>,
+    /// Debug info (see `DebugInfo`).
+    pub statements: Vec<StatementStart>,
+    pub locals: Vec<LocalVar>,
     /// Completion-value register (script and eval code).
     pub completion: Option<Reg>,
     /// Optional-chain short-circuit patch lists (innermost last).
@@ -253,7 +261,23 @@ impl<'a> Compiler<'a> {
         let pc = fs.instrs.len();
         fs.instrs.push(i);
         fs.offsets.push(fs.cur_pos);
+        if let Some(offset) = fs.stmt_pending.take() {
+            if fs.statements.last().map(|s| s.pc) != Some(pc as u32) {
+                fs.statements.push(StatementStart {
+                    pc: pc as u32,
+                    offset,
+                });
+            }
+        }
         pc
+    }
+
+    /// Mark the next emitted instruction as a statement start.
+    pub(crate) fn mark_statement(&mut self) {
+        let fs = self.fs();
+        if fs.stmt_pending.is_none() {
+            fs.stmt_pending = Some(fs.cur_pos);
+        }
     }
 
     pub(crate) fn pc(&self) -> usize {
@@ -494,6 +518,16 @@ impl<'a> Compiler<'a> {
             if b.loc == Loc::Reg(0) {
                 let r = self.alloc();
                 self.scopes[idx].bindings.get_mut(n).unwrap().loc = Loc::Reg(r);
+                let start = self.pc() as u32;
+                let fs = self.fs();
+                fs.locals.push(LocalVar {
+                    name: n.clone(),
+                    reg: r,
+                    start,
+                    end: u32::MAX,
+                });
+                let li = fs.locals.len() - 1;
+                self.scopes[idx].locals.push(li);
                 if b.kind.is_lexical() || b.kind == BindingKind::This {
                     lexical_regs.push(r);
                 }
@@ -525,8 +559,17 @@ impl<'a> Compiler<'a> {
         pushed
     }
 
+    fn end_locals(&mut self, frame: &ScopeFrame) {
+        let end = self.pc() as u32;
+        let fs = self.fs();
+        for &li in &frame.locals {
+            fs.locals[li].end = end;
+        }
+    }
+
     pub(crate) fn close_scope(&mut self) {
         let frame = self.scopes.pop().unwrap();
+        self.end_locals(&frame);
         if frame.has_env && !frame.env_by_host {
             self.emit(Instr::PopEnv);
             self.fs().env_depth -= 1;
@@ -542,6 +585,7 @@ impl<'a> Compiler<'a> {
     /// the pop was emitted by hand).
     pub(crate) fn close_scope_silent(&mut self) {
         let frame = self.scopes.pop().unwrap();
+        self.end_locals(&frame);
         if frame.has_env && !frame.env_by_host {
             self.fs().env_depth -= 1;
             match self.fs().ctl.pop() {
@@ -1111,6 +1155,9 @@ impl<'a> Compiler<'a> {
             scope_base: self.scopes.len(),
             ctl: Vec::new(),
             cur_pos: span.start,
+            stmt_pending: None,
+            statements: Vec::new(),
+            locals: Vec::new(),
             completion: None,
             optional_exits: Vec::new(),
             param_count: 0,
@@ -1125,8 +1172,12 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn finish_function(&mut self) -> Rc<CodeBlock> {
-        let fs = self.fns.pop().unwrap();
+        let mut fs = self.fns.pop().unwrap();
         debug_assert!(fs.ctl.is_empty(), "control stack not empty");
+        let len = fs.instrs.len() as u32;
+        for l in &mut fs.locals {
+            l.end = l.end.min(len);
+        }
         debug_assert_eq!(self.scopes.len(), fs.scope_base, "scopes not closed");
         Rc::new(CodeBlock {
             name: fs.name,
@@ -1154,6 +1205,10 @@ impl<'a> Compiler<'a> {
             ic: (0..fs.ic_count)
                 .map(|_| std::cell::Cell::new(IcEntry::EMPTY))
                 .collect(),
+            debug: DebugInfo {
+                statements: fs.statements,
+                locals: fs.locals,
+            },
         })
     }
 
