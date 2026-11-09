@@ -23,3 +23,9 @@ The spec (section 3) asks M3 for "shapes with inline caches" and ADR 0011 relies
 - Hot own-property reads and direct-prototype method lookups skip key interning, hashing and the prototype walk.
 - Polymorphic sites thrash the single entry; a short polymorphic cache and transition (add-property) caching are the obvious next steps and can be added behind the same table without changing the bytecode.
 - Anything that changes the object model (slot layout, dictionary-mode rules, shape lifetime) must keep the three facts above true or revisit this ADR.
+
+## Addendum (TASK-100.24, 2026-11-09): global bindings have a sibling cache keyed by position
+
+A bare global name (`LdaGlobal`, `StaGlobal`) resolves to a global lexical or to a property of the global object, which is in dictionary mode and so never hits the shape cache above. Each `CodeBlock` carries a second side table, `CodeBlock::globals`, with one `GlobalEntry` per name (indexed by `NameIdx`, allocated on the block's first global access, never serialised; ADR 0019 J4). An entry records the realm and the *position* of the binding in the realm's `global_lexicals` IndexMap or in the global object's dictionary IndexMap, so a hit does no interning and no hashing.
+
+Soundness rests on two facts and one re-check: global lexicals are only ever appended, so a lexical position is stable for the life of the realm; a dictionary position is stable until a property is removed, and removing a property from a global object bumps that realm's `epoch`, as does declaring a global lexical (which may shadow a cached property), and a property entry hits only with the epoch it was recorded under. A hit re-reads the binding's kind (data and writable for a write, initialised, not `const`), so redefinition as an accessor or read-only property, a `const` and the TDZ all fall through to the generic path with no invalidation. `tests/globals.rs` runs each scenario with and without GC stress mode.

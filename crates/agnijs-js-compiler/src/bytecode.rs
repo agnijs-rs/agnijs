@@ -726,6 +726,34 @@ impl IcEntry {
     };
 }
 
+/// A cached global binding for one name of a block ([`CodeBlock::globals`],
+/// indexed by [`NameIdx`]): where the VM last resolved the name. The VM
+/// owns the meaning of the fields; the compiler only sizes the table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlobalEntry {
+    /// `NONE`, `LEXICAL` or `PROPERTY`.
+    pub kind: u32,
+    /// The realm the entry was recorded in.
+    pub realm: u32,
+    /// Position of the binding in that realm's table of global lexicals,
+    /// or of the property in the global object's dictionary.
+    pub index: u32,
+    /// The realm's global epoch when a `PROPERTY` entry was recorded.
+    pub epoch: u32,
+}
+
+impl GlobalEntry {
+    pub const NONE: u32 = 0;
+    pub const LEXICAL: u32 = 1;
+    pub const PROPERTY: u32 = 2;
+    pub const EMPTY: GlobalEntry = GlobalEntry {
+        kind: Self::NONE,
+        realm: u32::MAX,
+        index: u32::MAX,
+        epoch: 0,
+    };
+}
+
 /// A compiled function (or script, module, eval body).
 #[derive(Debug)]
 pub struct CodeBlock {
@@ -761,9 +789,25 @@ pub struct CodeBlock {
     pub module: Option<Rc<ModuleInfo>>,
     /// Inline caches, one per GetNamed / SetNamed site; filled by the VM.
     pub ic: Box<[Cell<IcEntry>]>,
+    /// Global-binding cache, one entry per name; filled by the VM and
+    /// allocated on the block's first global access (see [`Self::globals`]).
+    pub globals: OnceCell<Box<[Cell<GlobalEntry>]>>,
     /// Statement starts and register-resident bindings, for the debugger.
     /// A loaded block decodes them on first use.
     pub debug: DebugSection,
+}
+
+impl CodeBlock {
+    /// The global-binding cache, indexed by [`NameIdx`].
+    #[inline]
+    pub fn globals(&self) -> &[Cell<GlobalEntry>] {
+        self.globals.get_or_init(|| {
+            self.names
+                .iter()
+                .map(|_| Cell::new(GlobalEntry::EMPTY))
+                .collect()
+        })
+    }
 }
 
 /// A block's [`DebugInfo`]: the compiler's own, or the packed section of a

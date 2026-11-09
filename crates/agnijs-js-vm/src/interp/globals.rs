@@ -4,9 +4,9 @@
 use super::{ConstructKind, Frame, FrameKind, RunOutcome};
 use crate::env::{Environment, ExtraBinding};
 use crate::realm::LexBinding;
-use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, Value};
+use crate::value::{Attrs, EnvId, ObjId, PropKey, PropSlot, Property, Value};
 use crate::vm::{Fault, JsResult, Vm};
-use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, CodeKind, ScopeKind};
+use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, CodeKind, GlobalEntry, ScopeKind};
 use agnijs_js_compiler::EvalOptions;
 use std::rc::Rc;
 
@@ -114,8 +114,52 @@ impl Vm {
     }
 
     // ---- globals -------------------------------------------------------------------
+    //
+    // A global name resolves to a global lexical (`let`, `const`, `class`
+    // at script top level) or to a property of the global object, which
+    // is in dictionary mode. Both tables are IndexMaps, so a site caches
+    // the *position* of its binding in `CodeBlock::globals` and a hit
+    // does no interning and no hashing. Positions in `global_lexicals`
+    // are stable because bindings are only ever appended; a position in
+    // the global object's dictionary is stable until a property is
+    // removed, which bumps the realm's epoch, as does declaring a lexical
+    // (it may shadow a cached property). A hit re-reads the binding's
+    // kind, so redefinition as an accessor, a read-only property, a
+    // `const` or a binding in its TDZ falls through to the generic path
+    // without any invalidation.
 
+    #[inline]
     pub(crate) fn load_global(
+        &mut self,
+        code: &Rc<CodeBlock>,
+        name: u32,
+        or_undefined: bool,
+    ) -> JsResult<Value> {
+        let realm = self.current_realm;
+        let e = code.globals()[name as usize].get();
+        if e.realm == realm.0 {
+            let r = &self.realms[realm.0 as usize];
+            if e.kind == GlobalEntry::LEXICAL {
+                if let Some((_, b)) = r.global_lexicals.get_index(e.index as usize) {
+                    if !b.value.is_empty() {
+                        return Ok(b.value);
+                    }
+                }
+            } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
+                if let Some(d) = &self.heap.obj(r.global).dict {
+                    if let Some((_, p)) = d.get_index(e.index as usize) {
+                        if let PropSlot::Data(v) = p.slot {
+                            return Ok(v);
+                        }
+                    }
+                }
+            }
+        }
+        self.load_global_slow(code, name, or_undefined)
+    }
+
+    #[inline(never)]
+    fn load_global_slow(
         &mut self,
         code: &Rc<CodeBlock>,
         name: u32,
@@ -126,7 +170,9 @@ impl Vm {
         if &**n == "*this*" {
             return Ok(Value::Object(self.realm().global));
         }
-        if let Some(b) = self.realms[realm.0 as usize].global_lexicals.get(&**n) {
+        if let Some((i, _, b)) = self.realms[realm.0 as usize].global_lexicals.get_full(&**n) {
+            let b = *b;
+            self.cache_global_lexical(code, name, i);
             if b.value.is_empty() {
                 let n = n.clone();
                 return Err(self.tdz_error(&n));
@@ -137,6 +183,7 @@ impl Vm {
         let key = self.key(n);
         if let Some(p) = self.heap.get_own_property(global, key) {
             if let Some(v) = p.value() {
+                self.cache_global_property(code, name, key);
                 return Ok(v);
             }
         }
@@ -150,7 +197,44 @@ impl Vm {
         Err(self.not_defined(&n))
     }
 
+    #[inline]
     pub(crate) fn store_global(
+        &mut self,
+        code: &Rc<CodeBlock>,
+        name: u32,
+        v: Value,
+        strict: bool,
+    ) -> JsResult<()> {
+        let realm = self.current_realm;
+        let e = code.globals()[name as usize].get();
+        if e.realm == realm.0 {
+            let r = &mut self.realms[realm.0 as usize];
+            if e.kind == GlobalEntry::LEXICAL {
+                if let Some((_, b)) = r.global_lexicals.get_index_mut(e.index as usize) {
+                    if !b.value.is_empty() && !b.kind.is_const() {
+                        b.value = v;
+                        return Ok(());
+                    }
+                }
+            } else if e.kind == GlobalEntry::PROPERTY && e.epoch == r.epoch {
+                let global = r.global;
+                if let Some(d) = &mut self.heap.obj_mut(global).dict {
+                    if let Some((_, p)) = d.get_index_mut(e.index as usize) {
+                        if p.attrs.writable() {
+                            if let PropSlot::Data(slot) = &mut p.slot {
+                                *slot = v;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        self.store_global_slow(code, name, v, strict)
+    }
+
+    #[inline(never)]
+    fn store_global_slow(
         &mut self,
         code: &Rc<CodeBlock>,
         name: u32,
@@ -159,7 +243,7 @@ impl Vm {
     ) -> JsResult<()> {
         let n: Rc<str> = code.names[name as usize].clone();
         let realm = self.current_realm;
-        if let Some(b) = self.realms[realm.0 as usize].global_lexicals.get_mut(&*n) {
+        if let Some((i, _, b)) = self.realms[realm.0 as usize].global_lexicals.get_full_mut(&*n) {
             if b.value.is_empty() {
                 return Err(self.tdz_error(&n));
             }
@@ -167,14 +251,16 @@ impl Vm {
                 return Err(self.throw_type(&format!("Assignment to constant variable '{n}'")));
             }
             b.value = v;
+            self.cache_global_lexical(code, name, i);
             return Ok(());
         }
         let global = self.realm().global;
         let key = self.key(&n);
         if let Some(p) = self.heap.get_own_property(global, key) {
-            if let crate::value::PropSlot::Data(_) = p.slot {
+            if let PropSlot::Data(_) = p.slot {
                 if p.attrs.writable() {
                     self.heap.set_own_value(global, key, v);
+                    self.cache_global_property(code, name, key);
                     return Ok(());
                 }
             }
@@ -188,6 +274,33 @@ impl Vm {
             )));
         }
         Ok(())
+    }
+
+    /// Remember that `name` is the global lexical at position `index`.
+    fn cache_global_lexical(&self, code: &CodeBlock, name: u32, index: usize) {
+        code.globals()[name as usize].set(GlobalEntry {
+            kind: GlobalEntry::LEXICAL,
+            realm: self.current_realm.0,
+            index: index as u32,
+            epoch: 0,
+        });
+    }
+
+    /// Remember where `name` sits in the global object's dictionary, when
+    /// it is one (a global object always is after the builtins install).
+    fn cache_global_property(&self, code: &CodeBlock, name: u32, key: PropKey) {
+        let r = self.realm();
+        let Some(d) = &self.heap.obj(r.global).dict else {
+            return;
+        };
+        if let Some(index) = d.get_index_of(&key) {
+            code.globals()[name as usize].set(GlobalEntry {
+                kind: GlobalEntry::PROPERTY,
+                realm: r.id.0,
+                index: index as u32,
+                epoch: r.epoch,
+            });
+        }
     }
 
     // ---- dynamic ---------------------------------------------------------------------
@@ -717,15 +830,20 @@ impl Vm {
                 declared_vars.push(n.clone());
             }
         }
-        // Lexical bindings start in the TDZ.
-        for (n, kind) in &decls.lexical {
-            self.realms[realm.0 as usize].global_lexicals.insert(
-                n.clone(),
-                LexBinding {
-                    value: Value::Empty,
-                    kind: *kind,
-                },
-            );
+        // Lexical bindings start in the TDZ. A new lexical may shadow a
+        // global property that some site has cached.
+        if !decls.lexical.is_empty() {
+            let r = &mut self.realms[realm.0 as usize];
+            r.epoch = r.epoch.wrapping_add(1);
+            for (n, kind) in &decls.lexical {
+                r.global_lexicals.insert(
+                    n.clone(),
+                    LexBinding {
+                        value: Value::Empty,
+                        kind: *kind,
+                    },
+                );
+            }
         }
         let env = self.frames[fi].env;
         let module = self.frames[fi].module;

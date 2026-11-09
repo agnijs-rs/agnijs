@@ -173,6 +173,13 @@ pub struct Realm {
     pub global: ObjId,
     pub global_env: EnvId,
     pub global_lexicals: IndexMap<Rc<str>, LexBinding>,
+    /// Bumped when the global object loses a property (dictionary
+    /// positions shift and atom ids may be reused) and when a global
+    /// lexical is declared (it may shadow a property). Cached global
+    /// property positions (`CodeBlock::globals`) are valid only while it
+    /// is unchanged. Lexicals are never removed, so their positions need
+    /// no epoch.
+    pub epoch: u32,
     intrinsics: Vec<ObjId>,
     /// Template objects by (code block address, constant index).
     pub template_cache: HashMap<(usize, u32), (Rc<CodeBlock>, ObjId)>,
@@ -224,6 +231,7 @@ impl Vm {
             global,
             global_env,
             global_lexicals: IndexMap::new(),
+            epoch: 0,
             intrinsics: vec![object_prototype; Intrinsic::COUNT],
             template_cache: HashMap::new(),
             script_names: Vec::new(),

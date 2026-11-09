@@ -808,6 +808,10 @@ impl Vm {
                     return false;
                 }
                 self.heap.remove_own_property(o, key);
+                // Cached global property positions are stale now.
+                if let Some(r) = self.realms.iter_mut().find(|r| r.global == o) {
+                    r.epoch = r.epoch.wrapping_add(1);
+                }
                 true
             }
         }

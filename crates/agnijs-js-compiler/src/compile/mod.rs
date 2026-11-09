@@ -1205,6 +1205,7 @@ impl<'a> Compiler<'a> {
             ic: (0..fs.ic_count)
                 .map(|_| std::cell::Cell::new(IcEntry::EMPTY))
                 .collect(),
+            globals: std::cell::OnceCell::new(),
             debug: DebugInfo {
                 statements: fs.statements,
                 locals: fs.locals,

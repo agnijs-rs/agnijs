@@ -1153,6 +1153,7 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         span,
         module,
         ic: (0..ic_len).map(|_| Cell::new(IcEntry::EMPTY)).collect(),
+        globals: std::cell::OnceCell::new(),
         debug,
     }))
 }
