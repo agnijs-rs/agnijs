@@ -1,0 +1,38 @@
+[package]
+name = "agnijs-js-intl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The ICU4X seam for the AgniJS JavaScript engine: locale data, number, date, plural, list, collation and segmentation services behind an engine-independent API"
+
+[dependencies]
+icu_locale = "2.4"
+icu_locale_core = "2.4"
+icu_decimal = { version = "2.4", features = ["unstable"] }
+icu_plurals = { version = "2.4", features = ["unstable"] }
+icu_datetime = { version = "2.4", features = ["unstable"] }
+icu_calendar = "2.4"
+icu_time = { version = "2.4", features = ["unstable"] }
+icu_collator = "2.4"
+icu_list = "2.4"
+icu_segmenter = { version = "2.4", features = ["auto"] }
+icu_casemap = "2.4"
+icu_experimental = "0.7"
+fixed_decimal = "0.7"
+writeable = "0.6"
+jiff = { version = "0.2", default-features = false, features = ["std", "alloc", "tzdb-bundle-always"] }
+icu_decimal_data = "2.4"
+icu_locale_fallback = "2.4"
+zerovec = "0.11"
+icu_provider = { version = "2.4", features = ["baked", "sync"] }
+icu_datetime_data = "2.4"
+icu_list_data = "2.4"
+icu_plurals_data = "2.4"
+icu_experimental_data = "0.7"
+icu_pattern = "0.5"
+num-bigint = "0.4"
+num-integer = "0.1"
+num-traits = "0.2"
+tinystr = "0.8"

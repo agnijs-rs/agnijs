@@ -1,0 +1,63 @@
+# Third-party notices
+
+AgniJS itself is licensed under MIT OR Apache-2.0 (see `LICENSE-MIT` and `LICENSE-APACHE`). It builds on the third-party software below. Run `node scripts/check-licenses.mjs --list` for the license of every crate in the dependency graph; CI runs the same check and fails on any license outside the allowed permissive set.
+
+## Unicode and CLDR data (ICU4X)
+
+`agnijs-js-intl` implements ECMA-402 (`Intl`) on ICU4X (`icu_*` crates, version 2.4). The `icu_*_data` crates compiled into the engine contain Unicode, CLDR and ICU data, and `crates/agnijs-js-intl/src/tables.rs` and `cldr_tables.rs` are generated from Unicode data and CLDR JSON (`crates/agnijs-js-intl/tools`). The regex crate's Unicode property and case-folding tables and the parser's identifier tables (`unicode-id-start`) derive from the same Unicode Character Database. That data is distributed under the Unicode License v3, reproduced here as the license requires. Crates carrying it are marked `Unicode-3.0` in their metadata; ICU4X itself is by the Unicode Consortium and contributors.
+
+```
+UNICODE LICENSE V3
+
+COPYRIGHT AND PERMISSION NOTICE
+
+Copyright © 2020-2024 Unicode, Inc.
+
+NOTICE TO USER: Carefully read the following legal agreement. BY
+DOWNLOADING, INSTALLING, COPYING OR OTHERWISE USING DATA FILES, AND/OR
+SOFTWARE, YOU UNEQUIVOCALLY ACCEPT, AND AGREE TO BE BOUND BY, ALL OF THE
+TERMS AND CONDITIONS OF THIS AGREEMENT. IF YOU DO NOT AGREE, DO NOT
+DOWNLOAD, INSTALL, COPY, DISTRIBUTE OR USE THE DATA FILES OR SOFTWARE.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of data files and any associated documentation (the "Data Files") or
+software and any associated documentation (the "Software") to deal in the
+Data Files or Software without restriction, including without limitation
+the rights to use, copy, modify, merge, publish, distribute, and/or sell
+copies of the Data Files or Software, and to permit persons to whom the
+Data Files or Software are furnished to do so, provided that either (a)
+this copyright and permission notice appear with all copies of the Data
+Files or Software, or (b) this copyright and permission notice appear in
+associated Documentation.
+
+THE DATA FILES AND SOFTWARE ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY
+KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT OF
+THIRD PARTY RIGHTS.
+
+IN NO EVENT SHALL THE COPYRIGHT HOLDER OR HOLDERS INCLUDED IN THIS NOTICE
+BE LIABLE FOR ANY CLAIM, OR ANY SPECIAL INDIRECT OR CONSEQUENTIAL DAMAGES,
+OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS,
+WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION,
+ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THE DATA
+FILES OR SOFTWARE.
+
+Except as contained in this notice, the name of a copyright holder shall
+not be used in advertising or otherwise to promote the sale, use or other
+dealings in these Data Files or Software without prior written
+authorization of the copyright holder.
+
+SPDX-License-Identifier: Unicode-3.0
+
+—
+
+Portions of ICU4X may have been adapted from ICU4C and/or ICU4J.
+ICU 1.8.1 to ICU 57.1 © 1995-2016 International Business Machines Corporation and others.
+```
+
+## Other dependencies
+
+- `regress` (MIT OR Apache-2.0): the backtracking regular-expression matcher behind the `agnijs-js-regex` seam (ADR 0013).
+- `rquickjs` and the QuickJS-NG C sources it builds (MIT): used only by `agnijs-engine-quickjs`, the interim adapter and test262 baseline, which exists for conformance comparison; the engine crates (`agnijs-js-vm` and below) do not depend on it.
+- `test262` (BSD-3-Clause), fetched at the commit in `crates/agnijs-js-test262/PIN` into `test262/` by `test262 fetch`. It is a test suite, not redistributed in this repository.
+- Every other crate in `Cargo.lock` is under a permissive license (MIT, Apache-2.0, BSD, ISC, Zlib, Unlicense, CC0, or Unicode-3.0) as verified by `scripts/check-licenses.mjs`.

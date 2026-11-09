@@ -1,0 +1,16 @@
+[package]
+name = "agnijs-js-cdp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "A Chrome DevTools Protocol adapter over the engine-neutral debugger interface, with a WebSocket server"
+
+[dependencies]
+agnijs-engine-api.workspace = true
+agnijs-js-debugger.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+agnijs-js-vm.workspace = true

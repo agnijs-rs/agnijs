@@ -1,0 +1,10 @@
+[package]
+name = "agnijs-engine-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "agnijs-engine-api"
+
+[dependencies]

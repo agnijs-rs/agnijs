@@ -1,0 +1,150 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo build --workspace --locked
+      - run: cargo test --workspace --locked
+      - name: Regex crate and VM RegExp tests with the linear matcher compiled out
+        run: |
+          cargo test --locked -p agnijs-js-regex --no-default-features
+          cargo test --locked -p agnijs-js-vm --no-default-features --test regexp
+      - name: Differential regex fuzzing, bounded (linear vs backtracking, ADR 0013 addendum)
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
+        env:
+          AGNIJS_REGEX_FUZZ_CASES: "200000"
+        run: cargo test --release --locked -p agnijs-js-regex --test differential
+      - name: Cache test262 at the pinned commit
+        uses: actions/cache@v4
+        with:
+          path: test262
+          key: test262-${{ hashFiles('crates/agnijs-js-test262/PIN') }}
+      - run: cargo run --release -p agnijs-js-test262 --bin test262 -- fetch
+      - name: test262 RegExp suites under each regex matcher policy (same baseline)
+        # Forcing the linear matcher everywhere is slow on the property-escape
+        # tests (about 5 min), so that policy runs on one OS only.
+        run: |
+          modes="backtracking-only"
+          if [ "$RUNNER_OS" = "Linux" ]; then modes="$modes linear-when-eligible"; fi
+          for m in $modes; do
+            cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --regex-matcher $m \
+              --filter test/built-ins/RegExp --filter test/built-ins/String/prototype/match \
+              --filter test/built-ins/String/prototype/matchAll --filter test/built-ins/String/prototype/replace \
+              --filter test/built-ins/String/prototype/replaceAll --filter test/built-ins/String/prototype/search \
+              --filter test/built-ins/String/prototype/split --filter test/language/literals/regexp \
+              --filter test/annexB/built-ins/RegExp
+          done
+        shell: bash
+      - name: test262 against the QuickJS-NG baseline
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine quickjs
+      - name: test262 parse-only pass of agnijs-js-parser (includes intl402)
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine parse --include-intl402
+      - name: test262 against the AgniJS engine baseline
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs
+      - name: test262 against the AgniJS engine baseline, every script and module run from bytecode
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --precompile
+      - name: test262 intl402 against the AgniJS intl402 baseline (reported separately)
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-intl402
+
+  standalone:
+    # The engine must build and test with nothing else beside it (ADR 0016):
+    # export only the tracked files into an empty directory outside the
+    # checkout and build there.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Export the tracked files alone
+        run: |
+          mkdir "$RUNNER_TEMP/engine"
+          git archive HEAD | tar -x -C "$RUNNER_TEMP/engine"
+          ls -A "$RUNNER_TEMP/engine"
+      - run: cargo build --workspace --locked
+        working-directory: ${{ runner.temp }}/engine
+      - run: cargo test --workspace --locked
+        working-directory: ${{ runner.temp }}/engine
+
+  gc-stress:
+    # Every interpreter safe point collects (AGNIJS_GC_STRESS=1) in the unit
+    # tests; a test262 slice runs with a collection every 16 safe points.
+    # Finds missing roots, the one class of GC bug the arena design admits
+    # (ADR 0009).
+    runs-on: ubuntu-latest
+    env:
+      AGNIJS_GC_STRESS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo test --locked -p agnijs-js-vm -p agnijs-js-compiler
+      - name: Cache test262 at the pinned commit
+        uses: actions/cache@v4
+        with:
+          path: test262
+          key: test262-${{ hashFiles('crates/agnijs-js-test262/PIN') }}
+      - run: cargo run --release -p agnijs-js-test262 --bin test262 -- fetch
+      - name: test262 language slice under GC stress
+        run: AGNIJS_GC_STRESS=16 cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --filter test/language/statements/class --filter test/language/expressions/assignment --filter test/language/statements/for-of --timeout-ms 60000
+
+  miri:
+    # The VM has no unsafe code; Miri checks the dependencies we lean on
+    # (hashbrown, indexmap) and the arena discipline under its stricter
+    # aliasing and uninitialised-memory rules. Only the collector tests run:
+    # the full engine under Miri is too slow.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo miri setup
+      - run: cargo miri test --locked -p agnijs-js-vm --test gc
+        env:
+          MIRIFLAGS: -Zmiri-disable-isolation
+
+  sanitizers:
+    # AddressSanitizer over the collector tests.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rust-src
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+      - run: cargo test --locked -Zbuild-std --target x86_64-unknown-linux-gnu -p agnijs-js-vm --test gc
+        env:
+          RUSTFLAGS: -Zsanitizer=address
+          RUSTDOCFLAGS: -Zsanitizer=address
+
+  licenses:
+    # Every dependency must be under a license compatible with MIT OR
+    # Apache-2.0 (TASK-100.12); see THIRD-PARTY-NOTICES for the Unicode data.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: node scripts/check-licenses.mjs --list

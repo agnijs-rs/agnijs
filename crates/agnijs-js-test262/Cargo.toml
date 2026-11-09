@@ -1,0 +1,26 @@
+[package]
+name = "agnijs-js-test262"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "agnijs-js-test262"
+
+[dependencies]
+agnijs-engine-api.workspace = true
+agnijs-engine-quickjs.workspace = true
+agnijs-js-vm.workspace = true
+agnijs-js-parser.workspace = true
+agnijs-js-compiler.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+clap.workspace = true
+walkdir.workspace = true
+rayon.workspace = true
+anyhow.workspace = true
+
+[[bin]]
+name = "test262"
+path = "src/main.rs"

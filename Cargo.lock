@@ -3,6 +3,143 @@
 version = 4
 
 [[package]]
+name = "agnijs-engine-api"
+version = "0.1.0"
+
+[[package]]
+name = "agnijs-engine-quickjs"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "rquickjs",
+]
+
+[[package]]
+name = "agnijs-js-bench"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-engine-quickjs",
+ "agnijs-js-vm",
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+ "windows-sys",
+]
+
+[[package]]
+name = "agnijs-js-cdp"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-js-debugger",
+ "agnijs-js-vm",
+ "serde_json",
+]
+
+[[package]]
+name = "agnijs-js-compiler"
+version = "0.1.0"
+dependencies = [
+ "agnijs-js-parser",
+]
+
+[[package]]
+name = "agnijs-js-debugger"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "serde_json",
+]
+
+[[package]]
+name = "agnijs-js-intl"
+version = "0.1.0"
+dependencies = [
+ "fixed_decimal",
+ "icu_calendar",
+ "icu_casemap",
+ "icu_collator",
+ "icu_datetime",
+ "icu_datetime_data",
+ "icu_decimal",
+ "icu_decimal_data",
+ "icu_experimental",
+ "icu_experimental_data",
+ "icu_list",
+ "icu_list_data",
+ "icu_locale",
+ "icu_locale_core",
+ "icu_locale_fallback",
+ "icu_pattern",
+ "icu_plurals",
+ "icu_plurals_data",
+ "icu_provider",
+ "icu_segmenter",
+ "icu_time",
+ "jiff",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+ "tinystr",
+ "writeable",
+ "zerovec",
+]
+
+[[package]]
+name = "agnijs-js-parser"
+version = "0.1.0"
+dependencies = [
+ "agnijs-js-regex",
+ "unicode-id-start",
+]
+
+[[package]]
+name = "agnijs-js-regex"
+version = "0.1.0"
+dependencies = [
+ "regress",
+ "unicode-id-start",
+]
+
+[[package]]
+name = "agnijs-js-test262"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-engine-quickjs",
+ "agnijs-js-compiler",
+ "agnijs-js-parser",
+ "agnijs-js-vm",
+ "anyhow",
+ "clap",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "walkdir",
+]
+
+[[package]]
+name = "agnijs-js-vm"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-js-compiler",
+ "agnijs-js-debugger",
+ "agnijs-js-intl",
+ "agnijs-js-parser",
+ "agnijs-js-regex",
+ "hashbrown 0.14.5",
+ "icu_normalizer",
+ "indexmap",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "ahash"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -233,143 +370,6 @@ name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
-
-[[package]]
-name = "gable-engine-api"
-version = "0.1.0"
-
-[[package]]
-name = "gable-engine-quickjs"
-version = "0.1.0"
-dependencies = [
- "gable-engine-api",
- "rquickjs",
-]
-
-[[package]]
-name = "gable-js-bench"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "gable-engine-api",
- "gable-engine-quickjs",
- "gable-js-vm",
- "serde",
- "serde_json",
- "windows-sys",
-]
-
-[[package]]
-name = "gable-js-cdp"
-version = "0.1.0"
-dependencies = [
- "gable-engine-api",
- "gable-js-debugger",
- "gable-js-vm",
- "serde_json",
-]
-
-[[package]]
-name = "gable-js-compiler"
-version = "0.1.0"
-dependencies = [
- "gable-js-parser",
-]
-
-[[package]]
-name = "gable-js-debugger"
-version = "0.1.0"
-dependencies = [
- "gable-engine-api",
- "serde_json",
-]
-
-[[package]]
-name = "gable-js-intl"
-version = "0.1.0"
-dependencies = [
- "fixed_decimal",
- "icu_calendar",
- "icu_casemap",
- "icu_collator",
- "icu_datetime",
- "icu_datetime_data",
- "icu_decimal",
- "icu_decimal_data",
- "icu_experimental",
- "icu_experimental_data",
- "icu_list",
- "icu_list_data",
- "icu_locale",
- "icu_locale_core",
- "icu_locale_fallback",
- "icu_pattern",
- "icu_plurals",
- "icu_plurals_data",
- "icu_provider",
- "icu_segmenter",
- "icu_time",
- "jiff",
- "num-bigint",
- "num-integer",
- "num-traits",
- "tinystr",
- "writeable",
- "zerovec",
-]
-
-[[package]]
-name = "gable-js-parser"
-version = "0.1.0"
-dependencies = [
- "gable-js-regex",
- "unicode-id-start",
-]
-
-[[package]]
-name = "gable-js-regex"
-version = "0.1.0"
-dependencies = [
- "regress",
- "unicode-id-start",
-]
-
-[[package]]
-name = "gable-js-test262"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "gable-engine-api",
- "gable-engine-quickjs",
- "gable-js-compiler",
- "gable-js-parser",
- "gable-js-vm",
- "rayon",
- "serde",
- "serde_json",
- "serde_yaml",
- "walkdir",
-]
-
-[[package]]
-name = "gable-js-vm"
-version = "0.1.0"
-dependencies = [
- "gable-engine-api",
- "gable-js-compiler",
- "gable-js-debugger",
- "gable-js-intl",
- "gable-js-parser",
- "gable-js-regex",
- "hashbrown 0.14.5",
- "icu_normalizer",
- "indexmap",
- "num-bigint",
- "num-integer",
- "num-traits",
-]
 
 [[package]]
 name = "hashbrown"

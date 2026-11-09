@@ -1,38 +1,38 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/gable-engine-api",
-    "crates/gable-engine-quickjs",
-    "crates/gable-js-parser",
-    "crates/gable-js-compiler",
-    "crates/gable-js-vm",
-    "crates/gable-js-regex",
-    "crates/gable-js-intl",
-    "crates/gable-js-debugger",
-    "crates/gable-js-cdp",
-    "crates/gable-js-test262",
-    "crates/gable-js-bench",
+    "crates/agnijs-engine-api",
+    "crates/agnijs-engine-quickjs",
+    "crates/agnijs-js-parser",
+    "crates/agnijs-js-compiler",
+    "crates/agnijs-js-vm",
+    "crates/agnijs-js-regex",
+    "crates/agnijs-js-intl",
+    "crates/agnijs-js-debugger",
+    "crates/agnijs-js-cdp",
+    "crates/agnijs-js-test262",
+    "crates/agnijs-js-bench",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 rust-version = "1.85"
-repository = "https://github.com/jcannon98188/gable"
+repository = "https://github.com/agnijs-rs/agnijs"
 
 [workspace.dependencies]
-gable-engine-api = { path = "crates/gable-engine-api" }
-gable-engine-quickjs = { path = "crates/gable-engine-quickjs" }
-gable-js-parser = { path = "crates/gable-js-parser" }
-gable-js-compiler = { path = "crates/gable-js-compiler" }
-gable-js-vm = { path = "crates/gable-js-vm" }
-# No default features: the engine crate (gable-js-vm) decides whether the
+agnijs-engine-api = { path = "crates/agnijs-engine-api" }
+agnijs-engine-quickjs = { path = "crates/agnijs-engine-quickjs" }
+agnijs-js-parser = { path = "crates/agnijs-js-parser" }
+agnijs-js-compiler = { path = "crates/agnijs-js-compiler" }
+agnijs-js-vm = { path = "crates/agnijs-js-vm" }
+# No default features: the engine crate (agnijs-js-vm) decides whether the
 # linear-time matcher is compiled in.
-gable-js-regex = { path = "crates/gable-js-regex", default-features = false }
-gable-js-intl = { path = "crates/gable-js-intl" }
-gable-js-debugger = { path = "crates/gable-js-debugger" }
-gable-js-cdp = { path = "crates/gable-js-cdp" }
+agnijs-js-regex = { path = "crates/agnijs-js-regex", default-features = false }
+agnijs-js-intl = { path = "crates/agnijs-js-intl" }
+agnijs-js-debugger = { path = "crates/agnijs-js-debugger" }
+agnijs-js-cdp = { path = "crates/agnijs-js-cdp" }
 rquickjs = { version = "0.14", features = ["loader", "array-buffer", "classes", "properties"] }
 regress = { version = "0.12", features = ["utf16"] }
 serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,28 @@
+[package]
+name = "agnijs-js-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The AgniJS JavaScript virtual machine: interpreter, object model, heap and GC, built-ins"
+
+[features]
+default = ["linear-regex"]
+# The linear-time regular-expression matcher (ADR 0013 addendum). Without
+# it every pattern backtracks, whatever Host::regex_matcher says.
+linear-regex = ["agnijs-js-regex/linear"]
+
+[dependencies]
+agnijs-engine-api.workspace = true
+agnijs-js-parser.workspace = true
+agnijs-js-compiler.workspace = true
+agnijs-js-regex.workspace = true
+agnijs-js-intl.workspace = true
+agnijs-js-debugger.workspace = true
+hashbrown = "0.14"
+indexmap = "2"
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+icu_normalizer = { version = "2.4", default-features = false, features = ["compiled_data"] }

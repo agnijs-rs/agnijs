@@ -1,0 +1,37 @@
+# 10. Precompiled code ships in a versioned container that is rejected on mismatch
+
+Date: 2026-11-08
+
+## Status
+
+Accepted
+
+## Context
+
+The spec (`docs/js-engine-spec.md`, section 3) requires serialisable bytecode so production bundles can ship precompiled code, with a versioned format that is rejected on mismatch. Full serialisation of register bytecode is M7 work, but the engine-interface `compile`/`load` methods exist from M2 and need a wire shape that will not change when M7 lands.
+
+## Decision
+
+- **Container header first, payload second** (`agnijs-js-vm/src/engine.rs`): a `GBLC` magic, the format string (`agnijs-bc-1`), a kind byte (script or module), the script name and then the payload. The header is checked before any payload byte is interpreted, and a mismatch is a version error from `load`, never a crash.
+- **M2 payload is the source text.** `compile` produces a container whose payload is the source; `load` recompiles it. This gives the host the final API and error behaviour now, and lets M7 swap the payload for serialised register bytecode behind the same header by bumping the format string.
+- **The format string pins the compiler version**, not the engine release: any change to `Instr`, `CodeBlock` or the constant pool encoding changes the string. A container produced by a different compiler is rejected rather than reinterpreted.
+
+## Consequences
+
+- Hosts can integrate precompilation (bundling, caching) against the M2 engine; the only behavioural change in M7 is faster `load`.
+- Two format strings will coexist briefly in M7 (source payload and bytecode payload) so caches produced before the switch keep loading; after one release the source payload is removed.
+- The container does not carry a checksum; the host's bundle format is responsible for integrity.
+
+## Addendum (M7, 2026-11-08): the bytecode payload
+
+- **Format `agnijs-bc-2` in the shared container.** `compile_script`/`compile_module` now emit the `agnijs-engine-api` bytecode container (`AGJS` magic, NUL-terminated format tag) with the tag `agnijs-bc-2`, so every engine behind the interface rejects every other engine's bytes the same way. The payload is a kind byte (script or module), an FNV-1a 64-bit checksum of the kind byte and the tree, and the serialised `CodeBlock` tree (`agnijs-js-compiler/src/serialize.rs`): instructions, constants, names, nested functions, scopes, handlers, spans and offsets, with strings, UTF-16 constants and the source text each stored once in tables. Inline-cache slots are stored as a count and come back empty.
+- **A checksum after all.** The Consequences above said the container carries no checksum. M7 adds one, because the loader now interprets an instruction stream: a flipped byte that still decodes could, for example, turn a constant into a jump and run nonsense, or reach VM invariants (such as `LdaImport` outside a module) that panic. The checksum turns accidental damage into `BytecodeCorrupt` before anything is decoded. It is not a signature: a host loading untrusted bytecode must still authenticate it.
+- **The loader verifies what it can check locally.** After the checksum, decoding checks the operand pools: register indices and ranges against the frame size, constant indices and kinds, names, function and scope indices, inline-cache slots, jump targets, handler ranges, spans on character boundaries, offsets per instruction, that each block ends in a terminator, and nesting at most 256 deep. Operands whose validity depends on the runtime context (environment depth and slot, module import slots) are trusted, so the format stays bound to the compiler that wrote it, which the format tag already pins.
+- **The legacy source payload still loads for one release.** A `GBLC`/`agnijs-bc-1` container is recompiled from its source as before. It is removed in the next release, as planned above.
+- **test262 runs from bytecode as well.** `test262 run --engine agnijs --precompile` sends every harness file, test script and module through `compile_*` and loads the bytes, against the same exclusions and baseline. It runs in CI next to the source run.
+
+## Addendum (M8, 2026-11-08): `agnijs-bc-3` carries statement offsets
+
+- **The tag moves to `agnijs-bc-3`.** M8's debugger (ADR 0017) pauses at statement starts and reports the statement's own source position, not the position of the first instruction's expression. Each block's debug info now holds its statement starts as (instruction index, source offset) pairs, plus the bindings kept in registers as (name, register, instruction range). Both are serialised. The verifier checks that statement indices are ascending and in range, that offsets fall inside the source text, and that locals name valid registers and instruction ranges. Precompiled code therefore pauses, steps and shows locals exactly like code compiled from source.
+- **Debug info is packed.** By count, it is most of a block's metadata. Statement starts are stored as LEB128 deltas: the instruction index as an unsigned delta and the source offset zigzag-encoded. Locals are stored as LEB128 (string-table index, register, start, length). The decoder for this section is kept out of line so that the instruction loop compiles as before. On the 900-function `bytecode-load` workload, the payload grows by 5% and loading is about 5 to 10% slower than `agnijs-bc-2` (about 0.25 ms). Decoding the section lazily, only once a debugger attaches, is the next step if that matters.
+- **`agnijs-bc-2` payloads are rejected, not migrated.** The payload layout changed, so a `agnijs-bc-2` container fails with the usual format mismatch and the host recompiles from source. That follows the rule above: bytecode is a cache tied to one engine build. M7 shipped no release, so no released artefact carries `agnijs-bc-2`. The `GBLC`/`agnijs-bc-1` source container still loads, as the M7 addendum says.

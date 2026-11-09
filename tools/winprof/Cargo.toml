@@ -1,0 +1,12 @@
+# Developer tool for engine performance work (docs/js-engine-performance-findings.md).
+# Standalone: not a member of the engine or harness workspaces, not built by CI.
+[package]
+name = "winprof"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Diagnostics_Debug", "Win32_System_Diagnostics_ToolHelp", "Win32_System_SystemInformation", "Win32_System_Kernel", "Win32_Media"] }

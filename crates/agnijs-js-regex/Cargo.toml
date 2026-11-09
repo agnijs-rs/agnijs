@@ -1,0 +1,18 @@
+[package]
+name = "agnijs-js-regex"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "agnijs-js-regex"
+
+[features]
+default = ["linear"]
+# The linear-time matcher (ADR 0013 addendum). Without it every pattern
+# runs on the backtracking matcher, whatever the matcher mode says.
+linear = []
+
+[dependencies]
+regress.workspace = true
+unicode-id-start.workspace = true
