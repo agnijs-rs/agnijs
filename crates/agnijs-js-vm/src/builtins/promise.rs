@@ -698,10 +698,8 @@ impl Vm {
         let mut n = 0;
         loop {
             // Between jobs is a safe point when the host drains the queue
-            // (no frames, no native caller holding values in Rust locals).
-            // Each job runs its callback as a native frame, where the
-            // collector is deferred, so without this an embedder that runs
-            // code only from jobs and host calls never collects.
+            // (no frames, no native caller holding values in Rust locals),
+            // the one place a collection retains nothing for native frames.
             if self.native_depth == 0 && self.frames.is_empty() {
                 self.maybe_collect();
             }

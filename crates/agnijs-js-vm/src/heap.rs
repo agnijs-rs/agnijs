@@ -22,10 +22,13 @@ use crate::value::{BigId, EnvId, ObjId, PropSlot, ShapeId, StrId, SymId, Value};
 use hashbrown::HashTable;
 use std::collections::HashSet;
 
-/// A slot arena with a free list and mark bits.
+/// A slot arena with a free list, mark bits and a birth serial per slot
+/// (the value of [`Heap::alloc_serial`] when the slot was last allocated;
+/// see `gc.rs`, retention under native frames).
 pub struct Arena<T> {
     slots: Vec<Option<T>>,
     marks: Vec<bool>,
+    births: Vec<u64>,
     free: Vec<u32>,
     live: usize,
 }
@@ -35,6 +38,7 @@ impl<T> Default for Arena<T> {
         Arena {
             slots: Vec::new(),
             marks: Vec::new(),
+            births: Vec::new(),
             free: Vec::new(),
             live: 0,
         }
@@ -42,18 +46,31 @@ impl<T> Default for Arena<T> {
 }
 
 impl<T> Arena<T> {
-    pub fn alloc(&mut self, value: T) -> u32 {
+    pub fn alloc(&mut self, value: T, serial: u64) -> u32 {
         self.live += 1;
         if let Some(i) = self.free.pop() {
             self.slots[i as usize] = Some(value);
             self.marks[i as usize] = false;
+            self.births[i as usize] = serial;
             i
         } else {
             let i = self.slots.len() as u32;
             self.slots.push(Some(value));
             self.marks.push(false);
+            self.births.push(serial);
             i
         }
+    }
+
+    /// The live slots born before `serial` (allocated while
+    /// `alloc_serial < serial`). Scans only the births: a free slot's is
+    /// `u64::MAX`.
+    pub(crate) fn born_before(&self, serial: u64) -> impl Iterator<Item = u32> + '_ {
+        self.births
+            .iter()
+            .enumerate()
+            .filter(move |(_, &b)| b < serial)
+            .map(|(i, _)| i as u32)
     }
 
     #[inline]
@@ -128,6 +145,7 @@ impl<T> Arena<T> {
                 }
             } else if let Some(v) = slot.take() {
                 dead(v);
+                self.births[i] = u64::MAX;
                 self.free.push(i as u32);
                 freed += 1;
             }
@@ -345,6 +363,21 @@ pub struct Heap {
     pub strings_allocated: u64,
     /// Objects allocated so far (diagnostics and tests).
     pub objects_allocated: u64,
+    /// The threshold `rearm_threshold` set; `gc_threshold` is raised above
+    /// it while a collection is put off inside a nested run loop
+    /// (`Vm::maybe_collect`) and restored when that loop ends.
+    pub gc_threshold_base: usize,
+    /// Heap values allocated so far, over every arena; the next slot's
+    /// birth serial. Starts at 1 so that a retention bound of 0 (see
+    /// `Vm::retain_from`) retains nothing.
+    pub alloc_serial: u64,
+    /// The value of `alloc_serial` at the last collection.
+    pub serial_at_gc: u64,
+    /// Bytes the last collection kept only for the native frames then on
+    /// the stack (unreachable from the roots, born before the innermost
+    /// nested run loop's entry; see `gc.rs`). Garbage until a collection
+    /// at an outer level frees it; left out of the pacing basis.
+    pub retained_bytes: usize,
 }
 
 impl Default for Heap {
@@ -377,6 +410,7 @@ impl Heap {
             attention: if stress_every.is_some() { ATTENTION_GC } else { 0 },
             allocated_since_gc: 0,
             gc_threshold: DEFAULT_GC_THRESHOLD,
+            gc_threshold_base: DEFAULT_GC_THRESHOLD,
             live_bytes: 0,
             stress: stress_every.is_some(),
             stress_every: stress_every.unwrap_or(1),
@@ -387,6 +421,9 @@ impl Heap {
             pinned: HashSet::new(),
             strings_allocated: 0,
             objects_allocated: 0,
+            alloc_serial: 1,
+            serial_at_gc: 0,
+            retained_bytes: 0,
         }
     }
 
@@ -460,15 +497,17 @@ impl Heap {
     }
 
     /// Set the threshold for the next collection from the live bytes of the
-    /// last one and the memory limit; called after a collection and when
-    /// the limit changes.
+    /// last one (less what it kept only for native frames) and the memory
+    /// limit; called after a collection and when the limit changes.
     pub fn rearm_threshold(&mut self) {
-        let mut t = (self.live_bytes * 2).max(DEFAULT_GC_THRESHOLD);
+        let basis = self.live_bytes.saturating_sub(self.retained_bytes);
+        let mut t = (basis * 2).max(DEFAULT_GC_THRESHOLD);
         if let Some(limit) = self.memory_limit {
             // The limit is exceeded when live + allocated > limit.
             t = t.min(limit.saturating_sub(self.live_bytes) + 1);
         }
         self.gc_threshold = t;
+        self.gc_threshold_base = t;
         if self.allocated_since_gc >= t {
             self.attention |= ATTENTION_GC;
         }
@@ -486,7 +525,15 @@ impl Heap {
     pub fn alloc_object(&mut self, data: ObjectData) -> ObjId {
         self.charge(OBJECT_BYTES + data.extra_bytes());
         self.objects_allocated += 1;
-        ObjId(self.objects.alloc(data))
+        let s = self.next_serial();
+        ObjId(self.objects.alloc(data, s))
+    }
+
+    #[inline]
+    fn next_serial(&mut self) -> u64 {
+        let s = self.alloc_serial;
+        self.alloc_serial += 1;
+        s
     }
 
     #[inline]
@@ -503,7 +550,8 @@ impl Heap {
 
     pub fn alloc_env(&mut self, env: Environment) -> EnvId {
         self.charge(ENV_BYTES + env.slot_count() * 16);
-        EnvId(self.envs.alloc(env))
+        let s = self.next_serial();
+        EnvId(self.envs.alloc(env, s))
     }
 
     /// A declarative environment for `scope` (see
@@ -539,7 +587,8 @@ impl Heap {
 
     pub fn alloc_symbol(&mut self, data: SymbolData) -> SymId {
         self.charge(SYMBOL_BYTES);
-        SymId(self.symbols.alloc(data))
+        let s = self.next_serial();
+        SymId(self.symbols.alloc(data, s))
     }
 
     #[inline]
@@ -556,7 +605,8 @@ impl Heap {
 
     pub fn alloc_bigint(&mut self, data: BigIntData) -> BigId {
         self.charge(32 + data.0.bits() as usize / 8);
-        BigId(self.bigints.alloc(data))
+        let s = self.next_serial();
+        BigId(self.bigints.alloc(data, s))
     }
 
     #[inline]
@@ -657,7 +707,8 @@ impl Heap {
     fn alloc_string(&mut self, data: StringData) -> StrId {
         self.charge(STRING_BYTES + data.byte_len());
         self.strings_allocated += 1;
-        StrId(self.strings.alloc(data))
+        let s = self.next_serial();
+        StrId(self.strings.alloc(data, s))
     }
 
     /// A string from UTF-16 code units; stored one-byte when possible.

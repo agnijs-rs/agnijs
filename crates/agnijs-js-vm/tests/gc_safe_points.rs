@@ -1,9 +1,10 @@
 //! Garbage is collected when an embedder runs code from an event loop: from
-//! promise jobs and from host calls (timer callbacks, event handlers). Every
-//! job and every host call runs its function as a native frame, where the
-//! collector is deferred, so without a safe point between jobs and before
-//! each host call such an embedder never collects at all (found by the
-//! TASK-100.10 benchmarks: memory grew without bound).
+//! promise jobs and from host calls (timer callbacks, event handlers). The
+//! safe points between jobs and before each host call are the ones where
+//! no native frame is on the stack, so a collection there retains nothing
+//! for Rust frames (found by the TASK-100.10 benchmarks: memory grew
+//! without bound; since TASK-100.16 the collector also runs inside the
+//! jobs and calls, see `gc_native_frames.rs`).
 
 use agnijs_engine_api::conformance::TestHost;
 use agnijs_engine_api::{Engine, PropertyKey, Value};
@@ -56,8 +57,9 @@ fn garbage_made_by_host_calls_is_collected_between_calls() {
     // A held argument must survive the collections the calls trigger.
     let arg = vm.eval_script(realm, "arg.js", "({ label: 'held' })").unwrap();
     for i in 0..3000 {
-        // Stress mode collects at every safe point: the first calls collect each time.
-        vm.heap.stress = i < 50;
+        // Stress mode collects at every safe point, inside the call as
+        // well (TASK-100.16): the first calls collect each time.
+        vm.heap.stress = i < 10;
         assert_eq!(Engine::call(&mut vm, realm, &tick, &Value::Undefined, std::slice::from_ref(&arg)).unwrap(), Value::Number(2000.0));
     }
     let usage = vm.memory_usage();

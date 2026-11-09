@@ -297,9 +297,27 @@ pub struct Vm {
     pub roots: Vec<Value>,
     pub handles: HandleTable,
     pub host: Rc<dyn Host>,
-    /// Depth of native (Rust) frames that hold unrooted values; the
-    /// collector only runs when this is zero.
+    /// Depth of native (Rust) frames (built-ins, host entries, jobs) on the
+    /// stack. Bounds native recursion; a nested run loop under one records
+    /// `retain_from` so the collector can run there.
     pub native_depth: u32,
+    /// Retention bound of the innermost nested run loop (`Vm::run` entered
+    /// while `native_depth > 0`): the heap's allocation serial at entry, or
+    /// 0 at the top level. A collection treats every heap value born before
+    /// it as a root, which covers everything the Rust frames under the loop
+    /// can hold (see `gc.rs`). Nested loops save and restore it.
+    pub retain_from: u64,
+    /// The lowest `retain_from` restored by a loop exit since the last
+    /// collection: the stack has been that shallow in between. When the
+    /// last collection retained garbage for frames that have since
+    /// returned, leaving a loop asks for the collection that frees it.
+    pub(crate) retain_low: u64,
+    /// `retain_from` at the last collection.
+    pub(crate) retain_at_gc: u64,
+    /// `retain_from` of the loop in which a threshold collection was last
+    /// put off (`Vm::maybe_collect`); leaving that loop puts the threshold
+    /// back.
+    pub(crate) put_off_at: u64,
     /// Set by `CheckDerivedReturn` just before it throws: the throwing
     /// frame's own handlers are skipped once.
     pub(crate) uncatchable: bool,
@@ -424,6 +442,10 @@ impl Vm {
             handles: HandleTable::new(engine_id),
             host,
             native_depth: 0,
+            retain_from: 0,
+            retain_low: 0,
+            retain_at_gc: 0,
+            put_off_at: 0,
             uncatchable: false,
             current_realm: RealmId(0),
             names,
@@ -888,10 +910,7 @@ impl Vm {
     }
 
     /// Recompute the attention word (`Heap::attention`, ADR 0019 J7) from
-    /// its sources. The collection bit is dropped while a native frame
-    /// defers collection and the threshold alone asks for one: the next
-    /// allocation raises it again (`Heap::charge`), so a deferred collection
-    /// costs one slow pass per allocating instruction, not per instruction.
+    /// its sources.
     pub(crate) fn refresh_attention(&mut self) {
         let mut a = 0;
         if self.debug_hot {
@@ -899,14 +918,15 @@ impl Vm {
         }
         if self.heap.stress
             || self.gc_requested
-            || (self.native_depth == 0 && self.heap.allocated_since_gc >= self.heap.gc_threshold)
+            || self.heap.allocated_since_gc >= self.heap.gc_threshold
         {
             a |= crate::heap::ATTENTION_GC;
         }
         self.heap.attention = a;
     }
 
-    /// Run `f` as a native frame: the collector is deferred while it runs.
+    /// Run `f` as a native frame (bounds native recursion; see
+    /// `native_depth`).
     #[inline]
     pub fn in_native<T>(&mut self, f: impl FnOnce(&mut Vm) -> JsResult<T>) -> JsResult<T> {
         if self.native_depth >= MAX_NATIVE_DEPTH {

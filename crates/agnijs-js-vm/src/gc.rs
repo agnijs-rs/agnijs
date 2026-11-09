@@ -20,8 +20,23 @@
 //! them one by one, and totals the live size as it goes.
 //!
 //! Collection runs only from [`Vm::maybe_collect`] at interpreter safe
-//! points (between instructions) and only when no native frame is on the
-//! stack, so Rust locals in built-ins never hold stale ids (nor shape ids).
+//! points (between instructions), native frames on the stack or not
+//! (TASK-100.16). Rust code (a built-in calling back, a host call, a job,
+//! module evaluation, a resumed generator) reaches JavaScript only through
+//! a nested run loop, and everything its locals can hold exists when that
+//! loop is entered: the loop records the heap's allocation serial
+//! (`Vm::retain_from`), and a collection under it treats every heap value
+//! born before the innermost such bound as a root, tracing it like any
+//! other. Values born inside the loop reach Rust only when the loop
+//! returns, after which the next loop entry covers them. So no built-in
+//! roots its locals by hand, the collector stays precise and non-moving,
+//! and nothing scans the Rust stack (ADR 0019 J6). Frames in the same loop
+//! hold nothing across a safe point by construction: the dispatch loop
+//! writes its state back before one. What the retention keeps that no
+//! frame holds is garbage until a collection at an outer level, which a
+//! loop exit requests when the amount is not trivial; the pacing counts
+//! it out, and a collection wanted inside a loop that has allocated little
+//! of the garbage so far is put off (within a bound) for the loop to end.
 //! There is no `unsafe` code here or in the heap; the arenas are plain
 //! vectors.
 
@@ -207,6 +222,19 @@ impl<'v> Tracer<'v> {
             }
         }
         self.blocks.push(code.clone());
+    }
+
+    /// Marked slots per arena: objects, strings, symbols, BigInts,
+    /// environments.
+    fn marked_counts(&self) -> [usize; 5] {
+        let count = |m: &[bool]| m.iter().filter(|&&b| b).count();
+        [
+            count(&self.objs),
+            count(&self.strs),
+            count(&self.syms),
+            count(&self.bigs),
+            count(&self.envs),
+        ]
     }
 
     /// Mark everything reachable from the work list.
@@ -479,6 +507,8 @@ impl Job {
 
 /// What marking leaves for the sweep.
 struct Marked {
+    /// Estimated bytes marked only by the retention pass.
+    retained_bytes: usize,
     objs: Vec<bool>,
     strs: Vec<bool>,
     syms: Vec<bool>,
@@ -492,25 +522,64 @@ struct Marked {
 
 impl Vm {
     /// Collect at a safe point when the heap asks for it.
+    ///
+    /// A threshold collection inside a nested run loop that has allocated
+    /// less than half of what was allocated since the last collection
+    /// would retain more than it frees, so it is put off until the loop
+    /// ends or twice the threshold has been allocated, whichever is first.
+    /// Requested and stress collections run at once.
     #[inline]
     pub fn maybe_collect(&mut self) -> bool {
-        if self.native_depth != 0 {
-            return false;
-        }
-        if self.gc_requested || self.heap.wants_gc() {
+        if self.gc_requested {
             self.collect();
             return true;
         }
-        false
+        if !self.heap.wants_gc() {
+            return false;
+        }
+        if !self.heap.stress && self.retain_from != 0 && self.put_off_collection() {
+            return false;
+        }
+        self.collect();
+        true
     }
 
-    /// Run a full collection now. The caller guarantees no unrooted values
-    /// are live in Rust locals (see the module docs).
+    /// Whether a threshold collection under the current loop should wait
+    /// (see [`Vm::maybe_collect`]); when it should, the threshold is raised
+    /// so the dispatch loop's fast path is kept until then, and put back
+    /// when this loop (or an enclosing one) ends (`Vm::run`).
+    #[cold]
+    fn put_off_collection(&mut self) -> bool {
+        let heap = &mut self.heap;
+        let in_loop = heap.alloc_serial - self.retain_from;
+        let since_gc = heap.alloc_serial - heap.serial_at_gc;
+        if in_loop * 2 >= since_gc {
+            return false;
+        }
+        let bound = heap.gc_threshold_base * 2;
+        if heap.allocated_since_gc >= bound {
+            return false;
+        }
+        if let Some(limit) = heap.memory_limit {
+            if heap.live_bytes + bound > limit {
+                return false;
+            }
+        }
+        heap.gc_threshold = bound;
+        self.put_off_at = self.retain_from;
+        true
+    }
+
+    /// Run a full collection now. The caller guarantees that Rust locals
+    /// hold no heap value born after `retain_from` (see the module docs).
     pub fn collect(&mut self) {
         self.gc_requested = false;
         self.gc_count += 1;
         self.regex_input_cache.clear();
         let marked = self.mark();
+        self.heap.serial_at_gc = self.heap.alloc_serial;
+        self.retain_at_gc = self.retain_from;
+        self.retain_low = self.retain_from;
         self.heap.objects.restore_marks(marked.objs);
         self.heap.strings.restore_marks(marked.strs);
         self.heap.symbols.restore_marks(marked.syms);
@@ -520,6 +589,7 @@ impl Vm {
         // ---- weak processing (needs the mark state) ----
         crate::builtins::collections::process_weak(self, &marked.weak);
 
+        self.heap.retained_bytes = marked.retained_bytes;
         self.sweep(&marked.shapes, &marked.table_len, &marked.blocks);
     }
 
@@ -603,9 +673,44 @@ impl Vm {
 
         // ---- mark ----
         t.drain();
+
+        // ---- retention for the Rust frames under a nested run loop ----
+        // Everything born before the innermost loop's entry may be held in
+        // a Rust local (module docs); what was not reached from the roots
+        // is kept and traced like a root. Its size, estimated from the
+        // arena counts, is left out of the pacing basis.
+        let mut retained_bytes = 0;
+        if vm.retain_from != 0 {
+            use crate::heap::{ENV_BYTES, OBJECT_BYTES, STRING_BYTES, SYMBOL_BYTES};
+            let before = t.marked_counts();
+            let from = vm.retain_from;
+            for i in vm.heap.objects.born_before(from) {
+                t.obj(ObjId(i));
+            }
+            for i in vm.heap.strings.born_before(from) {
+                t.str(StrId(i));
+            }
+            for i in vm.heap.symbols.born_before(from) {
+                t.sym(SymId(i));
+            }
+            for i in vm.heap.bigints.born_before(from) {
+                t.bigint(BigId(i));
+            }
+            for i in vm.heap.envs.born_before(from) {
+                t.env(EnvId(i));
+            }
+            t.drain();
+            let after = t.marked_counts();
+            retained_bytes = (after[0] - before[0]) * OBJECT_BYTES
+                + (after[1] - before[1]) * STRING_BYTES
+                + (after[2] - before[2]) * SYMBOL_BYTES
+                + (after[3] - before[3]) * 48
+                + (after[4] - before[4]) * ENV_BYTES;
+        }
         t.ephemerons();
 
         Marked {
+            retained_bytes,
             objs: t.objs,
             strs: t.strs,
             syms: t.syms,

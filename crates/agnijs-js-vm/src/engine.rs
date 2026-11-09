@@ -458,9 +458,8 @@ impl Vm {
 
     /// A collection safe point on entry to a host call, before any argument
     /// is turned into an unrooted VM value: only the host's handles are
-    /// live. The called function runs as a native frame, where collection
-    /// is deferred, so an embedder that drives code through host calls
-    /// (timers, event handlers) would otherwise never collect.
+    /// live, so this collection retains nothing for native frames (inside
+    /// the call, the collector keeps what the frames under it may hold).
     fn host_call_safe_point(&mut self) {
         if self.native_depth == 0 && self.frames.is_empty() && (self.gc_requested || self.heap.wants_gc()) {
             self.handles.reclaim();

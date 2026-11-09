@@ -132,7 +132,8 @@ impl Vm {
     /// scripts all come through here, which is where a later tier will be
     /// chosen. `push` pushes the exit frame (and may route a fault into it);
     /// the frame then runs to completion. With `native`, the caller is Rust
-    /// code holding unrooted values, so the collector is deferred.
+    /// code holding values in its locals; `run` records the retention bound
+    /// that keeps them alive across collections under the loop.
     pub(crate) fn run_entry(
         &mut self,
         native: bool,
@@ -151,6 +152,37 @@ impl Vm {
 
     /// Run until the top frame (an exit frame) completes.
     ///
+    /// Entered under a native frame, this is a nested run loop: the Rust
+    /// frames below hold heap values in their locals, all of which exist
+    /// now, so the collector retains everything born before this point
+    /// while the loop runs (`Vm::retain_from`, see `gc.rs`). Leaving a loop
+    /// restores the enclosing bound and, when the last collection kept
+    /// garbage only for frames that have now returned, asks for the
+    /// collection that frees it.
+    fn run(&mut self) -> JsResult<RunOutcome> {
+        let saved = self.retain_from;
+        if self.native_depth > 0 {
+            self.retain_from = self.heap.alloc_serial;
+        }
+        let r = self.run_loop();
+        self.retain_from = saved;
+        if saved < self.retain_low {
+            self.retain_low = saved;
+            if self.heap.retained_bytes != 0 && saved < self.retain_at_gc {
+                self.request_gc();
+            }
+        }
+        if self.heap.gc_threshold != self.heap.gc_threshold_base && saved < self.put_off_at {
+            // The loop a collection was put off for has ended: collect at
+            // the next safe point out here (or between jobs).
+            self.heap.gc_threshold = self.heap.gc_threshold_base;
+            self.refresh_attention();
+        }
+        r
+    }
+
+    /// The dispatch loop proper; see [`Vm::run`].
+    ///
     /// The running frame's `pc`, accumulator and register base live in
     /// locals here (ADR 0019 J1). They are written back to the frame before
     /// anything that can observe it (a call, a fault, a safe point, a
@@ -167,7 +199,7 @@ impl Vm {
     /// The arms below are the hot cases that allocate nothing, fault
     /// nothing and observe no frame; each falls back to `step` for the
     /// generic semantics (J3) of the same instruction.
-    fn run(&mut self) -> JsResult<RunOutcome> {
+    fn run_loop(&mut self) -> JsResult<RunOutcome> {
         debug_assert!(self.frames.last().map(|f| f.exit).unwrap_or(false));
         self.refresh_attention();
         // Function entry: a host entry, a nested run loop or a resumed
@@ -624,10 +656,8 @@ impl Vm {
         // The stress interval is counted inside maybe_collect.
         self.maybe_collect();
         if let Some(limit) = self.heap.memory_limit {
-            // Under a native frame (a job, a callback) the collector is
-            // deferred, so everything allocated since the last collection is
-            // still held: count it, or a loop inside a callback would grow
-            // past the limit unchecked.
+            // What the collection (if any) left plus what was allocated
+            // since (everything, when it was put off; see `maybe_collect`).
             if self.heap.live_bytes + self.heap.allocated_since_gc > limit {
                 return Err(Fault::OutOfMemory);
             }
