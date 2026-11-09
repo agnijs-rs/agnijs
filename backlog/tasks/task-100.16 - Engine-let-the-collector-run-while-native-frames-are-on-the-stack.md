@@ -4,6 +4,7 @@ title: 'Engine: let the collector run while native frames are on the stack'
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -40,3 +41,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #5 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #6 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J6 applies. The rooting mechanism you add for natives (root or handle stack, or VM-visible slots) is also the one JIT and AOT runtime helpers will use, so it must not depend on scanning the Rust or machine stack and must not need stack maps; keep the collector precise and non-moving (ids stable while live). Safe points stay at runtime calls and attention polls (J7). If you add a write barrier, make it one Heap function every value store goes through. A moving collector would reopen ADR 0019.
+<!-- SECTION:NOTES:END -->

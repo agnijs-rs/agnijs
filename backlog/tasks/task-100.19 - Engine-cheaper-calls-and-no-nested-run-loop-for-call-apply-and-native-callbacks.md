@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -40,3 +41,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #5 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #6 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J1, J8 apply. Make one function the entry into JavaScript for natives, host calls, jobs and call/apply (that is where tier selection will live), and one frame-push path for JS-to-JS calls; today five places call Vm::run. Pass arguments as a slice of the caller's register window. Every frame, however cheap, stays a Frame record in Vm::frames over a Vm::regs window (J1); do not introduce frames that exist only on the Rust stack. Faults stay returned values (J8).
+<!-- SECTION:NOTES:END -->

@@ -4,7 +4,7 @@ title: Native AOT compilation research
 status: To Do
 assignee: []
 created_date: '2026-11-09T01:52:00Z'
-updated_date: '2026-11-09T03:29:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -30,4 +30,6 @@ Research track: ahead-of-time compilation of JavaScript to native code at build 
 
 <!-- SECTION:NOTES:BEGIN -->
 Model assignment (maintainer, 2026-11-08): Opus.
+
+From TASK-101.1 (ADR 0019): AOT should reuse the baseline JIT's code generator (Cranelift via cranelift-object) and its extern C runtime-helper contract (J10), produce a separate artefact with its own format tag bound to the engine build, and resume in the interpreter (same frame layout, J1) for anything it does not compile.
 <!-- SECTION:NOTES:END -->

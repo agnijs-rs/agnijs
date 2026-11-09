@@ -6,7 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
-updated_date: '2026-11-09T03:29:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies:
@@ -43,3 +43,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #4 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #5 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J2, J3, J4 apply. New forms (register-operand, immediate, fused compare-and-branch) must be atomic for deoptimization: every observable effect (ToPrimitive/valueOf, getters, calls) comes before a single result write to acc or one register, or a single branch decision, so a frame can resume at pc or pc+1 (J3). Keep instructions fixed-size and linearly decodable, pc an instruction index (J2). If a form needs feedback, give it a compiler-allocated side-table slot index; never widen the instruction with feedback (J4).
+<!-- SECTION:NOTES:END -->

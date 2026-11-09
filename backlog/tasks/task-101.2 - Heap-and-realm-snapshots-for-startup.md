@@ -4,7 +4,7 @@ title: Heap and realm snapshots for startup
 status: To Do
 assignee: []
 created_date: '2026-11-09T01:51:00Z'
-updated_date: '2026-11-09T03:29:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -25,3 +25,9 @@ Save and restore a realm or heap after initialization so startup becomes a memor
 - [ ] #1 A snapshot of an initialized realm (built-ins plus an embedder-run bootstrap script) can be written and restored, with a version mismatch rejected
 - [ ] #2 Startup of a bundle from a snapshot is measured against the cold path with gable-js-bench; test262 and the host-driven tests pass with snapshot-created realms
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+From TASK-101.1 (ADR 0019, J11; spec section 14): snapshot blockers in the current engine are NativeKind::Fn raw function pointers (need a native registry indexed by id), Rc<Cell<bool>>/Rc<Cell<usize>> state shared by NativeData closures (move into the heap or serialise with sharing), and HostObject with no serialisation hook (add one, or refuse with an error). Code blocks go through the existing serializer once each; inline-cache and feedback tables load empty; JIT code is never in a snapshot.
+<!-- SECTION:NOTES:END -->

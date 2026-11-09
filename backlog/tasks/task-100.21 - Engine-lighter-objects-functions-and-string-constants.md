@@ -4,6 +4,7 @@ title: 'Engine: lighter objects, functions and string constants'
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -40,3 +41,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #5 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #6 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J5, J11 apply. If you change the object layout, give the inline-cache hit path a defined layout: a #[repr(C)] object header (shape id, dictionary flag, the class tag the cache tests, slot storage) with offset_of! constants, contiguous slot values (inline slots plus overflow is fine, with a fixed rule for which indices are inline), and if you touch Value, a #[repr(C, u8)] or NaN-boxed representation. Lazy function properties must stay describable by the shape. For snapshots (J11), prefer heap-resident state over new Rc<Cell<_>> side state and identify natives by a stable registry index rather than adding more fn-pointer dependence.
+<!-- SECTION:NOTES:END -->

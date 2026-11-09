@@ -31,7 +31,7 @@ The maintainer cannot test on macOS. Everything is pure Rust with no platform-sp
 - Single-pass compiler from AST to register-based bytecode with an accumulator (Ignition and Hermes style): fixed operand widths, compact instructions.
 - Scope resolution at compile time into slots (closures capture slot environments); `with` and sloppy direct `eval` fall back to dynamic lookup.
 - Object model: shapes (hidden classes, as in Boa, V8 and JSC) with inline caches in the interpreter.
-- No JIT in v1; leave room in the bytecode and object model for a later tier.
+- No JIT in v1; leave room in the bytecode and object model for a later tier. Section 14 lists what that room means (ADR 0019).
 - Bytecode is serializable, so production bundles can ship precompiled code. The format is versioned and rejected on mismatch.
 - Generators and async functions are implemented as resumable frames in the interpreter, not as threads or stack copies.
 
@@ -161,3 +161,36 @@ Performance work (interpreter dispatch, inline caches, string and shape tuning, 
 - Never edit Backlog files directly; use the `backlog` CLI.
 - Nothing in the engine may depend on a platform; if a platform-specific path seems necessary, stop and raise it, because the maintainer cannot test on macOS.
 - Prior-art research is on the branch `research/js-engine-design-and-test262` (`research/js-engine-design-and-test262.md`): Boa, Nova, Brimstone, Ignition, Hermes, JSC LLInt, QuickJS, and test262 runner mechanics.
+
+## 14. JIT readiness
+
+Later tiers (TASK-101: snapshots, a baseline JIT, an optimizing tier, AOT) are optional and post-v1. The interpreter stays the default and the fallback. The baseline JIT keeps the interpreter's frames, so leaving machine code means continuing in the interpreter at the frame's `pc`. ADR 0019 gives the rationale, the tiering and deoptimization strategy, the platform story and the code generator choice (Cranelift). Every engine change keeps these constraints:
+
+| | Constraint |
+| --- | --- |
+| J1 | One frame stack and one register file for every tier. `pc`, `acc` and the register window are written back before any call, throw, safe point, debugger stop or suspension. Registers are addressed by base index. |
+| J2 | `pc` is an instruction index. It is the single key for handlers, inline-cache sites, debugger positions, deoptimization and on-stack replacement. |
+| J3 | Each opcode's generic semantics is a callable `Vm` function. Each instruction is atomic for deoptimization: all observable effects come before one result write or one branch. |
+| J4 | Feedback is plain data in per-`CodeBlock` side tables, indexed by a compiler-allocated slot. Entry states are explicit, and megamorphic sticks. Feedback is never serialised and belongs to one heap. |
+| J5 | Shapes are never freed while feedback or code names them. `Value` and the object header that the inline-cache hit path reads get a defined layout before TASK-101.3. No raw heap pointer outlives a runtime call. |
+| J6 | The collector is precise and non-moving. Roots are explicit, and natives and JIT helpers share one rooting mechanism. There are no stack maps and no stack scanning. Any write barrier is a single `Heap` function. |
+| J7 | One attention word (interrupt, memory limit, GC, stress, debugger), polled at function entry, back-edges and call returns. |
+| J8 | One entry into JavaScript and one frame-push path. Arguments are a slice of the caller's register window. Faults are returned values. Generators suspend to `SavedFrame`. |
+| J9 | An attached debugger forces the interpreter. Hot update creates new code blocks and never patches code. |
+| J10 | `agnijs-engine-api` names no interpreter type, and the tier is an engine option. The JIT sits behind the `jit` cargo feature, off by default, in `agnijs-js-jit`, the only engine crate with `unsafe`. Runtime helpers are `extern "C"`. |
+| J11 | A realm's heap serialises as data: native functions by registry index, no shared `Rc<Cell<_>>` state, and host objects through a hook or an error. |
+
+Current designs that break a constraint, checked at `59fb104`, with the fix and where it lands:
+
+| Constraint | Current design | Proposed fix | Where |
+| --- | --- | --- | --- |
+| J1 | Code addresses `acc` and `pc` through `self.frames[fi]` on every instruction. This is not a violation in itself, but TASK-100.17 moves them into locals and must keep the write-back points. | Write back at the observation points listed in J1. | TASK-100.17 (AC #1) |
+| J3 | Most opcode bodies call `ops.rs` helpers, but some arms put their behaviour together inline in `Vm::step`. For example, `GetNamed` combines the cache probe, the fill and the generic lookup in the arm, and `Call` builds its arguments there. | When an arm is inlined or moved, its generic path is also a named function. | TASK-100.17, TASK-100.18 |
+| J4 | `IcEntry` is a single monomorphic entry that a miss overwrites, so its state cannot be told apart. | Explicit empty, monomorphic, polymorphic and megamorphic states, with a kind field. | TASK-100.20 |
+| J5 | `Value`, `PropSlot` and `ObjectData` use the Rust layout, and arenas are `Vec<Option<T>>`. Machine code cannot read a shape or a slot at a known offset. | `#[repr(C, u8)]` (or NaN-boxed) `Value`, a `#[repr(C)]` object header with `offset_of!` constants, and contiguous slot storage. | TASK-100.21 where it touches the layout; otherwise a prerequisite of TASK-101.3 |
+| J6 | The collector is deferred whenever a native frame is on the stack (`native_depth != 0`). | One explicit rooting mechanism for natives (a root or handle stack) that JIT helpers can use too. | TASK-100.16 |
+| J6 | About 100 sites write values into objects through `Heap::obj_mut`, so there is no single write path for a barrier. | No change while the collector is stop-the-world. Funnel the stores through one function before an incremental or generational collector starts. | Not ticketed |
+| J7 | The run loop tests four flags per instruction. The interrupt hook is polled only on backward jumps, so recursion without loops is never interrupted. | One attention word (TASK-100.17). Poll at function entry. | TASK-100.17, TASK-100.33 |
+| J8 | Five places call `Vm::run` (calls, globals, generator resumption twice, scripts), and natives nest run loops. Every call allocates an arguments `Vec`. | One JavaScript entry point. Arguments as a register-window slice. | TASK-100.19 |
+| J10 | No crate forbids `unsafe`, so nothing enforces the confinement. | `#![forbid(unsafe_code)]` on the engine crates. | TASK-100.32 |
+| J11 | `NativeKind::Fn` holds Rust function pointers. `NativeData` shares `Rc<Cell<bool>>` and `Rc<Cell<usize>>` state. `HostObject` has no serialisation hook. | A native registry indexed by id, heap-resident shared state, and a host serialisation hook or a refusal. | TASK-101.2 |

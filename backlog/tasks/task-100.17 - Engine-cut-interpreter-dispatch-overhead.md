@@ -4,7 +4,7 @@ title: 'Engine: cut interpreter dispatch overhead'
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
-updated_date: '2026-11-09T03:29:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies:
@@ -41,3 +41,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #4 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #5 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J1, J2, J3, J7 apply. Locals for pc/acc/window are fine, but write them back before any call, throw, safe point, debugger stop or suspension (J1), and address registers by base index since the register file can reallocate. pc stays an instruction index with O(1) mapping if you change encoding (J2). When inlining opcode bodies, keep each opcode's generic semantics callable as a Vm function a JIT can call (J3). Build the attention word as one word at a fixed Vm field, polled at function entry, back-edges and after calls return (J7; TASK-100.33 covers the missing entry poll). No unsafe in agnijs-js-vm (J10, TASK-100.32): get bounds-check relief from verified frame sizes and slice windows; raise it with the maintainer if unchecked access proves necessary.
+<!-- SECTION:NOTES:END -->

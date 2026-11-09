@@ -6,6 +6,7 @@ title: >-
 status: To Do
 assignee: []
 created_date: '2026-11-09T03:18:00Z'
+updated_date: '2026-11-09T05:53:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -41,3 +42,9 @@ Model assignment (maintainer, 2026-11-08, via TASK-100.14): Fable.
 - [ ] #6 test262 passes with no new failures or exclusions in both `--engine gable` and `--engine gable --precompile` runs, and the Gable suites pass under the Gable engine
 - [ ] #7 The before and after numbers for the reproduction and the named benchmarks are recorded in the task notes, and no other micro-benchmark or Gable benchmark regresses by more than 5%
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+JIT-readiness (ADR 0019, TASK-101.1): J4, J5 apply. Keep feedback in the per-CodeBlock side table as plain data (shape ids, holder id plus shape, slot, kind) a JIT can read at fixed offsets without calling the VM. Make entry states explicit: empty, monomorphic, polymorphic (up to 4), megamorphic, with megamorphic sticky. Add a kind field (own data, proto data, accessor, array length, array/string proto method). Shapes must stay never-freed while an entry names them (J5). Pre-interned names are fine; they are not serialised (load empty, as today).
+<!-- SECTION:NOTES:END -->
