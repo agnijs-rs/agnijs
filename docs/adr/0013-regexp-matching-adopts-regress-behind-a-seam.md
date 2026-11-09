@@ -123,6 +123,8 @@ The fuzzer found differences that are bugs in the backtracking matcher, not in t
 
 The fuzzer also exposed a seam bug, now fixed. The sticky wrapper `(?:P)()|` adds a group, which turned an Annex B escape `\N` with N = group count + 1 (for example `\8` with seven groups) into a backreference. `pin_group_count_escapes` now spells such escapes out before wrapping.
 
-### Relation to TASK-100.30
+### Anchored patterns try index 0 only (TASK-100.30)
 
-TASK-100.30 is the planned early exit for anchored patterns in the backtracking path. It does not conflict with this work: anchoring only lowers this cost model's `starts`, and that is already modelled here.
+Date: 2026-11-09
+
+A failed `exec` of `/^x/` was linear in the input: the seam asked the backtracking matcher for the leftmost match from `start`, and `regress` tried every position, as did the Pike VM's skip-ahead (3.6 s for 200 calls over 4M characters). `Regex::compile` now records whether every alternative of the numbered-groups pattern begins with a `^` that the m flag does not reach (`Regex::starts_anchored`): directly, or inside capturing, non-capturing and modifier groups that do not add `m`, never through lookaround or a quantified group. For such a pattern `exec` answers `None` at once when `start > 0` (a global regex whose `lastIndex` moved on) and otherwise runs the exact-start attempt at 0 that `exec_sticky` already had, so both matchers stop at index 0. Semantics are unchanged by construction: a non-multiline `^` only holds at index 0, so the leftmost match from 0 is the match at 0. The routing cost model already counted one start for anchored patterns, so nothing moves between matchers. The differential fuzzer checks the shortcut against the same pattern behind an empty `(?:)`, which hides the anchor from it.

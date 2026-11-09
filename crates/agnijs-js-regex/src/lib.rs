@@ -119,6 +119,9 @@ pub struct Regex {
     /// `n - 1`); `None` for unnamed groups.
     names: Vec<Option<String>>,
     mode: MatcherMode,
+    /// Every alternative begins with a `^` outside the m flag, so a match
+    /// can only start at index 0 (see [`Regex::starts_anchored`]).
+    starts_anchored: bool,
     /// The linear-time program, or why the pattern is not eligible.
     #[cfg(feature = "linear")]
     linear: Result<linear::Linear, &'static str>,
@@ -176,17 +179,30 @@ impl Regex {
                 flags.unicode_sets,
             )
         };
+        let starts_anchored = !flags.multiline && starts_anchored(&stripped, flags.unicode_sets);
         Ok(Regex {
             inner,
             anchored: std::cell::OnceCell::new(),
             source: stripped,
             backend_flags: rflags,
             unicode_mode,
+            starts_anchored,
             names,
             mode,
             #[cfg(feature = "linear")]
             linear,
         })
+    }
+
+    /// Whether every alternative of the pattern begins with a `^` that the
+    /// m flag does not reach, so that a match can only start at index 0.
+    /// `exec` then tries that one position instead of every position
+    /// (finding 9g: a failed `/^x/` was linear in the input). The test is
+    /// conservative: it looks through capturing, non-capturing and
+    /// modifier groups that do not add `m`, never through lookaround or a
+    /// quantified group.
+    pub fn starts_anchored(&self) -> bool {
+        self.starts_anchored
     }
 
     /// The matcher mode this pattern was compiled under.
@@ -258,6 +274,12 @@ impl Regex {
 
     /// Find the leftmost match starting at or after `start`.
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
+        if self.starts_anchored {
+            // Only index 0 can begin a match, so one exact-start attempt
+            // there decides it; from anywhere else the answer is no.
+            // Without this a failed `/^x/` tried every position.
+            return if start == 0 { self.exec_sticky(input, 0) } else { None };
+        }
         #[cfg(feature = "linear")]
         if let Some(found) = self.exec_linear(input, start, false) {
             return found;
@@ -318,6 +340,117 @@ impl Regex {
             return None;
         }
         Some(self.captures(&m, groups))
+    }
+}
+
+/// Whether every alternative of the numbered-groups pattern `p` begins
+/// with a `^` (see [`Regex::starts_anchored`]). `p` has passed the grammar
+/// check, so parentheses balance and escapes are complete.
+fn starts_anchored(p: &[u32], unicode_sets: bool) -> bool {
+    let mut i = 0;
+    anchored_disjunction(p, &mut i, unicode_sets)
+}
+
+/// Read a Disjunction from `*i` up to and including its closing `)` (or
+/// the end of the pattern): whether every alternative is anchored.
+fn anchored_disjunction(p: &[u32], i: &mut usize, unicode_sets: bool) -> bool {
+    let mut all = true;
+    loop {
+        all &= anchored_alternative(p, i, unicode_sets);
+        match p.get(*i) {
+            Some(&c) if c == '|' as u32 => *i += 1,
+            Some(_) => {
+                // The group's closing `)`.
+                *i += 1;
+                return all;
+            }
+            None => return all,
+        }
+    }
+}
+
+/// Read one Alternative from `*i` up to its `|` or the enclosing `)` (not
+/// consumed): whether its first term is a non-multiline `^`, directly or
+/// inside an unquantified group that does not add the `m` modifier.
+fn anchored_alternative(p: &[u32], i: &mut usize, unicode_sets: bool) -> bool {
+    let anchored = match p.get(*i) {
+        Some(&c) if c == '^' as u32 => true,
+        Some(&c) if c == '(' as u32 => match group_opening(p, *i) {
+            Some(body) => {
+                *i = body;
+                let inner = anchored_disjunction(p, i, unicode_sets);
+                let quantified = matches!(p.get(*i), Some(&q) if q == '*' as u32 || q == '+' as u32 || q == '?' as u32 || q == '{' as u32);
+                inner && !quantified
+            }
+            None => false,
+        },
+        _ => false,
+    };
+    skip_alternative(p, i, unicode_sets);
+    anchored
+}
+
+/// For a group opening at `p[i] == '('`, the index of its body when the
+/// group is capturing, non-capturing or a modifier group that does not
+/// turn `m` on; `None` for lookaround and for groups that add `m`.
+fn group_opening(p: &[u32], i: usize) -> Option<usize> {
+    if p.get(i + 1) != Some(&('?' as u32)) {
+        return Some(i + 1);
+    }
+    let mut j = i + 2;
+    if p.get(j) == Some(&(':' as u32)) {
+        return Some(j + 1);
+    }
+    // `(?flags-flags:`; anything else (`(?=`, `(?!`, `(?<=`, `(?<!`) is
+    // lookaround.
+    let mut adding = true;
+    while let Some(&c) = p.get(j) {
+        if c == ':' as u32 {
+            return Some(j + 1);
+        } else if c == '-' as u32 {
+            adding = false;
+        } else if c == 'm' as u32 {
+            if adding {
+                return None;
+            }
+        } else if c != 'i' as u32 && c != 's' as u32 {
+            return None;
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Advance `*i` to the `|` or `)` that ends the current alternative, or to
+/// the end of the pattern. Escapes, classes (nested in `v` mode) and
+/// nested groups are stepped over.
+fn skip_alternative(p: &[u32], i: &mut usize, unicode_sets: bool) {
+    let mut depth = 0usize;
+    let mut class_depth = 0usize;
+    while let Some(&c) = p.get(*i) {
+        if c == '\\' as u32 {
+            *i += 2;
+            continue;
+        }
+        if class_depth > 0 {
+            if c == ']' as u32 {
+                class_depth -= 1;
+            } else if c == '[' as u32 && unicode_sets {
+                class_depth += 1;
+            }
+        } else if c == '[' as u32 {
+            class_depth = 1;
+        } else if c == '(' as u32 {
+            depth += 1;
+        } else if c == ')' as u32 {
+            if depth == 0 {
+                return;
+            }
+            depth -= 1;
+        } else if c == '|' as u32 && depth == 0 {
+            return;
+        }
+        *i += 1;
     }
 }
 

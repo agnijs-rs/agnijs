@@ -8,7 +8,9 @@
 //! both matchers from every start index, sticky from every index, and
 //! through a global `lastIndex` loop that advances past empty matches the
 //! way `RegExpBuiltinExec` and `AdvanceStringIndex` do. Any difference in
-//! the match or in any capture fails the test with the reproduction.
+//! the match or in any capture fails the test with the reproduction. A
+//! pattern anchored by `^` is also compared with the same pattern behind
+//! an empty `(?:)`, which disables the index-0 shortcut (TASK-100.30).
 //!
 //! `cargo test` (and so CI) runs [`MIN_CASES`] eligible patterns, each on
 //! [`INPUTS_PER_PATTERN`] inputs, with a fixed seed. `AGNIJS_REGEX_FUZZ_CASES`
@@ -339,7 +341,7 @@ fn linear_matcher_agrees_with_backtracking() {
     let trace = std::env::var_os("AGNIJS_REGEX_FUZZ_TRACE").is_some();
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
     let watchdog = Watchdog::start();
-    let (mut eligible, mut ineligible, mut invalid, mut comparisons) = (0usize, 0usize, 0usize, 0usize);
+    let (mut eligible, mut ineligible, mut invalid, mut comparisons, mut anchored) = (0usize, 0usize, 0usize, 0usize, 0usize);
     while eligible < cases {
         let mode = match rng.below(10) {
             0..=5 => Mode::Legacy,
@@ -360,31 +362,67 @@ fn linear_matcher_agrees_with_backtracking() {
             continue;
         };
         let lin = Regex::compile_with(&p, &flags, MatcherMode::LinearWhenEligible).unwrap();
-        if lin.linear_eligibility().is_err() {
+        // A pattern anchored by `^` in every alternative tries index 0
+        // only (TASK-100.30). `(?:)` in front hides the anchor from that
+        // shortcut and changes nothing else, so the plain search over the
+        // same matcher is the reference for it.
+        let oracle = back.starts_anchored().then(|| {
+            let mut q: Vec<u16> = "(?:)".encode_utf16().collect();
+            q.extend_from_slice(&p);
+            let o = Regex::compile_with(&q, &flags, MatcherMode::BacktrackingOnly).unwrap();
+            assert!(!o.starts_anchored(), "/{}/{flags_s}", pattern.escape_debug());
+            o
+        });
+        let is_eligible = lin.linear_eligibility().is_ok();
+        if is_eligible {
+            eligible += 1;
+        } else {
             ineligible += 1;
-            continue;
+            if oracle.is_none() {
+                continue;
+            }
         }
-        eligible += 1;
+        if oracle.is_some() {
+            anchored += 1;
+        }
         for _ in 0..INPUTS_PER_PATTERN {
             let input = random_input(&mut rng);
             let a = outcomes(&back, &input, &flags);
-            let b = outcomes(&lin, &input, &flags);
-            comparisons += a.len();
-            if a != b {
-                let k = a.iter().zip(&b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
-                panic!(
-                    "mismatch for /{}/{} on \"{}\" at outcome {k}:\n  backtracking: {:?}\n  linear:       {:?}",
-                    pattern.escape_debug(),
-                    flags_s,
-                    show(&input),
-                    a.get(k),
-                    b.get(k),
-                );
+            if let Some(o) = &oracle {
+                let c = outcomes(o, &input, &flags);
+                comparisons += c.len();
+                compare(("anchored shortcut", &a), ("plain search", &c), &pattern, &flags_s, &input);
+            }
+            if is_eligible {
+                let b = outcomes(&lin, &input, &flags);
+                comparisons += a.len();
+                compare(("backtracking", &a), ("linear", &b), &pattern, &flags_s, &input);
             }
         }
     }
     println!(
-        "{eligible} eligible patterns ({comparisons} compared outcomes), {ineligible} ineligible, {invalid} invalid"
+        "{eligible} eligible patterns ({comparisons} compared outcomes), {ineligible} ineligible, {invalid} invalid, {anchored} anchored"
     );
     assert!(ineligible > 0, "the generator should also produce ineligible patterns");
+    assert!(anchored > 0, "the generator should also produce anchored patterns");
+}
+
+/// Fail with the reproduction at the first differing outcome.
+fn compare(
+    (name_a, a): (&str, &[Option<Captures>]),
+    (name_b, b): (&str, &[Option<Captures>]),
+    pattern: &str,
+    flags: &str,
+    input: &[u16],
+) {
+    if a != b {
+        let k = a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()));
+        panic!(
+            "mismatch for /{}/{flags} on \"{}\" at outcome {k}:\n  {name_a}: {:?}\n  {name_b}: {:?}",
+            pattern.escape_debug(),
+            show(input),
+            a.get(k),
+            b.get(k),
+        );
+    }
 }
