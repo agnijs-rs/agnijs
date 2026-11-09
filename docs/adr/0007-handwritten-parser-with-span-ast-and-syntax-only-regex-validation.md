@@ -23,6 +23,6 @@ Milestone M1 of the Gable JS engine (`docs/js-engine-spec.md`, section 3 and sec
 ## Consequences
 
 - The parser is checked by the test262 runner's `--engine parse` mode: positive tests must parse (sloppy and strict), tests negative in the `parse` phase must fail, harness files must parse. At the pinned test262 commit the parse pass has no failures and no exclusions (`baselines/parse.json` is empty), including intl402.
-- When M5 replaces or wraps `regress`, the property-name check in `syntax.rs` must be pointed at the new tables; nothing else in the parser depends on `regress`.
+- When M5 replaces or wraps `regress`, the property-name check in `syntax.rs` must be pointed at the new tables; nothing else in the parser depends on `regress`. (Done in TASK-100.31: `syntax.rs` checks property names against the Unicode 17 tables generated into `agnijs-js-regex` by `tools/gen-regex-unicode.mjs`, and `regress` is now only a test reference; ADR 0013 addendum.)
 - Byte offsets mean a consumer that wants line/column pays for a `LineTable` per source; the compiler should build it once per script and share it with the debugger.
 - Keeping `Paren` nodes means later passes must call `unparen()` where parentheses are semantically transparent.

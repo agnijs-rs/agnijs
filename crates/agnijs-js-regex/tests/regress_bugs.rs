@@ -90,6 +90,15 @@ fn a_v_mode_class_with_the_empty_string_matches_empty() {
 }
 
 #[test]
+fn a_backreference_inside_its_own_group_matches_empty_after_backing_off() {
+    // The group has not closed when \1 runs, so \1 matches empty; regress
+    // compared against the capture of an abandoned attempt.
+    assert_eq!(find(r"(.*\1).", "", &u("a")), Some((0, 1)));
+    assert_eq!(find(r"(.*\1){2}.", "", &u("a")), Some((0, 1)));
+    assert_eq!(find(r"(\w*\1)+.", "", &u("ab")), Some((0, 2)));
+}
+
+#[test]
 fn empty_iterations_inside_a_counted_loop_finish() {
     // TASK-108: regress never returned on "__".
     assert_eq!(find(r"(?:(_|)+){2}K", "", &u("__")), None);

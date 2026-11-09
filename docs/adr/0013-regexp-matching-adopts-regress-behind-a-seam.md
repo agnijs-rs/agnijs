@@ -4,7 +4,7 @@ Date: 2026-11-08
 
 ## Status
 
-Accepted
+Accepted. The choice of `regress` as the matcher is superseded by the TASK-100.31 addendum at the end ("Our own matchers replace `regress`"); the seam and the VM's ownership of the ECMAScript algorithms stand.
 
 ## Context
 
@@ -128,3 +128,105 @@ The fuzzer also exposed a seam bug, now fixed. The sticky wrapper `(?:P)()|` add
 Date: 2026-11-09
 
 A failed `exec` of `/^x/` was linear in the input: the seam asked the backtracking matcher for the leftmost match from `start`, and `regress` tried every position, as did the Pike VM's skip-ahead (3.6 s for 200 calls over 4M characters). `Regex::compile` now records whether every alternative of the numbered-groups pattern begins with a `^` that the m flag does not reach (`Regex::starts_anchored`): directly, or inside capturing, non-capturing and modifier groups that do not add `m`, never through lookaround or a quantified group. For such a pattern `exec` answers `None` at once when `start > 0` (a global regex whose `lastIndex` moved on) and otherwise runs the exact-start attempt at 0 that `exec_sticky` already had, so both matchers stop at index 0. Semantics are unchanged by construction: a non-multiline `^` only holds at index 0, so the leftmost match from 0 is the match at 0. The routing cost model already counted one start for anchored patterns, so nothing moves between matchers. The differential fuzzer checks the shortcut against the same pattern behind an empty `(?:)`, which hides the anchor from it.
+
+## Addendum (TASK-100.31): our own matchers replace `regress`
+
+Date: 2026-11-09
+
+`regress` no longer runs behind the seam. `agnijs-js-regex` now has its own parser, backtracking matcher and Unicode tables, and the linear-time matcher compiles from the same parse tree. `regress` is a dev-dependency only, the reference that `tests/differential.rs` compares against. The seam's public API (`Regex::compile`/`compile_with`, `exec`, `exec_sticky`, `group_names`, `MatcherMode`, `Host::regex_matcher()`) is unchanged, and so is everything in the VM's `builtins/regexp.rs`.
+
+### Why
+
+- The divergences listed above (TASK-105 to TASK-108) could only be routed around, not fixed, and the fuzzer kept finding more (below).
+- `regress` had no step budget, so `/(?:(_|)+){2}K/` hung.
+- Its compiled form could not be serialized, so precompiled bytecode had to parse and compile every regex literal again on load (ADR 0010, TASK-101.5).
+- The linear matcher borrowed `regress` for character semantics, one compiled predicate per class and character, and that was the slow part of forced-linear mode.
+
+### Design
+
+- **Unicode tables.** `tools/gen-regex-unicode.mjs` generates them from the Unicode 17 UCD into `src/unicode_tables.rs`. They cover:
+  - binary properties, General_Category, Script and Script_Extensions;
+  - properties of strings;
+  - simple case folding, and the non-unicode `Canonicalize` (toUppercase with the ASCII rule).
+
+  `syntax.rs` checks property names against them (ADR 0007).
+- **Parser.** `parse.rs` turns a validated pattern into a tree. That covers:
+  - group names resolved to numbers, with `\k` naming every group of a duplicate name;
+  - modifiers applied to the atoms they cover;
+  - Annex B octal, identity and `\c` forms;
+  - `u` and `v` classes, set operations and `\q{}` strings.
+
+  Case folding is applied when the tree is built. A class under `i` becomes the closure of its members (in `v` mode each operand is folded before the set operation, as MaybeSimpleCaseFolding requires). Neither matcher folds at match time, except in backreferences.
+- **Character sets.** `charset.rs` stores sorted code-point ranges. Matching uses a 256-bit Latin-1 bitmap and a binary search over the ranges above it, and both matchers share it.
+- **Backtracking matcher.** `backtrack.rs` runs a flat program with one explicit stack, so no pattern or input can overflow the native stack while matching.
+  - Loop counters and capture registers are undone from the stack.
+  - An iteration past the minimum that consumes nothing fails (RepeatMatcher). That keeps ECMAScript results, and every loop terminates, so `/(?:(_|)+){2}K/` finishes (TASK-108).
+  - Lookarounds are atomic. Lookbehind bodies compile right to left.
+  - Fast paths:
+    - a quantified single class runs as one scanning instruction;
+    - that instruction is possessive when the continuation cannot begin with a member, and otherwise backs off only to positions where the continuation can begin;
+    - literal runs match as strings;
+    - the search skips start positions whose first character cannot begin a match.
+- **Linear matcher.** The Pike VM (TASK-102) compiles from the same tree and uses the same sets. Classes with strings, `\u{…}` outside `u` mode and escaped surrogate pairs are now eligible. Only backreferences, lookaround and the program-size, unrolling and nesting caps make a pattern ineligible.
+- **Programs.** A `Program` holds the group names, the anchoring flag, the backtracking program and the linear program (or why there is none). It is shared through an `Arc` and does not depend on the matcher mode. `Regex::program_bytes`/`from_program_bytes` serialize and verify it. Bytecode carries one program per regex literal (`agnijs-bc-7`, ADR 0010 addendum).
+
+### Routing (replaces the cost model above)
+
+`Auto` no longer estimates the backtracking worst case from the pattern. It runs the backtracking matcher under a step budget instead.
+
+- **Nested quantifiers.** Patterns whose repeated body contains a quantifier with max > 1, or an alternation, run on the linear matcher from the start. There is one exception: a repeated alternation whose branches begin with disjoint characters is not counted as nested. That was the `regex-long-input` follow-up from TASK-102.
+- **Everything else eligible.** It backtracks with a budget of `max(16 × program size × (len + 1), 4096)` steps. When the budget runs out, the search continues on the linear matcher from the start position the backtracker had reached. Every earlier start has failed, so leftmost semantics hold, and the total work stays linear in the input.
+- **Ineligible patterns** (backreferences, lookaround) backtrack with no budget, as in every backtracking engine. The host interrupt (ADR 0006) remains the guard.
+
+`BacktrackingOnly` and `LinearWhenEligible` are unchanged.
+
+### `regress` divergences, now fixed
+
+`tests/regress_bugs.rs` checks the correct result of each one in all three matcher modes:
+
+- TASK-105: escaped surrogate pairs outside `u` mode are two code units.
+- TASK-106: `\u{2}` outside `u` mode is `u` repeated twice.
+- TASK-107: `\b` and `\B` under `ui` and `vi` use the folded word characters (U+017F and U+212A are word characters).
+- TASK-108: `/(?:(_|)+){2}K/` on `"__"` finishes.
+
+The differential test against `regress` found six more:
+
+- U+017F and U+212A under `i` outside `u` mode fold only to themselves (Canonicalize).
+- `[\W]` under `ui` excludes what folds to a word character.
+- Under `vi`, every operand is folded before set operations, and U+212A folds with `k`.
+- `[\b]` in `v` mode is U+0008.
+- The empty string of `[\q{abc|a|}b]` matches.
+- A backreference inside its own group, after a quantifier, matches empty: `/(.*\1)./` matches `"a"`. `regress` compared against the capture of an abandoned attempt.
+
+The differential test skips patterns that hit a known divergence and reports the count of each.
+
+### Verification
+
+- **Differential fuzzing**, all in one process with a hang watchdog. The 200,000-case runs below are the size CI runs, in release; each test finishes in under 25 s.
+  - `matchers_agree`: backtracking against linear and `Auto`, quantifiers nested three deep. At 200,000 patterns it compares 14.7M outcomes with no mismatch.
+  - `backtracking_agrees_with_regress`: 200,000 patterns, 14.6M outcomes, no mismatch outside the known divergences. That run skipped 39,761 patterns, 25,959 of them for the U+017F/U+212A and `vi` cases.
+  - `programs_survive_serialization_and_corruption`:
+    - 200,000 programs round-trip in every mode with identical bytes and outcomes;
+    - 800,000 corrupted copies either fail verification or load and run without panicking;
+    - corrupted copies with no step budget, which can be exponential like any pattern, are loaded but not run.
+- **test262**:
+  - 42231/42231 from source and with `--precompile`;
+  - intl402 981/981;
+  - the RegExp directories 2502/2502 under each of `auto`, `backtracking-only` and `linear-when-eligible`.
+
+  The forced-linear RegExp run takes 43 s against 24 s for `auto`. The ratio was 300 s against 86 s when the linear matcher used `regress` predicates.
+
+### Measurements (agnijs-js-bench, release, i9-9900KF, alternating binaries, median of 3 runs of 7 iterations)
+
+| Workload | `regress` era, auto | now, auto | now, backtracking only | now, linear when eligible |
+| --- | --- | --- | --- | --- |
+| `regex` | 153.9 ms | 105.3 ms | 103.7 ms | 192.8 ms |
+| `regex-tokenize` | 46.9 ms | 31.7 ms | 31.5 ms | 36.7 ms |
+| `regex-long-input` | 7.61 ms | 1.63 ms | 1.62 ms | 6.64 ms |
+| `regex-redos` | 0.01 ms | 0.01 ms | 255.6 ms | 0.01 ms |
+
+The `regress`-era column is the commit before TASK-100.31's matcher (it already had the new tables). One regression remains: forced backtracking on the catastrophic `/(a+)+$/` takes 255.6 ms where `regress` took 116.0 ms. Every loop iteration writes its counter, start position and captures through the undo stack. `Auto` never runs this pattern on the backtracker, so only hosts that choose `BacktrackingOnly` see it, and the pattern is exponential on either engine.
+
+### Known limit: deeply nested patterns
+
+The pattern validator (`syntax::validate`) and the tree compiler recurse on group nesting. On a 2 MB thread, about 2,100 nested groups overflow the validator and about 1,500 overflow the compiler; matching is not affected. Neither has a depth limit yet, and the engine has no shared depth guard to give them one.

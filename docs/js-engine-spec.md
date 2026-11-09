@@ -56,7 +56,7 @@ Source text is lexed as UTF-8. Source built from a JavaScript string (`eval`, `F
 
 ECMAScript regex semantics (backtracking, lookbehind, named groups, the `v` flag, Unicode property escapes, Annex B legacy syntax) differ from Rust's `regex` crate. The engine's regex support lives in its own crate behind a seam.
 
-The first task of that crate is an evaluation of `regress` (the ES-compliant Rust regex crate Boa uses) against the relevant test262 tests (`built-ins/RegExp`, `language/literals/regexp`, `annexB`) and the performance of pathological patterns. If it passes, adopt it behind the seam; otherwise write our own engine. The decision is recorded as a short ADR.
+The first task of that crate is an evaluation of `regress` (the ES-compliant Rust regex crate Boa uses) against the relevant test262 tests (`built-ins/RegExp`, `language/literals/regexp`, `annexB`) and the performance of pathological patterns. If it passes, adopt it behind the seam; otherwise write our own engine. The decision is recorded as a short ADR. (ADR 0013 adopted `regress`; TASK-100.31 later replaced it with our own engine behind the same seam, see the ADR's addendum.)
 
 ## 7. Engine interface
 
@@ -106,7 +106,7 @@ A Cargo workspace at the repository root (it was `native/engine/` in the Gable r
 | `agnijs-js-parser` | Lexer, parser, AST, early errors, source maps input. |
 | `agnijs-js-compiler` | AST to bytecode, scope analysis, bytecode format and serialization. |
 | `agnijs-js-vm` | Interpreter, object model and shapes, heap and GC, built-ins, jobs, modules. |
-| `agnijs-js-regex` | The regex seam and its engine (adopted `regress` or our own). |
+| `agnijs-js-regex` | The regex seam and its engine (our own since TASK-100.31; ADR 0013). |
 | `agnijs-js-intl` | The ICU4X bridge and ECMA-402 built-ins support. |
 | `agnijs-js-debugger` | The debugger interface and its implementation hooks. |
 | `agnijs-js-cdp` | The CDP adapter. |

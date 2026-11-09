@@ -24,7 +24,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | `agnijs-js-parser` | Lexer, parser, AST, early errors |
 | `agnijs-js-compiler` | AST to bytecode, bytecode format and serialization |
 | `agnijs-js-vm` | Interpreter, object model, heap and GC, built-ins, jobs, modules |
-| `agnijs-js-regex` | The regex seam: `regress` backtracking plus a linear-time matcher for ReDoS-safe patterns |
+| `agnijs-js-regex` | Our own regex engine behind the seam: parser, backtracking matcher, linear-time matcher for ReDoS-safe patterns, serializable programs |
 | `agnijs-js-intl` | The ICU4X seam and ECMA-402 services |
 | `agnijs-js-debugger` | The debugger interface |
 | `agnijs-js-cdp` | The Chrome DevTools Protocol adapter |

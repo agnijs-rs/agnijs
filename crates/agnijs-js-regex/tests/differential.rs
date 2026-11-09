@@ -491,7 +491,91 @@ fn regress_bug(pattern: &str, flags: &Flags) -> Option<&'static str> {
         // empty string of a class like [\q{abc|a|}b].
         return Some("empty \\q{} string");
     }
+    if refers_inside_its_own_group(pattern) {
+        // Found by this test (TASK-100.31): a backreference inside the
+        // group it names must match empty (the group has not closed), but
+        // after a greedy loop before it backs off regress compares against
+        // a stale capture, so /(.*\1)./ misses "a".
+        return Some("backreference inside its own group");
+    }
     None
+}
+
+/// Whether a `\N` or `\k<name>` occurs inside group N or a group with that
+/// name, after a quantifier inside that group. Escapes and classes are
+/// skipped; names are compared as written.
+fn refers_inside_its_own_group(pattern: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    // Open parentheses: the group number and name of capturing ones, and
+    // whether a quantifier has been seen inside.
+    let mut open: Vec<(Option<(usize, String)>, bool)> = Vec::new();
+    let quantified = |open: &[(Option<(usize, String)>, bool)], hit: &dyn Fn(&(usize, String)) -> bool| {
+        open.iter().any(|(g, q)| *q && g.as_ref().is_some_and(hit))
+    };
+    let (mut groups, mut i, mut class) = (0usize, 0usize, 0usize);
+    while i < p.len() {
+        match p[i] {
+            '\\' if i + 1 < p.len() => {
+                let next = p[i + 1];
+                if class == 0 && next.is_ascii_digit() && next != '0' {
+                    let digits: String = p[i + 1..].iter().take_while(|c| c.is_ascii_digit()).collect();
+                    let n: usize = digits.parse().unwrap_or(0);
+                    if quantified(&open, &|(g, _)| *g == n) {
+                        return true;
+                    }
+                } else if class == 0 && next == 'k' && p.get(i + 2) == Some(&'<') {
+                    let name: String = p[i + 3..].iter().take_while(|&&c| c != '>').collect();
+                    if quantified(&open, &|(_, m)| *m == name) {
+                        return true;
+                    }
+                }
+                i += 2;
+                continue;
+            }
+            '[' => class += 1,
+            ']' if class > 0 => class -= 1,
+            '(' if class == 0 => {
+                let named = p.get(i + 1) == Some(&'?') && p.get(i + 2) == Some(&'<') && !matches!(p.get(i + 3), Some('=' | '!'));
+                if p.get(i + 1) != Some(&'?') || named {
+                    groups += 1;
+                    let name = if named { p[i + 3..].iter().take_while(|&&c| c != '>').collect() } else { String::new() };
+                    open.push((Some((groups, name)), false));
+                } else {
+                    open.push((None, false));
+                }
+                if p.get(i + 1) == Some(&'?') {
+                    // Not a quantifier.
+                    i += 2;
+                    continue;
+                }
+            }
+            ')' if class == 0 => {
+                open.pop();
+            }
+            '*' | '+' | '?' | '{' if class == 0 => open.iter_mut().for_each(|(_, q)| *q = true),
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+#[test]
+fn self_references_are_recognised() {
+    assert!(refers_inside_its_own_group(r"(.*\1)."));
+    assert!(refers_inside_its_own_group(r"(a*(?:b\1))"));
+    assert!(refers_inside_its_own_group(r"(?<g1>x+\k<g1>)"));
+    assert!(refers_inside_its_own_group(r"()(a?\2)"));
+    assert!(refers_inside_its_own_group(r"((?:ab){2}\1)"));
+    assert!(!refers_inside_its_own_group(r"(a\1)"));
+    assert!(!refers_inside_its_own_group(r"(?:a*)(?<g1>\k<g1>)"));
+    assert!(!refers_inside_its_own_group(r"(a)\1"));
+    assert!(!refers_inside_its_own_group(r"\1(a)"));
+    assert!(!refers_inside_its_own_group(r"(?<g1>x)\k<g1>"));
+    assert!(!refers_inside_its_own_group(r"(?:a\1)(b)"));
+    assert!(!refers_inside_its_own_group(r"[(]\1(a)"));
+    assert!(!refers_inside_its_own_group(r"(a[\1])"));
+    assert!(!refers_inside_its_own_group(r"(?<=a\1)(b)"));
 }
 
 /// Whether any part of the pattern matches ignoring case (the i flag or
@@ -504,7 +588,8 @@ fn may_fold(pattern: &str, flags: &Flags) -> bool {
 fn backtracking_agrees_with_regress() {
     let (cases, mut rng, trace) = settings();
     let watchdog = Watchdog::start();
-    let (mut compared, mut invalid, mut rejected, mut known, mut comparisons) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut compared, mut invalid, mut rejected, mut comparisons) = (0usize, 0usize, 0usize, 0usize);
+    let mut known = std::collections::BTreeMap::<&str, usize>::new();
     while compared < cases {
         let (pattern, flags_s) = random_case(&mut rng, 2, true);
         let p = u(&pattern);
@@ -517,8 +602,8 @@ fn backtracking_agrees_with_regress() {
             invalid += 1;
             continue;
         };
-        if regress_bug(&pattern, &flags).is_some() {
-            known += 1;
+        if let Some(bug) = regress_bug(&pattern, &flags) {
+            *known.entry(bug).or_default() += 1;
             continue;
         }
         let Some(reference) = Reference::compile(&p, &flags) else {
@@ -540,7 +625,8 @@ fn backtracking_agrees_with_regress() {
         }
     }
     println!(
-        "{compared} patterns ({comparisons} compared outcomes), {invalid} invalid, {rejected} rejected by regress, {known} skipped as known regress bugs"
+        "{compared} patterns ({comparisons} compared outcomes), {invalid} invalid, {rejected} rejected by regress, {} skipped as known regress bugs: {known:?}",
+        known.values().sum::<usize>()
     );
 }
 
