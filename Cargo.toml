@@ -13,6 +13,7 @@ members = [
     "crates/agnijs-js-test262",
     "crates/agnijs-js-bench",
     "crates/agnijs-js-jit",
+    "crates/agnijs-capi",
 ]
 
 [workspace.package]

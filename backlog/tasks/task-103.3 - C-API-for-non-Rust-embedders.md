@@ -1,10 +1,11 @@
 ---
 id: TASK-103.3
 title: C API for non-Rust embedders
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-09T02:14:00Z'
-updated_date: '2026-11-09T02:35:00Z'
+updated_date: '2026-11-10T15:13:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -26,6 +27,18 @@ A stable C API next to the Rust one so C, C++, Swift, Go, Python, Zig and other 
 - [ ] #4 No panic can escape or abort the host: clippy denies unwrap, expect, panic, indexing and slicing in the C API crate; every extern function is wrapped in catch_unwind and maps a panic to an error result; the crate builds with panic=unwind; a fault-injection test forces panics at each entry point, and malformed input, invalid handles, double frees and use after teardown all return errors, with the process surviving and a poisoned handle failing safely
 - [ ] #5 Before the C API is stable, every reachable panic in the engine core public paths is audited: fuzzing the engine interface with arbitrary scripts, bytecode and handle sequences finds no panic, and any found are fixed in the engine
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. New crate crates/agnijs-capi (cdylib + staticlib + rlib) over agnijs-engine-api and agnijs-js-vm; unsafe confined there, every unsafe block documented; clippy denies unwrap/expect/panic/indexing/slicing/unreachable/todo/arithmetic side effects/truncating casts.
+2. Everything the host holds is a generation-checked u64 id (engine, realm, class, value, buffer, sink): engines live in a thread-local registry (wrong thread is an error, not a race), value handles carry an engine tag, slots retire instead of wrapping generations. No Rust allocation is freed by C or the reverse: outputs are buffer handles or copies into caller memory.
+3. Every extern fn runs under catch_unwind; a caught panic returns AGNIJS_ERR_PANIC, poisons the engine, and teardown stays safe. Host callbacks are extern C-unwind and run under catch_unwind too. Reentrancy from host callbacks goes through a lease stack (one live &mut at a time), depth-limited; calls from hooks that have no engine return AGNIJS_ERR_BUSY. Versioned structs (struct_size, trailing bytes must be zero). panic=abort refused at compile time.
+4. Surface: realms, scripts, modules with host resolve/load hooks (source, JSON, bytecode), values in and out (UTF-8 and lossless UTF-16), properties, calls and construct, host functions and classes with finalizers, exceptions with name, message and stack, promise state and job pumping, memory limit and usage, interrupt hook plus a thread-safe interrupt request, bytecode save and load.
+5. cbindgen header checked in with a CI drift check; ABI and versioning policy in docs/c-api.md and an ADR.
+6. Tests: Rust unit and integration tests, fault injection at every entry point (feature fault-injection), hostile-input suite, bounded fuzz and differential test of the FFI surface (random call sequences, mutated scripts and bytecode), C test program, C and C++ examples via CMake in CI on Linux, Windows and macOS, ASan and LSan run of the C test on Linux, Miri on the handle and validation tests, the crate in the GC-stress job.
+7. Fix any engine panic the fuzzing finds; run workspace tests and default test262 once at the end.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

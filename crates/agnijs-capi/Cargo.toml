@@ -1,0 +1,28 @@
+[package]
+name = "agnijs-capi"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The AgniJS C API: a stable C ABI over the engine interface for C, C++ and other non-Rust embedders"
+
+[lib]
+name = "agnijs_capi"
+# cdylib and staticlib are what C embedders link; rlib lets the Rust tests
+# call the exported functions directly.
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[features]
+# Exports `agnijs_test_inject_panic`, which forces a panic inside a named
+# entry point so tests can prove the panic is caught (TASK-103.3). Never
+# enable it in a shipped library.
+fault-injection = []
+
+[dependencies]
+agnijs-engine-api.workspace = true
+agnijs-js-vm.workspace = true
+
+[[test]]
+name = "fault_injection"
+required-features = ["fault-injection"]
