@@ -62,6 +62,10 @@ pub(crate) struct Ctx<V> {
     /// The `&mut R` given to [`enter`], type-erased.
     rt: *mut c_void,
     slow: SlowFn<V>,
+    /// [`Runtime::call`]: a `Call` instruction.
+    call: SlowFn<V>,
+    /// [`Runtime::fast`]: a binding or `this` load or store.
+    fast: SlowFn<V>,
     poll: PollFn<V>,
     /// [`Runtime::arith`]: number operators without an instruction of
     /// their own, called without leaving the frame (it sees no VM state).
@@ -84,6 +88,9 @@ pub(crate) struct Ctx<V> {
     ic: *const IcSite,
     /// The accumulator, whenever control is outside machine code.
     acc: V,
+    /// The frame's `this` ([`Runtime::this_value`]), fixed for the run;
+    /// the accumulator's value when the code has no `LdaThis`.
+    this: V,
     /// Registers the code addresses; a shorter window is a runtime bug.
     registers: usize,
     /// Whether the code reads the heap (`objects` must be live).
@@ -94,7 +101,10 @@ pub(crate) struct Ctx<V> {
 /// Field offsets of [`Ctx`] for the code generator.
 pub(crate) struct Offsets {
     pub regs: i32,
+    pub this: i32,
     pub slow: i32,
+    pub call: i32,
+    pub fast: i32,
     pub poll: i32,
     pub arith: i32,
     pub pc: i32,
@@ -109,7 +119,10 @@ pub(crate) struct Offsets {
 pub(crate) fn offsets<V>() -> Offsets {
     Offsets {
         regs: offset_of!(Ctx<V>, regs) as i32,
+        this: offset_of!(Ctx<V>, this) as i32,
         slow: offset_of!(Ctx<V>, slow) as i32,
+        call: offset_of!(Ctx<V>, call) as i32,
+        fast: offset_of!(Ctx<V>, fast) as i32,
         poll: offset_of!(Ctx<V>, poll) as i32,
         arith: offset_of!(Ctx<V>, arith) as i32,
         pc: offset_of!(Ctx<V>, pc) as i32,
@@ -130,6 +143,8 @@ pub(crate) struct Needs {
     pub heap: bool,
     /// The inline-cache sites it reads (0 when it reads none).
     pub ic: usize,
+    /// It reads `this` (`LdaThis`) from the context.
+    pub this: bool,
 }
 
 // ---- vector layout ---------------------------------------------------------
@@ -485,6 +500,7 @@ fn probe() -> bool {
 
 /// Run the machine code in `mem` from `pc`.
 #[cfg_attr(not(jit_host), allow(unused_variables, unreachable_code))]
+#[inline]
 pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
     mem: &ExecMemory,
     needs: Needs,
@@ -514,6 +530,14 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
     if needs.heap && view.objects.is_null() {
         return interp;
     }
+    let this = if needs.this {
+        match rt.this_value() {
+            Some(t) => t,
+            None => return interp,
+        }
+    } else {
+        acc
+    };
     let window = rt.registers();
     if window.len() < needs.registers {
         return interp;
@@ -526,6 +550,8 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         regs,
         rt: rt_ptr as *mut c_void,
         slow: slow_trampoline::<V, R>,
+        call: call_trampoline::<V, R>,
+        fast: fast_trampoline::<V, R>,
         poll: poll_trampoline::<V, R>,
         arith: arith_trampoline::<V, R>,
         pc,
@@ -535,6 +561,7 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         objects: view.objects,
         ic,
         acc,
+        this,
         registers: needs.registers,
         heap: needs.heap,
         panic: None,
@@ -641,6 +668,27 @@ fn call_out<V: JitValue, R: Runtime<V>>(
 }
 
 extern "C" fn slow_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
+    call_out::<V, R>(ctx, |rt, acc| rt.slow(pc, acc))
+}
+
+extern "C" fn call_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
+    call_out::<V, R>(ctx, |rt, acc| rt.call(pc, acc))
+}
+
+extern "C" fn fast_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
+    {
+        // SAFETY: as in `call_out`.
+        let c = unsafe { &mut *ctx };
+        // SAFETY: as in `call_out`.
+        let rt = unsafe { &mut *(c.rt as *mut R) };
+        let acc = c.acc;
+        // A hit changes nothing compiled code caches: no allocation, no
+        // poll, no safe point (`Runtime::fast`).
+        if let Ok(Some(v)) = catch_unwind(AssertUnwindSafe(|| rt.fast(pc, acc))) {
+            c.acc = v;
+            return pc + 1;
+        }
+    }
     call_out::<V, R>(ctx, |rt, acc| rt.slow(pc, acc))
 }
 

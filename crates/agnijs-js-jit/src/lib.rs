@@ -209,6 +209,34 @@ pub trait Runtime<V: JitValue> {
     /// and report where execution continues. Every instruction's effects
     /// complete before it returns (ADR 0019 J3).
     fn slow(&mut self, pc: u32, acc: V) -> Resume<V>;
+
+    /// [`Runtime::slow`] for a `Call` instruction, through its own entry
+    /// so that the runtime can take the call without decoding a general
+    /// instruction (and run a compiled callee from here).
+    fn call(&mut self, pc: u32, acc: V) -> Resume<V> {
+        self.slow(pc, acc)
+    }
+
+    /// [`Runtime::slow`] for a global or environment load or store
+    /// (`LdaGlobal`, `LdaEnv`, `StaEnv`), through its own
+    /// entry: the common case is a cache hit or a slot read, which a small
+    /// function serves at a fraction of the general path's cost.
+    ///
+    /// `Some` is the new accumulator, the instruction done, and promises
+    /// that nothing compiled code caches changed: no allocation, no
+    /// interrupt-counter change, no safe point due, the register window
+    /// and heap view as they were. `None` runs the instruction by
+    /// [`Runtime::slow`] instead.
+    fn fast(&mut self, pc: u32, acc: V) -> Option<V> {
+        let _ = (pc, acc);
+        None
+    }
+    /// The running frame's `this`, which compiled code loads itself for
+    /// `LdaThis` (it is fixed for a frame's life). Asked when code that
+    /// has an `LdaThis` is entered; `None` leaves such code unentered.
+    fn this_value(&mut self) -> Option<V> {
+        None
+    }
     /// A loop back-edge from the jump at `pc` to `target` whose interrupt
     /// poll is due (the counter, already advanced, is a multiple of
     /// 0x1000: ask the host), or taken while [`Runtime::safe_point_due`]
@@ -519,6 +547,8 @@ pub struct Compiled<V> {
     /// (`needs_ic`) an inline-cache table.
     needs_heap: bool,
     needs_ic: usize,
+    /// Has an `LdaThis`: entered only with [`Runtime::this_value`].
+    needs_this: bool,
     /// Size of the machine code in bytes.
     pub code_size: usize,
     /// Time spent generating it.
@@ -560,6 +590,7 @@ impl<V: JitValue> Compiled<V> {
             registers: code.register_count as usize,
             needs_heap: heap.is_some(),
             needs_ic: if heap.is_some() { code.ic_count as usize } else { 0 },
+            needs_this: code.instrs.iter().any(|i| matches!(i, Instr::LdaThis)),
             code_size: lowered.bytes.len(),
             compile_time: start.elapsed(),
             _value: PhantomData,
@@ -580,6 +611,7 @@ impl<V: JitValue> Compiled<V> {
 
     /// Run from `pc` (an entry, else [`Exit::Interp`] at once) with the
     /// accumulator `acc`, the top frame being this function's.
+    #[inline]
     pub fn enter<R: Runtime<V>>(&self, rt: &mut R, pc: u32, acc: V) -> Outcome<V> {
         if !self.is_entry(pc as usize) {
             return Outcome {
@@ -594,6 +626,7 @@ impl<V: JitValue> Compiled<V> {
                 registers: self.registers,
                 heap: self.needs_heap,
                 ic: self.needs_ic,
+                this: self.needs_this,
             },
             rt,
             pc,

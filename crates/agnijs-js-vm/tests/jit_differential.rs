@@ -250,6 +250,28 @@ fn a_throw_in_a_nested_callee_is_caught_several_compiled_frames_up() {
 }
 
 #[test]
+fn this_in_compiled_code_is_each_frames_own() {
+    // Methods, sloppy and strict functions called with primitive and
+    // nullish receivers, and arrows reading an outer `this`, all compiled
+    // and entered directly from each other.
+    let stats = same(
+        "function sloppy() { return typeof this + (this === globalThis ? 'G' : ''); }
+         function strict() { 'use strict'; return String(this); }
+         var o = { n: 3, m() { return this.n + (() => this.n)(); } };
+         function run(k) {
+           var s = '';
+           for (var i = 0; i < k; i++) {
+             s = sloppy() + sloppy.call(1) + strict.call(2) + strict() + o.m();
+           }
+           return s;
+         }
+         run(300)",
+        "objectGobject2undefined6",
+    );
+    assert!(stats.direct_calls >= 300, "{stats:?}");
+}
+
+#[test]
 fn recursion_deeper_than_the_nesting_bound_runs_and_overflows_alike() {
     // Past the bound, calls go back through the tier loop and nest again
     // from there; the frame limit still ends unbounded recursion with a

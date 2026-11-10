@@ -22,7 +22,7 @@ use agnijs_js_compiler::bytecode::{
 };
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types::{F64, I32, I64};
+use cranelift_codegen::ir::types::{F64, I32, I64, I64X2};
 use cranelift_codegen::ir::{
     AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, Type, UserFuncName,
     Value as Ir,
@@ -156,6 +156,7 @@ fn always_inline(code: &CodeBlock, instr: &Instr) -> bool {
         | Instr::Star(_)
         | Instr::Mov { .. }
         | Instr::Nop
+        | Instr::LdaThis
         | Instr::Jump(_)
         | Instr::JumpIfNullish(_)
         | Instr::JumpIfNotNullish(_)
@@ -375,8 +376,7 @@ impl Lower<'_, '_> {
     fn flush_acc(&mut self) {
         let t = self.b.use_var(self.tag);
         let p = self.b.use_var(self.pay);
-        self.b.ins().store(flags(), t, self.ctx, self.off.acc);
-        self.b.ins().store(flags(), p, self.ctx, self.off.acc + 8);
+        self.store_value(self.ctx, self.off.acc, t, p);
     }
 
     // ---- values -----------------------------------------------------------
@@ -392,8 +392,18 @@ impl Lower<'_, '_> {
     fn store_reg(&mut self, r: u16, t: Ir, p: Ir) {
         let regs = self.b.use_var(self.regs);
         let o = r as i32 * SIZE as i32;
-        self.b.ins().store(flags(), t, regs, o + TAG_OFFSET as i32);
-        self.b.ins().store(flags(), p, regs, o + PAYLOAD_OFFSET as i32);
+        self.store_value(regs, o, t, p);
+    }
+
+    /// Store a value with one 16-byte store: Rust reads values whole, and
+    /// a load spanning two narrower stores still in flight misses store
+    /// forwarding (a stall measured on every call out, as the runtime
+    /// reads back the accumulator or a register just written).
+    fn store_value(&mut self, base: Ir, off: i32, t: Ir, p: Ir) {
+        const { assert!(TAG_OFFSET == 0 && PAYLOAD_OFFSET == 8) };
+        let v = self.b.ins().scalar_to_vector(I64X2, t);
+        let v = self.b.ins().insertlane(v, p, 1);
+        self.b.ins().store(MemFlagsData::new().with_notrap(), v, base, off);
     }
 
     fn acc(&mut self) -> (Ir, Ir) {
@@ -523,8 +533,13 @@ impl Lower<'_, '_> {
     /// Run the instruction at `pc` by the runtime's generic semantics and
     /// continue where it says: `pc + 1`, the branch target, or out.
     fn slow(&mut self, pc: usize, to: Option<usize>) {
+        self.call_out(self.off.slow, pc, to);
+    }
+
+    /// [`Lower::slow`] through the runtime entry at `entry` in the context.
+    fn call_out(&mut self, entry: i32, pc: usize, to: Option<usize>) {
         self.flush_acc();
-        let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.slow);
+        let f = self.b.ins().load(self.ptr, flags(), self.ctx, entry);
         let a = self.b.ins().iconst(I32, pc as i64);
         let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
         let r = self.b.inst_results(call)[0];
@@ -999,8 +1014,7 @@ impl Lower<'_, '_> {
             let data = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, tag, TAG_EMPTY as i64);
             self.check(data, miss);
             let (vt, vp) = self.acc();
-            self.b.ins().store(flags(), vt, a, TAG_OFFSET as i32);
-            self.b.ins().store(flags(), vp, a, PAYLOAD_OFFSET as i32);
+            self.store_value(a, 0, vt, vp);
             self.next(pc);
             cur = next;
         }
@@ -1332,6 +1346,22 @@ impl Lower<'_, '_> {
             }
             Instr::SetKeyed { obj, key, .. } => {
                 self.set_keyed(pc, obj, key);
+                return Ok(());
+            }
+
+            Instr::Call { .. } => {
+                self.call_out(self.off.call, pc, None);
+                return Ok(());
+            }
+            // The frame's `this`, fixed for the run, is in the context.
+            Instr::LdaThis => {
+                let o = self.off.this;
+                let t = self.b.ins().load(I64, flags(), self.ctx, o + TAG_OFFSET as i32);
+                let p = self.b.ins().load(I64, flags(), self.ctx, o + PAYLOAD_OFFSET as i32);
+                self.set_acc(t, p);
+            }
+            Instr::LdaGlobal(_) | Instr::LdaEnv { .. } | Instr::StaEnv { .. } => {
+                self.call_out(self.off.fast, pc, None);
                 return Ok(());
             }
 

@@ -133,7 +133,7 @@ pub(crate) struct JitState {
     /// The interrupt counter when the current run was entered.
     run_start: u32,
     /// Compiled callees running inside a call out of their callers'
-    /// compiled code ([`JitRt::call`]), bounded by [`MAX_NEST`].
+    /// compiled code ([`JitRt::enter_callee`]), bounded by [`MAX_NEST`].
     nest: u32,
 }
 
@@ -591,7 +591,7 @@ impl JitRt<'_> {
                     acc: f.acc,
                 }
             }
-            Ok(Flow::Next) | Ok(Flow::Reload) if vm.frames.len() == self.fi + 2 => self.call(),
+            Ok(Flow::Next) | Ok(Flow::Reload) if vm.frames.len() == self.fi + 2 => self.enter_callee(),
             Ok(Flow::Next) | Ok(Flow::Reload) => Resume::Exit(Exit::Frame),
             Ok(Flow::Done(outcome)) => {
                 vm.jit.done = Some(outcome);
@@ -625,7 +625,7 @@ impl JitRt<'_> {
     /// bound leave the old way (`Exit::Frame`), before the poll, so the
     /// tier loop polls and counts the entry as it always has.
     #[inline(never)]
-    fn call(&mut self) -> Resume<Value> {
+    fn enter_callee(&mut self) -> Resume<Value> {
         let callee = self.fi + 1;
         let vm = &mut *self.vm;
         if vm.debug_hot || vm.jit.nest >= MAX_NEST {
@@ -647,59 +647,82 @@ impl JitRt<'_> {
         }
         let c0 = vm.interrupt_counter;
         let outer_start = vm.jit.run_start;
-        let r: JsResult<Result<(), Exit>> = (|| {
-            // Function entry (J7), then the safe point at the callee's
-            // first instruction, as the tier loop makes them.
-            vm.poll_interrupt()?;
-            if vm.heap.attention != 0 {
-                vm.attention_slow(callee)?;
-            }
-            vm.jit.nest += 1;
-            vm.jit.stats.direct_calls += 1;
-            let start = vm.interrupt_counter;
-            vm.jit.run_start = start;
-            let f = &vm.frames[callee];
-            let (acc, base) = (f.acc, f.base);
-            let out = compiled.enter(
-                &mut JitRt {
-                    vm: &mut *vm,
-                    fi: callee,
-                    base,
-                    code: &code,
-                },
-                pc as u32,
-                acc,
-            );
-            vm.jit.nest -= 1;
-            vm.jit.stats.back_edges += u64::from(vm.interrupt_counter.wrapping_sub(start));
-            if out.exit != Exit::Return {
-                return Ok(Err(out.exit));
-            }
-            let f = &mut vm.frames[callee];
-            f.pc = out.pc as usize;
-            f.acc = out.acc;
-            if let Flow::Done(outcome) = vm.do_return() {
-                vm.jit.done = Some(outcome);
-                return Ok(Err(Exit::Done));
-            }
-            // A call returned (J7).
-            vm.poll_interrupt()?;
-            if vm.frames.len() != callee {
-                return Ok(Err(Exit::Interp));
-            }
-            Ok(Ok(()))
-        })();
+        let r = Self::run_callee(vm, callee, &code, compiled, pc);
         // The caller's run does not count the callee's back-edges or the
         // polls made for it.
         vm.jit.run_start = outer_start.wrapping_add(vm.interrupt_counter.wrapping_sub(c0));
         match r {
-            Ok(Ok(())) => self.after(Ok(Flow::Next)),
+            Ok(Ok(())) => {
+                // `after(Ok(Flow::Next))`, its common case here.
+                if !vm.debug_hot && vm.heap.attention == 0 {
+                    let f = &vm.frames[self.fi];
+                    return Resume::Next {
+                        pc: f.pc as u32,
+                        acc: f.acc,
+                    };
+                }
+                self.after(Ok(Flow::Next))
+            }
             Ok(Err(exit)) => Resume::Exit(exit),
             Err(fault) => {
                 vm.jit.fault = Some(fault);
                 Resume::Exit(Exit::Fault)
             }
         }
+    }
+
+    /// [`JitRt::enter_callee`]'s run of the callee at `frames[callee]`,
+    /// from its entry `pc` to its return into the caller's frame: `Ok(Err)`
+    /// is an end that unwinds the caller's machine code too.
+    #[inline(always)]
+    fn run_callee(
+        vm: &mut Vm,
+        callee: usize,
+        code: &Rc<CodeBlock>,
+        compiled: &Compiled<Value>,
+        pc: usize,
+    ) -> JsResult<Result<(), Exit>> {
+        // Function entry (J7), then the safe point at the callee's first
+        // instruction, as the tier loop makes them.
+        vm.poll_interrupt()?;
+        if vm.heap.attention != 0 {
+            vm.attention_slow(callee)?;
+        }
+        vm.jit.nest += 1;
+        vm.jit.stats.direct_calls += 1;
+        vm.jit.run_start = vm.interrupt_counter;
+        let f = &vm.frames[callee];
+        let (acc, base) = (f.acc, f.base);
+        let out = compiled.enter(
+            &mut JitRt {
+                vm: &mut *vm,
+                fi: callee,
+                base,
+                code,
+            },
+            pc as u32,
+            acc,
+        );
+        vm.jit.nest -= 1;
+        // (`run_start` has been moved past the polls of calls nested in
+        // this one, which counted their own.)
+        vm.jit.stats.back_edges += u64::from(vm.interrupt_counter.wrapping_sub(vm.jit.run_start));
+        if out.exit != Exit::Return {
+            return Ok(Err(out.exit));
+        }
+        let f = &mut vm.frames[callee];
+        f.pc = out.pc as usize;
+        f.acc = out.acc;
+        if let Flow::Done(outcome) = vm.do_return() {
+            vm.jit.done = Some(outcome);
+            return Ok(Err(Exit::Done));
+        }
+        // A call returned (J7).
+        vm.poll_interrupt()?;
+        if vm.frames.len() != callee {
+            return Ok(Err(Exit::Interp));
+        }
+        Ok(Ok(()))
     }
 
     /// The safe point after an instruction, frame written back, when the
@@ -764,6 +787,67 @@ impl Runtime<Value> for JitRt<'_> {
             return self.attention();
         }
         self.generic(pc, instr, acc)
+    }
+
+    fn this_value(&mut self) -> Option<Value> {
+        Some(self.vm.frames[self.fi].this)
+    }
+
+    /// A cached global or a declarative environment slot: the hit
+    /// in a small function; a miss, or a safe point due, by [`Runtime::slow`].
+    fn fast(&mut self, pc: u32, acc: Value) -> Option<Value> {
+        let vm = &mut *self.vm;
+        if vm.heap.attention != 0 {
+            return None;
+        }
+        let hit = match self.code.instrs[pc as usize] {
+            Instr::LdaGlobal(name) => vm.load_global_cached(self.code, name),
+            Instr::LdaEnv { depth, slot } => {
+                let e = vm.env_at(self.fi, depth);
+                vm.heap.env(e).as_decl().map(|d| d.slots[slot as usize])
+            }
+            Instr::StaEnv { depth, slot } => {
+                let e = vm.env_at(self.fi, depth);
+                vm.heap.env_mut(e).as_decl_mut().map(|d| {
+                    d.slots[slot as usize] = acc;
+                    acc
+                })
+            }
+            _ => None,
+        };
+        vm.jit.stats.calls_out += 1;
+        hit
+    }
+
+    /// `Call`, the dispatch loop's way (`call_from_frame`), without the
+    /// general decode; a compiled callee's frame runs from here.
+    fn call(&mut self, pc: u32, acc: Value) -> Resume<Value> {
+        let pc = pc as usize;
+        let Instr::Call {
+            callee,
+            this,
+            args,
+            argc,
+        } = self.code.instrs[pc]
+        else {
+            return self.slow(pc as u32, acc);
+        };
+        let vm = &mut *self.vm;
+        vm.jit.stats.calls_out += 1;
+        let f = &mut vm.frames[self.fi];
+        f.pc = pc + 1;
+        f.acc = acc;
+        let base = self.base;
+        let fv = vm.regs[base + callee as usize];
+        let t = vm.regs[base + this as usize];
+        let a = Args::Regs {
+            start: base + args as usize,
+            len: argc as usize,
+        };
+        match vm.call_from_frame(fv, t, a) {
+            Ok(Flow::Reload) if vm.frames.len() == self.fi + 2 => self.enter_callee(),
+            flow => self.after(flow),
+        }
     }
 
     fn heap(&mut self) -> HeapView {
