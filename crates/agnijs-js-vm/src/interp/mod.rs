@@ -181,12 +181,9 @@ impl Vm {
         if self.heap.retained_bytes != 0
             && saved < self.retain_at_gc
             && self.exit_gc_at.map_or(true, |at| saved < at)
-            && self.heap.allocated_since_gc + self.heap.retained_bytes >= self.heap.gc_threshold_base
         {
             // The last collection kept garbage for the loop that just ended:
-            // collect from here or an enclosing loop, not a deeper one. Less
-            // than a threshold's worth is not worth a collection of its own;
-            // it waits for the next one (or for a later exit out here).
+            // collect from here or an enclosing loop, not a deeper one.
             self.exit_gc_at = Some(saved);
             self.heap.attention |= crate::heap::ATTENTION_GC;
         }
