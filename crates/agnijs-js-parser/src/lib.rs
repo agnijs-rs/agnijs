@@ -17,6 +17,9 @@ pub mod number;
 pub mod parser;
 pub mod source;
 pub mod span;
+/// The optional native stack budget (defined in the regex crate, the
+/// lowest engine crate, so the regex compiler sees it too).
+pub use agnijs_js_regex::stack;
 
 pub use error::SyntaxError;
 pub use parser::{parse_eval, parse_eval_with, parse_module, parse_script, parse_script_with, EvalOptions};

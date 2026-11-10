@@ -375,6 +375,9 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn stmt(&mut self, s: &Statement) -> CResult<()> {
+        if agnijs_js_parser::stack::exhausted() {
+            return Err(crate::stack_exhausted());
+        }
         self.set_pos(s.span());
         if !matches!(s, Statement::Block(_) | Statement::Empty(_)) {
             self.mark_statement();

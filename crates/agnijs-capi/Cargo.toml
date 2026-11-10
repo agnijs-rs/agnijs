@@ -22,6 +22,8 @@ fault-injection = []
 [dependencies]
 agnijs-engine-api.workspace = true
 agnijs-js-vm.workspace = true
+# Only for its stack budget (`agnijs_js_parser::stack`).
+agnijs-js-parser.workspace = true
 
 [[test]]
 name = "fault_injection"

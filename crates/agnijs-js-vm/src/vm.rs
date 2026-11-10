@@ -979,11 +979,25 @@ impl Vm {
         r
     }
 
+    /// Fails with a RangeError when an embedder's stack budget
+    /// (`agnijs_js_parser::stack`) is used up; called by built-ins that
+    /// recurse on their input (JSON, `flat`, proxies, bound functions).
+    /// Without a budget it never fails.
+    #[inline]
+    pub fn check_stack(&mut self) -> JsResult<()> {
+        if agnijs_js_parser::stack::exhausted() {
+            return Err(self.throw_range("Maximum call stack size exceeded"));
+        }
+        Ok(())
+    }
+
     /// Run `f` as a native frame (bounds native recursion; see
     /// `native_depth`).
     #[inline]
     pub fn in_native<T>(&mut self, f: impl FnOnce(&mut Vm) -> JsResult<T>) -> JsResult<T> {
-        if self.native_depth >= MAX_NATIVE_DEPTH {
+        // An embedder's stack budget (`agnijs_js_parser::stack`) bounds it
+        // too, for hosts that run on small thread stacks.
+        if self.native_depth >= MAX_NATIVE_DEPTH || agnijs_js_parser::stack::exhausted() {
             return Err(self.throw_range("Maximum call stack size exceeded"));
         }
         self.native_depth += 1;

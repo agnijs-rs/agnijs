@@ -77,6 +77,7 @@ impl<'s> Parser<'s> {
     }
 
     pub(crate) fn parse_assignment_expression(&mut self) -> Result<Expression> {
+        self.check_stack()?;
         let start = self.tok.span.start;
 
         // yield
@@ -440,6 +441,7 @@ impl<'s> Parser<'s> {
     }
 
     fn parse_unary_expression(&mut self) -> Result<Expression> {
+        self.check_stack()?;
         let start = self.tok.span.start;
         let op = match &self.tok.kind {
             TokenKind::Punct(Punct::Minus) => Some(UnaryOp::Minus),
@@ -918,6 +920,7 @@ impl<'s> Parser<'s> {
     }
 
     pub(crate) fn parse_primary_expression(&mut self) -> Result<Expression> {
+        self.check_stack()?;
         let start = self.tok.span.start;
         let span = self.tok.span;
         match &self.tok.kind {

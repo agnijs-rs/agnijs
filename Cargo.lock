@@ -7,6 +7,7 @@ name = "agnijs-capi"
 version = "0.1.0"
 dependencies = [
  "agnijs-engine-api",
+ "agnijs-js-parser",
  "agnijs-js-vm",
 ]
 

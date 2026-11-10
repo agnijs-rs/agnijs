@@ -389,6 +389,126 @@ fn hooks_without_an_engine_cannot_reenter() {
     free_engine(e);
 }
 
+/// Deeply nested source must fail with an exception, not overflow the
+/// native stack (which would abort the process). Run on a 1 MiB stack, the
+/// Windows default for a main thread.
+#[test]
+fn deeply_nested_source_fails_cleanly_on_a_small_stack() {
+    let t = std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(|| {
+            let e = engine();
+            let mut results = Vec::new();
+            for (open, close) in [("[", "]"), ("(", ")"), ("{", "}"), ("-", ""), ("a=>", "0"), ("!", ""), ("x?", ":0")] {
+                let depth = 100_000;
+                let src = format!("{}1{}", open.repeat(depth), close.repeat(depth));
+                let src = if open == "{" { format!("{}{}", "{".repeat(depth), "}".repeat(depth)) } else { src };
+                let (st, _) = eval_status(e, &src);
+                if st == AGNIJS_EXCEPTION {
+                    take_exception(e);
+                }
+                results.push((open, st));
+            }
+            // Recursion at run time, through natives and recursive
+            // built-ins, on deep data built by loops.
+            let runtime = [
+                "function f(){ return [1].map(f) } f()",
+                "function g(){ return Reflect.apply(g, null, []) } g()",
+                "JSON.parse('['.repeat(100000) + ']'.repeat(100000))",
+                "let o = {}; for (let i = 0; i < 100000; i++) o = {o}; JSON.stringify(o)",
+                "let a = []; for (let i = 0; i < 100000; i++) a = [a]; String(a)",
+                "let a = []; for (let i = 0; i < 100000; i++) a = [a]; a.flat(Infinity)",
+                "let p = {}; for (let i = 0; i < 100000; i++) p = new Proxy(p, {}); p.x",
+                "new RegExp('('.repeat(100000) + ')'.repeat(100000))",
+                "eval('['.repeat(100000) + ']'.repeat(100000))",
+                "Function('return ' + '('.repeat(100000) + '1' + ')'.repeat(100000))",
+                "let o = {}; o.toString = function(){ return String(this) }; String(o)",
+            ];
+            for src in runtime {
+                let (st, _) = eval_status(e, &format!("{{ {src} }}"));
+                if st == AGNIJS_EXCEPTION {
+                    take_exception(e);
+                }
+                results.push((src, st));
+            }
+            // Depths around the limit, where parsing succeeds and the later
+            // passes (analysis, compilation, regex compilation, matching,
+            // running) see the deepest trees.
+            let mut depth = 500;
+            while depth <= 40_000 {
+                let d = depth;
+                for src in [
+                    format!("{}1{}", "[".repeat(d), "]".repeat(d)),
+                    format!("{}1{}", "(".repeat(d), ")".repeat(d)),
+                    format!("{}0{}", "a=>".repeat(d), ""),
+                    format!("let {}x{} = 0", "[".repeat(d), "]".repeat(d)),
+                    format!("{}{}", "if (1) ".repeat(d), "0"),
+                    format!("new RegExp('{}a{}').exec('a')", "(".repeat(d), ")".repeat(d)),
+                    format!("new RegExp('{}a{}').exec('a')", "(?:a|".repeat(d), ")".repeat(d)),
+                    format!("new RegExp('{}a{}', 'v').test('a')", "[".repeat(d), "]".repeat(d)),
+                ] {
+                    let (st, _) = eval_status(e, &format!("{{ {src} }}"));
+                    if st == AGNIJS_EXCEPTION {
+                        take_exception(e);
+                    }
+                    results.push(("sweep", st));
+                }
+                depth += depth / 4;
+            }
+            // Ordinary nesting still works under the budget (debug builds use
+            // over 20 KiB of stack per nesting level, release builds about
+            // 2 KiB).
+            let (st, _) = eval_status(e, &format!("{}1{}", "[".repeat(10), "]".repeat(10)));
+            results.push(("10 deep", if st == AGNIJS_OK { AGNIJS_OK } else { -1000 }));
+            let (st, _) = eval_status(e, "let n = 0; function f() { if (++n < 10) [1].map(f) } f(); if (n < 10) throw n");
+            results.push(("10 natives", if st == AGNIJS_OK { AGNIJS_OK } else { -1000 }));
+            free_engine(e);
+            results
+        })
+        .unwrap();
+    let results = t.join().unwrap();
+    for (open, st) in results {
+        assert!(st == AGNIJS_EXCEPTION || st == AGNIJS_OK, "{open}: {st}");
+    }
+}
+
+#[test]
+fn the_stack_budget_option_is_checked_and_sets_the_depth() {
+    let mut o = options();
+    o.stack_budget = 1000;
+    let mut e = 0;
+    assert_eq!(unsafe { agnijs_engine_new(&o, &mut e) }, AGNIJS_ERR_INVALID_ARGUMENT);
+    // The deepest array literal each budget accepts, on a thread with room
+    // for the larger one.
+    let deepest = |budget: usize| {
+        std::thread::Builder::new()
+            .stack_size(16 << 20)
+            .spawn(move || {
+                let mut o = options();
+                o.stack_budget = budget;
+                let e = engine_with(&o);
+                let mut d = 1;
+                loop {
+                    let (st, _) = eval_status(e, &format!("{}1{}", "[".repeat(d * 2), "]".repeat(d * 2)));
+                    if st != AGNIJS_OK {
+                        let (name, message, _) = take_exception(e);
+                        assert_eq!((name.as_str(), message.as_str()), ("SyntaxError", "Maximum call stack size exceeded"));
+                        break;
+                    }
+                    d *= 2;
+                }
+                free_engine(e);
+                d
+            })
+            .unwrap()
+            .join()
+            .unwrap()
+    };
+    let small = deepest(AGNIJS_MIN_STACK_BUDGET);
+    let large = deepest(8 << 20);
+    assert!(large >= small * 16, "{small} {large}");
+}
+
 #[test]
 fn many_engines_and_handles_do_not_leak_or_collide() {
     for _ in 0..20 {

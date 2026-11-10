@@ -63,6 +63,8 @@ pub struct EngineState {
     pub pending_throw: Option<api::Value>,
     pub poisoned: bool,
     pub max_reentrancy: u32,
+    /// Native stack bytes a call may use (`agnijs_js_parser::stack`).
+    pub stack_budget: usize,
     /// Registered host classes: (engine class id, instance finalizer).
     pub classes: Vec<(api::HostClassId, AgnijsFinalizer)>,
     lent: Vec<Lent>,
@@ -70,7 +72,7 @@ pub struct EngineState {
 }
 
 impl EngineState {
-    pub fn new(id: AgnijsEngine, tag: u16, engine: Box<dyn Engine>, max_reentrancy: u32) -> EngineState {
+    pub fn new(id: AgnijsEngine, tag: u16, engine: Box<dyn Engine>, max_reentrancy: u32, stack_budget: usize) -> EngineState {
         EngineState {
             id,
             tag,
@@ -79,6 +81,7 @@ impl EngineState {
             pending_throw: None,
             poisoned: false,
             max_reentrancy,
+            stack_budget,
             classes: Vec::new(),
             lent: Vec::new(),
             engine: Some(engine),
@@ -304,8 +307,13 @@ pub fn request_interrupt(e: AgnijsEngine) -> Res<()> {
 /// Run `f` with the engine leased (see the module docs). A panic inside
 /// `f` is caught here, poisons the engine and becomes [`AGNIJS_ERR_PANIC`].
 pub fn engine_op<T>(e: AgnijsEngine, f: impl FnOnce(&mut dyn Engine) -> Res<T>) -> Res<T> {
-    let mut lease = with_state(e, false, |st| st.acquire())?;
+    let (mut lease, budget) = with_state(e, false, |st| Ok((st.acquire()?, st.stack_budget)))?;
     let result = catch_unwind(AssertUnwindSafe(|| {
+        // Deep recursion (nested source, native reentry) fails with an
+        // error once this much stack below here is used, instead of
+        // overflowing the host thread's stack. A nested call keeps the
+        // outer, tighter limit.
+        let _budget = agnijs_js_parser::stack::StackBudget::enter(budget);
         let engine: &mut dyn Engine = match &mut lease {
             Lease::Owned(b) => &mut **b,
             // SAFETY: the pointer was pushed by `lend` from the `&mut dyn

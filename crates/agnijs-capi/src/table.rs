@@ -14,8 +14,8 @@ use agnijs_engine_api as api;
 /// Generations a value slot cycles through before it retires.
 const GEN_FIRST: u16 = 1;
 const GEN_LAST: u16 = 0xFFFE;
-pub const GEN_REALM: u16 = 0;
-pub const GEN_CLASS: u16 = 0xFFFF;
+pub(crate) const GEN_REALM: u16 = 0;
+pub(crate) const GEN_CLASS: u16 = 0xFFFF;
 /// The most slots one engine's table may hold.
 const MAX_SLOTS: usize = 1 << 31;
 

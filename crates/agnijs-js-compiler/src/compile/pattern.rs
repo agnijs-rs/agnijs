@@ -17,6 +17,9 @@ impl<'a> Compiler<'a> {
     }
 
     fn pattern(&mut self, p: &Pattern, mode: Mode) -> CResult<()> {
+        if agnijs_js_parser::stack::exhausted() {
+            return Err(crate::stack_exhausted());
+        }
         match p {
             Pattern::Ident(id) => {
                 let init = matches!(mode, Mode::Binding { init: true });

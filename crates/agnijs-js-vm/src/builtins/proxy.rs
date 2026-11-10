@@ -23,6 +23,9 @@ impl ProxyData {
 }
 
 fn parts(vm: &mut Vm, o: ObjId) -> JsResult<(ObjId, ObjId)> {
+    // Every operation on a proxy starts here, and a chain of proxies
+    // recurses through the targets.
+    vm.check_stack()?;
     match &vm.heap.obj(o).class {
         Class::Proxy(p) => match (p.target, p.handler) {
             (Some(t), Some(h)) => Ok((t, h)),

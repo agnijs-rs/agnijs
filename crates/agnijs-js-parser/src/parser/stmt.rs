@@ -104,6 +104,7 @@ impl<'s> Parser<'s> {
 
     /// Statement (not a declaration).
     pub(crate) fn parse_statement(&mut self) -> Result<Statement> {
+        self.check_stack()?;
         let start = self.tok.span.start;
         match &self.tok.kind {
             TokenKind::Punct(Punct::LBrace) => Ok(Statement::Block(self.parse_block()?)),

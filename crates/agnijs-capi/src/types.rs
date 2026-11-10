@@ -135,6 +135,14 @@ pub const AGNIJS_FLAG_NO_STRING_COMPILATION: u32 = 1;
 pub const AGNIJS_DEFAULT_MAX_REENTRANCY: u32 = 32;
 pub const AGNIJS_MAX_REENTRANCY_LIMIT: u32 = 256;
 
+/// The default [`AgnijsEngineOptions::stack_budget`]: 512 KiB.
+pub const AGNIJS_DEFAULT_STACK_BUDGET: usize = 512 * 1024;
+/// Stack the library may use past the budget before it notices (between
+/// checks, and to build the error). Keep this much free beyond the budget.
+pub const AGNIJS_STACK_HEADROOM: usize = 256 * 1024;
+/// The smallest accepted nonzero [`AgnijsEngineOptions::stack_budget`].
+pub const AGNIJS_MIN_STACK_BUDGET: usize = 64 * 1024;
+
 /// Polled while JavaScript runs; return nonzero to interrupt.
 pub type AgnijsInterruptHook = Option<unsafe extern "C-unwind" fn(user_data: *mut c_void) -> i32>;
 
@@ -256,6 +264,13 @@ pub struct AgnijsEngineOptions {
     pub import_meta: AgnijsImportMetaHook,
     pub promise_rejection: AgnijsRejectionHook,
     pub now_ms: AgnijsClockHook,
+    /// Native stack, in bytes, one call into the library may use below the
+    /// point where it was entered; deeper recursion (deeply nested source,
+    /// deep native reentry) fails with a JavaScript error instead of
+    /// overflowing the thread's stack. Zero for
+    /// [`AGNIJS_DEFAULT_STACK_BUDGET`]. The calling thread needs this much
+    /// free stack plus [`AGNIJS_STACK_HEADROOM`].
+    pub stack_budget: usize,
 }
 
 impl Default for AgnijsEngineOptions {
@@ -274,6 +289,7 @@ impl Default for AgnijsEngineOptions {
             import_meta: None,
             promise_rejection: None,
             now_ms: None,
+            stack_budget: 0,
         }
     }
 }

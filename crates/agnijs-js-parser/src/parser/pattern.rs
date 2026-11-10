@@ -10,6 +10,7 @@ use std::rc::Rc;
 impl<'s> Parser<'s> {
     /// BindingIdentifier | BindingPattern.
     pub(crate) fn parse_binding_target(&mut self) -> Result<Pattern> {
+        self.check_stack()?;
         match &self.tok.kind {
             TokenKind::Punct(Punct::LBracket) => self.parse_array_binding_pattern(),
             TokenKind::Punct(Punct::LBrace) => self.parse_object_binding_pattern(),
@@ -139,6 +140,7 @@ impl<'s> Parser<'s> {
     /// `binding` is true for arrow parameters (identifiers only as leaves),
     /// false for destructuring assignment (any simple target as a leaf).
     pub(crate) fn expr_to_pattern(&mut self, e: Expression, binding: bool) -> Result<Pattern> {
+        self.check_stack()?;
         match e {
             Expression::Ident(id) => {
                 self.check_binding_identifier(&id.name, id.span)?;
@@ -269,6 +271,7 @@ impl<'s> Parser<'s> {
     /// A pattern built for assignment may contain member expressions; as a
     /// binding pattern (arrow parameters) it may not.
     fn repattern_as_binding(&mut self, p: Pattern) -> Result<Pattern> {
+        self.check_stack()?;
         match p {
             Pattern::Ident(id) => {
                 self.check_binding_identifier(&id.name, id.span)?;

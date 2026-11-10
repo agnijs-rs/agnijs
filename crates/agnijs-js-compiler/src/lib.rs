@@ -60,10 +60,27 @@ fn source_text_with(name: &str, text: &str, lone: &[LoneSurrogate]) -> Rc<Source
     })
 }
 
+/// Analyse a program, failing when an installed stack budget
+/// (`agnijs_js_parser::stack`) ran out during the walk.
+fn analyse(program: &agnijs_js_parser::ast::Program) -> Result<analysis::Analyses> {
+    let analyses = analysis::analyse_program(program);
+    if analyses.too_deep {
+        return Err(stack_exhausted());
+    }
+    Ok(analyses)
+}
+
+pub(crate) fn stack_exhausted() -> CompileError {
+    CompileError {
+        message: agnijs_js_parser::stack::EXHAUSTED_MESSAGE.into(),
+        span: Span::empty(0),
+    }
+}
+
 /// Parse and compile a script.
 pub fn compile_script(source: &str, name: &str) -> Result<Rc<CodeBlock>> {
     let program = agnijs_js_parser::parse_script(source)?;
-    let analyses = analysis::analyse_program(&program);
+    let analyses = analyse(&program)?;
     let mut c = compile::Compiler::new(source_text(name, source), &analyses, false);
     c.compile_script(&program, name)
 }
@@ -71,7 +88,7 @@ pub fn compile_script(source: &str, name: &str) -> Result<Rc<CodeBlock>> {
 /// Parse and compile a module.
 pub fn compile_module(source: &str, name: &str) -> Result<Rc<CodeBlock>> {
     let program = agnijs_js_parser::parse_module(source)?;
-    let analyses = analysis::analyse_program(&program);
+    let analyses = analyse(&program)?;
     let mut c = compile::Compiler::new(source_text(name, source), &analyses, false);
     c.compile_module(&program, name)
 }
@@ -100,7 +117,7 @@ fn compile_eval_with(
     options: &EvalOptions,
 ) -> Result<Rc<CodeBlock>> {
     let program = agnijs_js_parser::parse_eval_with(source, lone, options)?;
-    let analyses = analysis::analyse_program(&program);
+    let analyses = analyse(&program)?;
     let mut c = compile::Compiler::new(source_text_with(name, source, lone), &analyses, true);
     c.compile_eval(&program, name)
 }
@@ -197,7 +214,7 @@ fn compile_dynamic_function_with(
             })
         }
     };
-    let analyses = analysis::analyse_program(&program);
+    let analyses = analyse(&program)?;
     let source = source_text_with("anonymous", &wrapped, &lone);
     let mut c = compile::Compiler::new(source, &analyses, false);
     c.compile_standalone_function(func, &program)

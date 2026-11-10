@@ -153,6 +153,16 @@ pub unsafe extern "C" fn agnijs_engine_new(options: *const AgnijsEngineOptions, 
                 ))
             }
         };
+        let stack_budget = match opts.stack_budget {
+            0 => AGNIJS_DEFAULT_STACK_BUDGET,
+            n if n >= AGNIJS_MIN_STACK_BUDGET => n,
+            n => {
+                return Err(Fail::new(
+                    AGNIJS_ERR_INVALID_ARGUMENT,
+                    format!("stack_budget {n} is below {AGNIJS_MIN_STACK_BUDGET}"),
+                ))
+            }
+        };
         let (id, tag) = registry::next_engine_id();
         let flag = Arc::new(AtomicBool::new(false));
         let host = Rc::new(CHost { engine: id, opts, interrupt_flag: flag.clone() });
@@ -160,7 +170,7 @@ pub unsafe extern "C" fn agnijs_engine_new(options: *const AgnijsEngineOptions, 
         if opts.memory_limit != 0 {
             engine.set_memory_limit(Some(opts.memory_limit));
         }
-        registry::register(EngineState::new(id, tag, engine, max_reentrancy), flag)?;
+        registry::register(EngineState::new(id, tag, engine, max_reentrancy, stack_budget), flag)?;
         out.write(id);
         Ok(())
     })
@@ -569,39 +579,49 @@ pub extern "C" fn agnijs_throw(engine: AgnijsEngine, value_id: AgnijsValue) -> A
 
 // ---- values in ------------------------------------------------------------------------------
 
-macro_rules! constructor {
-    ($(#[$doc:meta])* $name:ident, $v:expr $(, $arg:ident : $ty:ty)*) => {
-        $(#[$doc])*
-        ///
-        /// # Safety
-        /// `out` must be writable.
-        #[no_mangle]
-        pub unsafe extern "C" fn $name(engine: AgnijsEngine $(, $arg: $ty)*, out: *mut AgnijsValue) -> AgnijsStatus {
-            ffi(stringify!($name), || {
-                let out = Out::new(out, "out")?;
-                out.write(with_state(engine, false, |st| st.table.insert(Entry::Value($v)))?);
-                Ok(())
-            })
-        }
-    };
+fn new_primitive(name: &'static str, engine: AgnijsEngine, v: api::Value, out: *mut AgnijsValue) -> AgnijsStatus {
+    ffi(name, || {
+        let out = Out::new(out, "out")?;
+        out.write(put_checked(engine, v)?);
+        Ok(())
+    })
 }
 
-constructor!(
-    /// `undefined`.
-    agnijs_new_undefined, api::Value::Undefined
-);
-constructor!(
-    /// `null`.
-    agnijs_new_null, api::Value::Null
-);
-constructor!(
-    /// A boolean (any nonzero is true).
-    agnijs_new_bool, api::Value::Bool(b != 0), b: i32
-);
-constructor!(
-    /// A number.
-    agnijs_new_number, api::Value::Number(n), n: f64
-);
+/// `undefined`.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_new_undefined(engine: AgnijsEngine, out: *mut AgnijsValue) -> AgnijsStatus {
+    new_primitive("agnijs_new_undefined", engine, api::Value::Undefined, out)
+}
+
+/// `null`.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_new_null(engine: AgnijsEngine, out: *mut AgnijsValue) -> AgnijsStatus {
+    new_primitive("agnijs_new_null", engine, api::Value::Null, out)
+}
+
+/// A boolean (any nonzero is true).
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_new_bool(engine: AgnijsEngine, b: i32, out: *mut AgnijsValue) -> AgnijsStatus {
+    new_primitive("agnijs_new_bool", engine, api::Value::Bool(b != 0), out)
+}
+
+/// A number.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_new_number(engine: AgnijsEngine, n: f64, out: *mut AgnijsValue) -> AgnijsStatus {
+    new_primitive("agnijs_new_number", engine, api::Value::Number(n), out)
+}
 
 /// A string from UTF-8.
 ///

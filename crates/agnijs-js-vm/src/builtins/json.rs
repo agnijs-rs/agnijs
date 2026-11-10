@@ -125,6 +125,7 @@ impl<'a, T: Unit> Parser<'a, T> {
     }
 
     fn parse_value(&mut self, vm: &mut Vm) -> JsResult<Value> {
+        vm.check_stack()?;
         match self.peek() {
             None => self.fail(vm, "Unexpected end of JSON input"),
             Some(0x7B) => self.parse_object(vm),
@@ -420,6 +421,7 @@ fn json_parse(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 /// InternalizeJSONProperty(holder, name, reviver).
 fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value) -> JsResult<Value> {
+    vm.check_stack()?;
     let val = vm.get(holder, name)?;
     if let Value::Object(o) = val {
         if vm.is_array(val)? {
@@ -543,6 +545,7 @@ fn serialize_property(
     holder: ObjId,
     out: &mut StrBuilder,
 ) -> JsResult<bool> {
+    vm.check_stack()?;
     let mut value = vm.get(holder, key)?;
     if matches!(value, Value::Object(_) | Value::BigInt(_)) {
         let tojson_key = PropKey::Str(vm.names.toJSON);

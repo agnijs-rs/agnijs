@@ -55,13 +55,13 @@
 #[cfg(panic = "abort")]
 compile_error!("agnijs-capi must be built with panic=unwind: the C API catches panics so the host survives them");
 
-pub mod api;
-pub mod guard;
-pub mod host;
-pub mod ptrs;
-pub mod registry;
-pub mod table;
-pub mod types;
+mod api;
+mod guard;
+mod host;
+mod ptrs;
+mod registry;
+mod table;
+mod types;
 
 pub use api::*;
 pub use host::{agnijs_sink_set_error, agnijs_sink_set_module, agnijs_sink_set_string};

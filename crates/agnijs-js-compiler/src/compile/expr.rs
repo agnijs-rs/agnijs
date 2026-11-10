@@ -25,6 +25,9 @@ impl<'a> Compiler<'a> {
     }
 
     pub(crate) fn expr_named(&mut self, e: &Expression, hint: NameHint) -> CResult<()> {
+        if agnijs_js_parser::stack::exhausted() {
+            return Err(crate::stack_exhausted());
+        }
         self.set_pos(e.span());
         match e {
             Expression::Ident(id) => {
@@ -481,6 +484,9 @@ impl<'a> Compiler<'a> {
     /// update whose value nobody reads (`i++;`, a `for` update) skips the
     /// ToNumeric and the copy of the old value (TASK-100.18).
     pub(crate) fn expr_unused(&mut self, e: &Expression) -> CResult<()> {
+        if agnijs_js_parser::stack::exhausted() {
+            return Err(crate::stack_exhausted());
+        }
         match e {
             Expression::Paren(inner, _) => self.expr_unused(inner),
             Expression::Update(u) => {

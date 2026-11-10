@@ -169,6 +169,16 @@ impl<'s> Parser<'s> {
         Err(SyntaxError::new(message, span))
     }
 
+    /// Fails when an installed stack budget is used up (see
+    /// [`crate::stack`]); called on entry to the recursive productions.
+    #[inline]
+    pub(crate) fn check_stack(&self) -> Result<()> {
+        if crate::stack::exhausted() {
+            return self.err(crate::stack::EXHAUSTED_MESSAGE, self.tok.span);
+        }
+        Ok(())
+    }
+
     pub(crate) fn unexpected<T>(&self) -> Result<T> {
         let msg = match &self.tok.kind {
             TokenKind::Eof => "unexpected end of input".to_string(),

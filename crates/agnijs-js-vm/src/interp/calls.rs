@@ -406,6 +406,7 @@ impl Vm {
                 let bthis = b.this;
                 let mut all = b.args.clone();
                 all.extend_from_slice(args);
+                self.check_stack()?;
                 self.call_object(target, bthis, &all)
             }
             Class::Proxy(_) => crate::builtins::proxy::proxy_call(self, fo, this, args),
@@ -453,6 +454,7 @@ impl Vm {
                 } else {
                     new_target
                 };
+                self.check_stack()?;
                 self.construct_value(Value::Object(target), &all, nt)
             }
             Class::Proxy(_) => crate::builtins::proxy::proxy_construct(self, fo, args, new_target),

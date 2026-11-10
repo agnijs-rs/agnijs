@@ -209,6 +209,9 @@ impl P {
         if self.depth >= MAX_NESTING {
             return self.err(TOO_DEEP);
         }
+        if crate::stack::exhausted() {
+            return self.err(crate::stack::EXHAUSTED_MESSAGE);
+        }
         self.depth += 1;
         Ok(())
     }

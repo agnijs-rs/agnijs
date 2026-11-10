@@ -644,6 +644,7 @@ fn flatten_into_array(
     depth: f64,
     mapper: Option<(Value, Value)>,
 ) -> JsResult<f64> {
+    vm.check_stack()?;
     let mut target_index = start;
     let mut si = 0.0;
     while si < source_len {

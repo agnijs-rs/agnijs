@@ -17,6 +17,9 @@
 #![forbid(unsafe_code)]
 
 pub mod syntax;
+// The engine-wide stack budget lives in the lowest engine crate so every
+// recursive part can see it; the parser re-exports it.
+pub mod stack;
 
 mod backtrack;
 mod charset;

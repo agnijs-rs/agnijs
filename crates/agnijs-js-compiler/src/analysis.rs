@@ -68,6 +68,9 @@ pub struct FnAnalysis {
 #[derive(Default)]
 pub struct Analyses {
     map: HashMap<usize, Rc<FnAnalysis>>,
+    /// The walk ran out of an installed stack budget
+    /// (`agnijs_js_parser::stack`) and is incomplete.
+    pub too_deep: bool,
 }
 
 fn key<T>(node: &T) -> usize {
@@ -237,6 +240,9 @@ impl<'a> Walker<'a> {
     }
 
     fn pattern(&mut self, p: &Pattern) {
+        if self.too_deep() {
+            return;
+        }
         match p {
             Pattern::Ident(i) => self.name(&i.name),
             Pattern::Object(o) => {
@@ -272,6 +278,9 @@ impl<'a> Walker<'a> {
     }
 
     fn stmt(&mut self, s: &Statement) {
+        if self.too_deep() {
+            return;
+        }
         match s {
             Statement::Block(b) => self.stmts(&b.body),
             Statement::Empty(_) | Statement::Debugger(_) => {}
@@ -428,7 +437,19 @@ impl<'a> Walker<'a> {
         }
     }
 
+    /// Whether an installed stack budget is used up; the walk then stops
+    /// descending and the program fails to compile.
+    fn too_deep(&mut self) -> bool {
+        if agnijs_js_parser::stack::exhausted() {
+            self.out.too_deep = true;
+        }
+        self.out.too_deep
+    }
+
     fn expr(&mut self, e: &Expression) {
+        if self.too_deep() {
+            return;
+        }
         match e {
             Expression::Ident(i) => self.name(&i.name),
             Expression::This(_) => {

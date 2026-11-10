@@ -310,6 +310,9 @@ impl Parser<'_> {
     }
 
     fn term(&mut self, m: Mods) -> Result<Node, String> {
+        if crate::stack::exhausted() {
+            return self.fail(crate::stack::EXHAUSTED_MESSAGE);
+        }
         let ch = self.peek().unwrap();
         if ch == c('^') {
             self.i += 1;
@@ -865,6 +868,9 @@ impl Parser<'_> {
     /// A ClassSetOperand, closed under i, and its character when it is a
     /// single ClassSetCharacter (which may start a range).
     fn class_set_operand(&mut self, m: Mods) -> Result<(ClassValue, Option<u32>), String> {
+        if crate::stack::exhausted() {
+            return self.fail(crate::stack::EXHAUSTED_MESSAGE);
+        }
         if self.eat('[') {
             let negate = self.eat('^');
             let v = self.class_set_expression(m)?;
