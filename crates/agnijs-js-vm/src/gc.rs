@@ -34,8 +34,9 @@
 //! the same loop hold nothing across a safe point by construction: the
 //! dispatch loop writes its state back before one. What the retention
 //! keeps that no frame holds is garbage until a collection at an outer
-//! level, which a loop exit asks for when the amount is not trivial
-//! (`Vm::exit_gc_at`: it runs at the next safe point at or above that
+//! level, which a loop exit asks for when the amount, with what has been
+//! allocated since, reaches a threshold (`Vm::exit_gc_at`; less waits for
+//! the next collection; it runs at the next safe point at or above that
 //! level, not in a deeper loop that would keep the same garbage); the
 //! pacing counts it out, and a collection wanted inside a loop that has
 //! allocated little of the garbage so far is put off (within a bound) for
