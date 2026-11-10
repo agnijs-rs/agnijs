@@ -510,6 +510,11 @@ pub struct ObjectData {
     /// The prototype, `u32::MAX` for none: read with [`ObjectData::proto`],
     /// changed through `Heap::set_proto`, which keeps the prototype epoch.
     proto: OptObj,
+    /// Always zero: fills the four bytes before `dict` so building an
+    /// object writes the whole first 16 bytes. Left as padding, moving a
+    /// new object into its arena slot cost prop-write-alloc about 6% in
+    /// the interpreter (TASK-101.3.3).
+    _pad: u32,
     /// Dictionary mode: replaces `shape` and the slots.
     pub dict: Option<Box<IndexMap<PropKey, Property>>>,
     pub class: Class,
@@ -555,6 +560,7 @@ impl ObjectData {
             extensible: true,
             watched: false,
             proto: OptObj::from_option(proto),
+            _pad: 0,
             class,
             inline: [PropSlot::UNDEFINED; INLINE_SLOTS],
             overflow: Vec::new(),
