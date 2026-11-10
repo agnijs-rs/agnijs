@@ -201,7 +201,7 @@ impl Vm {
                         }
                         IcEntry::KIND_PROTO_DATA | IcEntry::KIND_PROTO_ACCESSOR => {
                             if o.shape.0 == e.shape
-                                && o.proto.map(|p| p.0) == Some(e.proto)
+                                && o.proto_raw() == e.proto
                                 && e.epoch == self.heap.proto_epoch
                             {
                                 let h = self.heap.obj(ObjId(e.holder));
@@ -317,7 +317,7 @@ impl Vm {
                 ..IcEntry::EMPTY
             });
         }
-        let p1 = o.proto?;
+        let p1 = o.proto()?;
         let (holder, slot, accessor) = self.describe_chain(p1, key, is_length)?;
         Some(IcEntry {
             kind: if accessor {
@@ -386,7 +386,7 @@ impl Vm {
             if hops > MAX_DEPTH {
                 return None;
             }
-            cur = h.proto?;
+            cur = h.proto()?;
         };
         let mut cur = start;
         loop {
@@ -394,7 +394,7 @@ impl Vm {
             if cur == found.0 {
                 break;
             }
-            cur = self.heap.obj(cur).proto.expect("chain walked above");
+            cur = self.heap.obj(cur).proto().expect("chain walked above");
         }
         Some(found)
     }
@@ -417,13 +417,13 @@ impl Vm {
             if hops > MAX_DEPTH {
                 return false;
             }
-            cur = h.proto;
+            cur = h.proto();
         }
         let mut cur = start;
         while let Some(c) = cur {
             let h = self.heap.obj_mut(c);
             h.watched = true;
-            cur = h.proto;
+            cur = h.proto();
         }
         true
     }
@@ -492,7 +492,7 @@ impl Vm {
                         break;
                     }
                     IcEntry::KIND_OWN_ADD if o.shape.0 == e.shape => {
-                        if o.proto.map_or(u32::MAX, |p| p.0) == e.proto
+                        if o.proto_raw() == e.proto
                             && e.epoch == proto_epoch
                             && o.extensible
                             && !o.watched
@@ -529,7 +529,7 @@ impl Vm {
                 IcEntry::KIND_OWN_ACCESSOR if o.shape.0 == e.shape => o.slot(e.slot),
                 IcEntry::KIND_PROTO_ACCESSOR
                     if o.shape.0 == e.shape
-                        && o.proto.map(|p| p.0) == Some(e.proto)
+                        && o.proto_raw() == e.proto
                         && e.epoch == self.heap.proto_epoch =>
                 {
                     self.heap.obj(ObjId(e.holder)).slot(e.slot)
@@ -565,7 +565,7 @@ impl Vm {
             return;
         }
         let shape = o.shape;
-        let o_proto = o.proto;
+        let o_proto = o.proto();
         let can_add = !is_length
             && o.extensible
             && !o.watched

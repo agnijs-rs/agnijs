@@ -934,6 +934,9 @@ impl IcEntry {
 pub const IC_ENTRIES: usize = 4;
 
 /// An inline-cache site: up to [`IC_ENTRIES`] cases, filled from the front.
+/// `repr(C)` (with `Cell` transparent): a compiled tier reads the entries
+/// in place, `size_of::<IcEntry>()` apart.
+#[repr(C)]
 #[derive(Debug)]
 pub struct IcSite {
     pub entries: [Cell<IcEntry>; IC_ENTRIES],

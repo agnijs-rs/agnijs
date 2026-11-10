@@ -48,7 +48,7 @@ impl Vm {
         if self.heap.obj(o).is_proxy() {
             return proxy::proxy_get_prototype_of(self, o);
         }
-        Ok(self.heap.obj(o).proto)
+        Ok(self.heap.obj(o).proto())
     }
 
     pub fn set_prototype_of(&mut self, o: ObjId, proto: Option<ObjId>) -> JsResult<bool> {
@@ -61,7 +61,7 @@ impl Vm {
     }
 
     pub fn ordinary_set_prototype_of(&mut self, o: ObjId, proto: Option<ObjId>) -> bool {
-        let cur = self.heap.obj(o).proto;
+        let cur = self.heap.obj(o).proto();
         if cur == proto {
             return true;
         }
@@ -86,7 +86,7 @@ impl Vm {
             if self.heap.obj(pp).is_proxy() {
                 break;
             }
-            p = self.heap.obj(pp).proto;
+            p = self.heap.obj(pp).proto();
         }
         self.heap.set_proto(o, proto);
         true
@@ -533,7 +533,7 @@ impl Vm {
                     }
                 }
             }
-            match self.heap.obj(cur).proto {
+            match self.heap.obj(cur).proto() {
                 Some(p) => cur = p,
                 None => return Ok(false),
             }
@@ -573,7 +573,7 @@ impl Vm {
                     }
                 };
             }
-            match self.heap.obj(cur).proto {
+            match self.heap.obj(cur).proto() {
                 Some(p) => cur = p,
                 None => return Ok(Value::Undefined),
             }
@@ -603,7 +603,7 @@ impl Vm {
                     },
                 };
             }
-            match self.heap.obj(cur).proto {
+            match self.heap.obj(cur).proto() {
                 Some(p) => cur = p,
                 None => return OrdinaryGet::Value(Value::Undefined),
             }
@@ -737,7 +737,7 @@ impl Vm {
                     }
                 }
             }
-            match self.heap.obj(cur).proto {
+            match self.heap.obj(cur).proto() {
                 Some(p) => cur = p,
                 None => break Property::data(Value::Undefined, Attrs::ALL),
             }
@@ -1441,7 +1441,7 @@ impl Vm {
             return false;
         };
         let ap = self.intrinsic(Intrinsic::ArrayPrototype);
-        if self.heap.obj(o).proto != Some(ap) {
+        if self.heap.obj(o).proto() != Some(ap) {
             return false;
         }
         let it_key = PropKey::Sym(self.well_known.iterator);

@@ -362,12 +362,40 @@ impl Attrs {
 
 /// One half of an accessor pair: a function object or none (`undefined`),
 /// in four bytes, so a [`PropSlot`] is no bigger than a [`Value`]
-/// (TASK-100.21).
+/// (TASK-100.21). Also an object's prototype (`ObjectData`), where
+/// compiled code reads it as a plain `u32` with `u32::MAX` for none.
+#[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct OptObj(u32);
 
 impl OptObj {
     pub const NONE: OptObj = OptObj(u32::MAX);
+
+    #[inline]
+    pub fn from_option(o: Option<ObjId>) -> OptObj {
+        match o {
+            Some(o) => {
+                debug_assert!(o.0 != u32::MAX);
+                OptObj(o.0)
+            }
+            None => OptObj::NONE,
+        }
+    }
+
+    #[inline]
+    pub fn get(self) -> Option<ObjId> {
+        if self.0 == u32::MAX {
+            None
+        } else {
+            Some(ObjId(self.0))
+        }
+    }
+
+    /// The id, `u32::MAX` for none.
+    #[inline]
+    pub fn raw(self) -> u32 {
+        self.0
+    }
 
     /// From a getter or setter value: an object or `undefined` (property
     /// descriptors validate this before any accessor is stored).

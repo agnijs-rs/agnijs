@@ -360,7 +360,7 @@ impl<'v> Tracer<'v> {
 
 impl ObjectData {
     pub fn trace(&self, t: &mut Tracer) {
-        t.opt_obj(self.proto);
+        t.opt_obj(self.proto());
         t.shape(self.shape);
         for s in self.slots() {
             t.slot(*s);

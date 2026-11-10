@@ -398,7 +398,7 @@ impl Vm {
             if let Some(p) = self.heap.get_own_property(o, key) {
                 return p.value();
             }
-            o = self.heap.obj(o).proto?;
+            o = self.heap.obj(o).proto()?;
         }
         None
     }

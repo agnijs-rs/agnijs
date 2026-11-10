@@ -5,7 +5,10 @@
 use std::rc::Rc;
 
 use agnijs_js_compiler::{compile_script, CodeBlock};
-use agnijs_js_jit::{available, Arith, Compiled, Exit, Ineligible, JitValue, Resume, Runtime};
+use agnijs_js_jit::{
+    available, exec_memory_kind, Arith, Compiled, ExecMemoryKind, Exit, Ineligible, JitValue,
+    Resume, Runtime,
+};
 
 #[repr(C, u8)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,6 +114,14 @@ fn run(code: &CodeBlock, args: &[Val]) -> (Toy, Val) {
 #[test]
 fn the_probe_runs_machine_code_on_this_host() {
     assert!(available());
+    let kind = exec_memory_kind().expect("the probe mapped executable memory");
+    // Apple silicon uses MAP_JIT with per-thread write protection, which
+    // also runs under the hardened runtime with the allow-jit entitlement.
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        assert_eq!(kind, ExecMemoryKind::MapJit);
+    } else {
+        assert_eq!(kind, ExecMemoryKind::Protect);
+    }
 }
 
 #[test]

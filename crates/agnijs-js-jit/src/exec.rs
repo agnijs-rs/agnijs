@@ -5,8 +5,10 @@
 //! The obligations, all discharged here:
 //!
 //! * Executable memory is never writable and executable at once (W^X): it
-//!   is written while read-write, then made read-execute, and the
-//!   instruction cache is synchronised before the first call.
+//!   is written while read-write, then made read-execute (on Apple silicon,
+//!   a `MAP_JIT` mapping written only while this thread's JIT write
+//!   protection is lifted), and the instruction cache is synchronised
+//!   before the first call.
 //! * Machine code is only entered through [`enter`], with a [`Ctx`] that
 //!   lives on `enter`'s stack frame for the whole run, whose register
 //!   window has at least as many registers as the code addresses, and
@@ -15,6 +17,13 @@
 //! * Machine code writes values only with the tags and payloads of
 //!   [`crate::layout`], which [`layout_matches`] checks against the value
 //!   type's own constructors before any code for that type is generated.
+//! * Code compiled with a [`crate::HeapLayout`] reads the heap only
+//!   through the arena base and prototype epoch in the `Ctx`, which are the
+//!   runtime's own ([`Runtime::heap`]) on entry and after every runtime
+//!   call; it keeps neither, nor any address or value derived from them,
+//!   in a machine register across a call (the code generator reloads them
+//!   from the `Ctx` after each). It reads inline caches from the table
+//!   [`Runtime::ic_table`] gave on entry, which has every site it reads.
 //! * No panic crosses machine code: each trampoline catches it, parks the
 //!   payload in the `Ctx`, and returns `EXIT_PANIC`; `enter` resumes the
 //!   unwind once machine code has returned.
@@ -24,8 +33,11 @@ use std::any::Any;
 use std::ffi::c_void;
 use std::mem::{align_of, offset_of, size_of};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::sync::atomic::{AtomicU8, Ordering};
 
-use crate::{layout, Exit, JitValue, Outcome, Resume, Runtime};
+use agnijs_js_compiler::bytecode::IcSite;
+
+use crate::{layout, ExecMemoryKind, Exit, HeapView, JitValue, Outcome, Resume, Runtime, VecLayout};
 
 /// Exit codes machine code returns; anything below `EXIT_BASE` is a pc the
 /// runtime reported that compiled code has no successor block for.
@@ -58,10 +70,24 @@ pub(crate) struct Ctx<V> {
     pc: u32,
     /// A copy of the VM's interrupt-poll counter.
     counter: u32,
+    /// Non-zero while [`Runtime::safe_point_due`]: every back-edge polls.
+    attend: u32,
+    /// The runtime's prototype epoch ([`HeapView`]), refreshed with
+    /// `objects`.
+    proto_epoch: u32,
+    /// The object arena's base ([`HeapView`]; null for code compiled
+    /// without a [`crate::HeapLayout`]), refreshed after every runtime call:
+    /// the arena may reallocate under one.
+    objects: *mut u8,
+    /// The block's inline-cache sites ([`Runtime::ic_table`]), fixed for the
+    /// run.
+    ic: *const IcSite,
     /// The accumulator, whenever control is outside machine code.
     acc: V,
     /// Registers the code addresses; a shorter window is a runtime bug.
     registers: usize,
+    /// Whether the code reads the heap (`objects` must be live).
+    heap: bool,
     panic: Option<Box<dyn Any + Send>>,
 }
 
@@ -73,6 +99,10 @@ pub(crate) struct Offsets {
     pub arith: i32,
     pub pc: i32,
     pub counter: i32,
+    pub attend: i32,
+    pub proto_epoch: i32,
+    pub objects: i32,
+    pub ic: i32,
     pub acc: i32,
 }
 
@@ -84,8 +114,59 @@ pub(crate) fn offsets<V>() -> Offsets {
         arith: offset_of!(Ctx<V>, arith) as i32,
         pc: offset_of!(Ctx<V>, pc) as i32,
         counter: offset_of!(Ctx<V>, counter) as i32,
+        attend: offset_of!(Ctx<V>, attend) as i32,
+        proto_epoch: offset_of!(Ctx<V>, proto_epoch) as i32,
+        objects: offset_of!(Ctx<V>, objects) as i32,
+        ic: offset_of!(Ctx<V>, ic) as i32,
         acc: offset_of!(Ctx<V>, acc) as i32,
     }
+}
+
+/// What code needs from the runtime to be entered.
+pub(crate) struct Needs {
+    /// The registers it addresses.
+    pub registers: usize,
+    /// It was compiled with a [`crate::HeapLayout`].
+    pub heap: bool,
+    /// The inline-cache sites it reads (0 when it reads none).
+    pub ic: usize,
+}
+
+// ---- vector layout ---------------------------------------------------------
+
+/// See [`crate::vec_layout`].
+pub(crate) fn vec_layout<T: Copy>(sample: T) -> Option<VecLayout> {
+    const WORD: usize = size_of::<usize>();
+    if size_of::<T>() == 0 || size_of::<Vec<T>>() != 3 * WORD {
+        return None;
+    }
+    let mut v: Vec<T> = Vec::with_capacity(7);
+    v.extend([sample; 3]);
+    let (ptr, cap, len) = (v.as_ptr() as usize, v.capacity(), v.len());
+    if cap == len || ptr == cap || ptr == len {
+        return None;
+    }
+    // SAFETY: `Vec<T>` is three words (checked above) with no padding, all
+    // of them initialised in a live vector, so reading it as `[usize; 3]`
+    // reads three initialised words; the copy is not used as a vector.
+    let words: [usize; 3] = unsafe { std::mem::transmute_copy(&v) };
+    let at = |x: usize| -> Option<u32> {
+        let mut found = None;
+        for (i, &w) in words.iter().enumerate() {
+            if w == x {
+                if found.is_some() {
+                    return None;
+                }
+                found = Some((i * WORD) as u32);
+            }
+        }
+        found
+    };
+    Some(VecLayout {
+        ptr: at(ptr)?,
+        cap: at(cap)?,
+        len: at(len)?,
+    })
 }
 
 // ---- layout check ----------------------------------------------------------
@@ -144,6 +225,11 @@ impl ExecMemory {
             return None;
         }
         let len = code.len();
+        #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+        if let Some(ptr) = macos::map_jit(code) {
+            memory_kind_seen(ExecMemoryKind::MapJit);
+            return Some(ExecMemory { ptr, len });
+        }
         let ptr = sys::alloc_rw(len)?;
         // SAFETY: `ptr` is a fresh read-write mapping of at least `len`
         // bytes that nothing else refers to.
@@ -153,6 +239,7 @@ impl ExecMemory {
             return None;
         }
         sys::flush_icache(ptr, len);
+        memory_kind_seen(ExecMemoryKind::Protect);
         Some(ExecMemory { ptr, len })
     }
 
@@ -167,6 +254,81 @@ impl Drop for ExecMemory {
     fn drop(&mut self) {
         #[cfg(jit_host)]
         sys::free(self.ptr, self.len);
+    }
+}
+
+/// 0: none yet; otherwise 1 + the [`ExecMemoryKind`] last used.
+static MEMORY_KIND: AtomicU8 = AtomicU8::new(0);
+
+#[cfg_attr(not(jit_host), allow(dead_code))]
+fn memory_kind_seen(kind: ExecMemoryKind) {
+    let k = match kind {
+        ExecMemoryKind::Protect => 1,
+        ExecMemoryKind::MapJit => 2,
+    };
+    MEMORY_KIND.store(k, Ordering::Relaxed);
+}
+
+pub(crate) fn memory_kind() -> Option<ExecMemoryKind> {
+    match MEMORY_KIND.load(Ordering::Relaxed) {
+        1 => Some(ExecMemoryKind::Protect),
+        2 => Some(ExecMemoryKind::MapJit),
+        _ => None,
+    }
+}
+
+/// Apple silicon's JIT memory. A process with the hardened runtime may not
+/// make ordinary pages executable; with the allow-jit entitlement it may
+/// map `MAP_JIT` pages read-write-execute, which the hardware still keeps
+/// W^X per thread: writable for a thread that lifted its JIT write
+/// protection, executable for the others and for that thread once it puts
+/// the protection back. The copy below runs with protection lifted on this
+/// thread only, and restores it before anything executes. Elsewhere on
+/// macOS (and when `MAP_JIT` is refused) the ordinary path is used.
+#[cfg(all(jit_host, target_os = "macos", target_arch = "aarch64"))]
+mod macos {
+    use std::ffi::c_int;
+
+    /// `<sys/mman.h>`.
+    const MAP_JIT: c_int = 0x0800;
+
+    extern "C" {
+        fn pthread_jit_write_protect_supported_np() -> c_int;
+        fn pthread_jit_write_protect_np(enabled: c_int);
+    }
+
+    pub(super) fn map_jit(code: &[u8]) -> Option<*mut u8> {
+        let len = code.len();
+        // SAFETY: a query with no arguments.
+        if unsafe { pthread_jit_write_protect_supported_np() } == 0 {
+            return None;
+        }
+        // SAFETY: a fresh private anonymous mapping.
+        let p = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+                libc::MAP_PRIVATE | libc::MAP_ANON | MAP_JIT,
+                -1,
+                0,
+            )
+        };
+        if p == libc::MAP_FAILED {
+            return None;
+        }
+        let ptr = p as *mut u8;
+        // SAFETY: lifting and restoring this thread's JIT write protection
+        // has no memory effects of its own; between the two calls this
+        // thread writes only the fresh mapping, of at least `len` bytes,
+        // and runs no code from it.
+        unsafe {
+            pthread_jit_write_protect_np(0);
+            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
+            pthread_jit_write_protect_np(1);
+        }
+        super::sys::flush_icache(ptr, len);
+        Some(ptr)
     }
 }
 
@@ -310,7 +472,7 @@ fn probe() -> bool {
 #[cfg_attr(not(jit_host), allow(unused_variables, unreachable_code))]
 pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
     mem: &ExecMemory,
-    registers: usize,
+    needs: Needs,
     rt: &mut R,
     pc: u32,
     acc: V,
@@ -321,16 +483,29 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         pc,
         acc,
     };
+    let interp = Outcome {
+        exit: Exit::Interp,
+        pc,
+        acc,
+    };
+    let (ic, sites) = {
+        let t = rt.ic_table();
+        (t.as_ptr(), t.len())
+    };
+    if sites < needs.ic {
+        return interp;
+    }
+    let view = if needs.heap { rt.heap() } else { HeapView::NONE };
+    if needs.heap && view.objects.is_null() {
+        return interp;
+    }
     let window = rt.registers();
-    if window.len() < registers {
-        return Outcome {
-            exit: Exit::Interp,
-            pc,
-            acc,
-        };
+    if window.len() < needs.registers {
+        return interp;
     }
     let regs = window.as_mut_ptr();
     let counter = rt.interrupt_counter();
+    let attend = rt.safe_point_due() as u32;
     let rt_ptr: *mut R = rt;
     let mut ctx = Ctx {
         regs,
@@ -340,14 +515,23 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         arith: arith_trampoline::<V, R>,
         pc,
         counter,
+        attend,
+        proto_epoch: view.proto_epoch,
+        objects: view.objects,
+        ic,
         acc,
-        registers,
+        registers: needs.registers,
+        heap: needs.heap,
         panic: None,
     };
     // SAFETY: `mem` holds code generated by `codegen::compile` for this
     // `V` with the offsets of this `Ctx<V>`, and `ctx` satisfies the
     // module's obligations: it outlives the call, its window is large
-    // enough, and `rt` is used only through `rt_ptr` until the call ends.
+    // enough, its inline-cache table has every site the code reads and
+    // stays put while the block runs (the `Runtime::ic_table` contract),
+    // its heap view is the runtime's current one (`Runtime::heap`, the
+    // `HeapLayout` contract), and `rt` is used only through `rt_ptr` until
+    // the call ends.
     let code: extern "C" fn(*mut Ctx<V>) -> u32 = unsafe { std::mem::transmute(mem.ptr) };
     let r = code(&mut ctx);
     // SAFETY: machine code has returned; `rt_ptr` is the live `&mut R`.
@@ -395,28 +579,39 @@ fn call_out<V: JitValue, R: Runtime<V>>(
     let acc = ctx.acc;
     let counter = ctx.counter;
     let registers = ctx.registers;
+    let heap = ctx.heap;
     let r = catch_unwind(AssertUnwindSafe(|| {
         rt.set_interrupt_counter(counter);
         let resume = f(rt, acc);
         let counter = rt.interrupt_counter();
+        let attend = rt.safe_point_due() as u32;
         let window = match resume {
             Resume::Next { .. } => {
                 let w = rt.registers();
                 assert!(w.len() >= registers, "register window shrank under compiled code");
-                Some(w.as_mut_ptr())
+                let w = w.as_mut_ptr();
+                // The runtime may have allocated (moving the arena),
+                // collected or changed a prototype: compiled code reads the
+                // heap only through the view taken here.
+                let view = if heap { rt.heap() } else { HeapView::NONE };
+                assert!(!heap || !view.objects.is_null(), "heap vanished under compiled code");
+                Some((w, view))
             }
             Resume::Exit(_) => None,
         };
-        (resume, counter, window)
+        (resume, counter, attend, window)
     }));
     match r {
-        Ok((resume, counter, window)) => {
+        Ok((resume, counter, attend, window)) => {
             ctx.counter = counter;
+            ctx.attend = attend;
             match resume {
                 Resume::Next { pc, acc } => {
                     ctx.acc = acc;
-                    if let Some(w) = window {
+                    if let Some((w, view)) = window {
                         ctx.regs = w;
+                        ctx.objects = view.objects;
+                        ctx.proto_epoch = view.proto_epoch;
                     }
                     pc
                 }

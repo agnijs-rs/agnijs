@@ -25,8 +25,8 @@
 use std::rc::Rc;
 use std::time::Duration;
 
-use agnijs_js_compiler::bytecode::{CodeBlock, Constant, Instr, Tier};
-use agnijs_js_jit::{Arith, Compiled, Exit, JitValue, Resume, Runtime};
+use agnijs_js_compiler::bytecode::{CodeBlock, Constant, IcSite, Instr, Tier};
+use agnijs_js_jit::{Arith, Compiled, Exit, HeapView, JitValue, Resume, Runtime};
 
 use super::{Args, Flow, RunOutcome};
 use crate::value::Value;
@@ -90,6 +90,9 @@ pub struct JitStats {
     pub unprofitable: u32,
     /// Runs of compiled code.
     pub entries: u64,
+    /// Calls from compiled code into the runtime ([`Runtime::slow`] and
+    /// [`Runtime::poll`]): what compiled code could not do inline.
+    pub calls_out: u64,
     /// Machine code generated, in bytes.
     pub code_bytes: usize,
     /// Time spent compiling.
@@ -195,10 +198,20 @@ impl Vm {
             } else {
                 JitRun::NotEntered
             };
-            if self.debug_hot || self.heap.attention != 0 {
+            if self.debug_hot {
                 return idle;
             }
             let fi = self.frames.len() - 1;
+            if self.heap.attention != 0 {
+                // A collection (or the memory limit) is due: this is an
+                // instruction boundary with the frame written back, the
+                // safe point the interpreter's loop head would make it.
+                // Under GC stress the word stays set, and compiled code
+                // still runs.
+                if let Err(f) = self.attention_slow(fi) {
+                    return JitRun::Fault(f);
+                }
+            }
             // Settle the common case, a block left to the interpreter,
             // before paying for anything else.
             let never = match self.frames[fi].code.feedback(self.feedback_owner) {
@@ -277,12 +290,13 @@ impl Vm {
                 if h <= self.jit.threshold {
                     return None;
                 }
-                if self.jit.mode == JitMode::On && !agnijs_js_jit::profitable(code) {
+                let layout = crate::object::jit_heap_layout();
+                if self.jit.mode == JitMode::On && !agnijs_js_jit::profitable_with(code, layout.is_some()) {
                     self.jit.stats.unprofitable += 1;
                     tier.state.set(Tier::NEVER);
                     return None;
                 }
-                match Compiled::<Value>::compile(code) {
+                match Compiled::<Value>::compile_with(code, layout.as_ref()) {
                     Ok(c) => {
                         let s = &mut self.jit.stats;
                         s.compiled += 1;
@@ -398,10 +412,13 @@ impl JitRt<'_> {
         let vm = &mut *self.vm;
         match flow {
             Ok(Flow::Next) if vm.frames.len() == self.fi + 1 => {
-                if vm.debug_hot || vm.heap.attention != 0 {
-                    // The interpreter's loop head handles both before the
-                    // next instruction.
+                if vm.debug_hot {
+                    // The interpreter's loop head handles the debugger
+                    // before the next instruction.
                     return Resume::Exit(Exit::Interp);
+                }
+                if vm.heap.attention != 0 {
+                    return self.attention();
                 }
                 let f = &vm.frames[self.fi];
                 Resume::Next {
@@ -421,6 +438,30 @@ impl JitRt<'_> {
         }
     }
 
+    /// The safe point after an instruction, frame written back, when the
+    /// attention word asks for a collection (or the memory-limit check):
+    /// what the interpreter's loop head does before the next instruction.
+    /// Any collection runs here, under compiled code, which holds nothing
+    /// of the heap across this call: its registers and accumulator are in
+    /// the frame, and it reloads the arena base after it.
+    #[cold]
+    #[inline(never)]
+    fn attention(&mut self) -> Resume<Value> {
+        let vm = &mut *self.vm;
+        if let Err(fault) = vm.attention_slow(self.fi) {
+            vm.jit.fault = Some(fault);
+            return Resume::Exit(Exit::Fault);
+        }
+        if vm.frames.len() != self.fi + 1 {
+            return Resume::Exit(Exit::Frame);
+        }
+        let f = &vm.frames[self.fi];
+        Resume::Next {
+            pc: f.pc as u32,
+            acc: f.acc,
+        }
+    }
+
     #[inline(never)]
     fn generic(&mut self, pc: usize, instr: Instr, acc: Value) -> Resume<Value> {
         let f = &mut self.vm.frames[self.fi];
@@ -433,10 +474,11 @@ impl JitRt<'_> {
 
 impl Runtime<Value> for JitRt<'_> {
     fn slow(&mut self, pc: u32, acc: Value) -> Resume<Value> {
+        self.vm.jit.stats.calls_out += 1;
         let pc = pc as usize;
         let instr = self.code.instrs[pc];
         if let Some(v) = self.vm.jit_fast(instr, self.fi, self.base, self.code, acc) {
-            if self.vm.heap.attention == 0 && !self.vm.debug_hot {
+            if self.vm.heap.attention == 0 {
                 return Resume::Next {
                     pc: pc as u32 + 1,
                     acc: v,
@@ -445,21 +487,55 @@ impl Runtime<Value> for JitRt<'_> {
             let f = &mut self.vm.frames[self.fi];
             f.pc = pc + 1;
             f.acc = v;
-            return Resume::Exit(Exit::Interp);
+            if self.vm.debug_hot {
+                return Resume::Exit(Exit::Interp);
+            }
+            return self.attention();
         }
         self.generic(pc, instr, acc)
     }
 
+    fn heap(&mut self) -> HeapView {
+        HeapView {
+            objects: self.vm.heap.objects.base_ptr(),
+            proto_epoch: self.vm.heap.proto_epoch,
+        }
+    }
+
+    fn ic_table(&mut self) -> &[IcSite] {
+        match self.code.feedback_if(self.vm.feedback_owner) {
+            Some(f) => {
+                // Entries from before a collection that freed shapes name
+                // shapes that may since have been reused.
+                self.vm.fresh_ic(f);
+                &f.ic
+            }
+            None => &[],
+        }
+    }
+
     fn poll(&mut self, pc: u32, target: u32, acc: Value) -> Resume<Value> {
+        self.vm.jit.stats.calls_out += 1;
         let f = &mut self.vm.frames[self.fi];
         f.pc = pc as usize + 1;
         f.acc = acc;
-        // Compiled code advanced the counter; the poll itself is due.
-        let flow = self.vm.ask_host_interrupt().map(|()| {
+        // Compiled code advanced the counter; the host poll is due when it
+        // reached a multiple of 0x1000, else only the safe point is (GC
+        // attention under stress), which `after` services.
+        let ask = if self.vm.interrupt_counter & 0xfff == 0 {
+            self.vm.ask_host_interrupt()
+        } else {
+            Ok(())
+        };
+        let flow = ask.map(|()| {
             self.vm.frames[self.fi].pc = target as usize;
             Flow::Next
         });
         self.after(flow)
+    }
+
+    fn safe_point_due(&self) -> bool {
+        self.vm.heap.attention != 0
     }
 
     fn registers(&mut self) -> &mut [Value] {

@@ -12,7 +12,7 @@ use crate::heap::{Heap, DICT_ENTRY_BYTES, ELEMENT_BYTES, SLOT_BYTES};
 use crate::interp::generator::GeneratorData;
 use crate::symbol::SymbolKind;
 use crate::value::{
-    Attrs, BigId, EnvId, ObjId, PropKey, PropSlot, Property, ShapeId, StrId, SymId, Value,
+    Attrs, BigId, EnvId, ObjId, OptObj, PropKey, PropSlot, Property, ShapeId, StrId, SymId, Value,
 };
 use crate::vm::{JsResult, Vm};
 use agnijs_engine_api::{HostClassId, HostFunction, HostObject, RealmId};
@@ -374,24 +374,36 @@ pub struct HostObjectData {
     pub data: Box<dyn HostObject>,
 }
 
+/// The class tags compiled code tests ([`Class`] pins these variants to
+/// them; they are the declaration-order numbers the others follow).
+pub mod class_tag {
+    pub const ARRAY: u8 = 1;
+    pub const STRING: u8 = 8;
+    pub const ARGUMENTS: u8 = 11;
+    pub const TYPED_ARRAY: u8 = 28;
+    pub const PROXY: u8 = 30;
+    pub const NAMESPACE: u8 = 31;
+}
+
 /// Internal slots: what makes an object more than a property bag.
 /// `#[repr(u8)]`: the first byte is the tag, numbered in declaration order
-/// (ADR 0019 J5). Variants wider than 16 bytes are boxed, so a `Class` is
+/// (ADR 0019 J5), with the variants compiled code tests pinned to
+/// [`class_tag`]. Variants wider than 16 bytes are boxed, so a `Class` is
 /// 24 bytes.
 #[repr(u8)]
 pub enum Class {
     Ordinary,
-    Array(ArrayData),
+    Array(ArrayData) = class_tag::ARRAY,
     Function(Box<FunctionData>),
     Native(Box<NativeData>),
     Bound(Box<BoundData>),
     Error,
     Boolean(bool),
     Number(f64),
-    String(StrId),
+    String(StrId) = class_tag::STRING,
     Symbol(SymId),
     BigInt(BigId),
-    Arguments(Option<Box<MappedArgs>>),
+    Arguments(Option<Box<MappedArgs>>) = class_tag::ARGUMENTS,
     ForIn(Box<ForInState>),
     ArrayIterator(ArrayIterState),
     StringIterator { string: Option<StrId>, index: u32 },
@@ -408,10 +420,10 @@ pub enum Class {
     WeakRef(Value),
     FinalizationRegistry(Box<crate::builtins::collections::FinRegData>),
     ArrayBuffer(Box<crate::builtins::typedarray::BufferData>),
-    TypedArray(Box<crate::builtins::typedarray::TypedArrayData>),
+    TypedArray(Box<crate::builtins::typedarray::TypedArrayData>) = class_tag::TYPED_ARRAY,
     DataView(Box<crate::builtins::typedarray::DataViewData>),
-    Proxy(Box<crate::builtins::proxy::ProxyData>),
-    Namespace(Box<crate::modules::NamespaceData>),
+    Proxy(Box<crate::builtins::proxy::ProxyData>) = class_tag::PROXY,
+    Namespace(Box<crate::modules::NamespaceData>) = class_tag::NAMESPACE,
     Module(Box<crate::modules::ModuleRecord>),
     AsyncFromSyncIterator(Box<IteratorRecord>),
     RegExpStringIterator(Box<crate::builtins::regexp::RegExpIterState>),
@@ -495,7 +507,9 @@ pub struct ObjectData {
     /// prototype chain: changes to its keys, attributes or prototype, and
     /// its death, move `Heap::proto_epoch` (TASK-100.20). Never cleared.
     pub watched: bool,
-    pub proto: Option<ObjId>,
+    /// The prototype, `u32::MAX` for none: read with [`ObjectData::proto`],
+    /// changed through `Heap::set_proto`, which keeps the prototype epoch.
+    proto: OptObj,
     /// Dictionary mode: replaces `shape` and the slots.
     pub dict: Option<Box<IndexMap<PropKey, Property>>>,
     pub class: Class,
@@ -512,6 +526,27 @@ impl ObjectData {
     pub const OFFSET_DICT: usize = std::mem::offset_of!(ObjectData, dict);
     pub const OFFSET_CLASS: usize = std::mem::offset_of!(ObjectData, class);
     pub const OFFSET_INLINE: usize = std::mem::offset_of!(ObjectData, inline);
+    pub const OFFSET_PROTO: usize = std::mem::offset_of!(ObjectData, proto);
+    pub const OFFSET_ELEMENTS: usize = std::mem::offset_of!(ObjectData, elements);
+    pub const OFFSET_OVERFLOW: usize = std::mem::offset_of!(ObjectData, overflow);
+
+    /// The prototype.
+    #[inline]
+    pub fn proto(&self) -> Option<ObjId> {
+        self.proto.get()
+    }
+
+    /// The prototype's id, `u32::MAX` for none.
+    #[inline]
+    pub fn proto_raw(&self) -> u32 {
+        self.proto.raw()
+    }
+
+    /// Set the prototype without the epoch bookkeeping of `Heap::set_proto`.
+    #[inline]
+    pub(crate) fn set_proto_raw(&mut self, proto: Option<ObjId>) {
+        self.proto = OptObj::from_option(proto);
+    }
 
     pub fn new(proto: Option<ObjId>, class: Class) -> ObjectData {
         ObjectData {
@@ -519,7 +554,7 @@ impl ObjectData {
             nslots: 0,
             extensible: true,
             watched: false,
-            proto,
+            proto: OptObj::from_option(proto),
             class,
             inline: [PropSlot::UNDEFINED; INLINE_SLOTS],
             overflow: Vec::new(),
@@ -1228,4 +1263,106 @@ impl Heap {
 /// A plain object with the given prototype.
 pub fn ordinary(proto: Option<ObjId>) -> ObjectData {
     ObjectData::new(proto, Class::Ordinary)
+}
+
+/// Where compiled code finds an object's parts (TASK-101.3.2), computed
+/// once per process from these types and checked against live values;
+/// `None`, and no inline property paths, if anything is not as compiled
+/// code reads it. Everything here is safe code: offsets are differences
+/// of addresses, never dereferenced.
+#[cfg(feature = "jit")]
+pub(crate) fn jit_heap_layout() -> Option<agnijs_js_jit::HeapLayout> {
+    static LAYOUT: std::sync::OnceLock<Option<agnijs_js_jit::HeapLayout>> = std::sync::OnceLock::new();
+    *LAYOUT.get_or_init(compute_jit_heap_layout)
+}
+
+#[cfg(feature = "jit")]
+fn compute_jit_heap_layout() -> Option<agnijs_js_jit::HeapLayout> {
+    use std::mem::size_of;
+    fn addr<T>(r: &T) -> usize {
+        r as *const T as usize
+    }
+    let word = size_of::<usize>();
+    let u32_of = |n: usize| u32::try_from(n).ok();
+
+    // Values: an object value's id is the `u32` at the payload offset.
+    let v = Value::Object(ObjId(7));
+    match &v {
+        Value::Object(id) if addr(id) - addr(&v) == Value::PAYLOAD_OFFSET && size_of::<ObjId>() == 4 => {}
+        _ => return None,
+    }
+    // A property slot is as large as a value with a data property's value
+    // at its start: the accessor case's discriminant must then live in the
+    // value's only niche, its tag byte, as a tag no value has.
+    let s = PropSlot::UNDEFINED;
+    match &s {
+        PropSlot::Data(v) if addr(v) == addr(&s) && size_of::<PropSlot>() == size_of::<Value>() => {}
+        _ => return None,
+    }
+    // The arena's slots, and the object inside one.
+    let probe = Some(ordinary(None));
+    let obj_offset = addr(probe.as_ref()?) - addr(&probe);
+    if size_of::<ShapeId>() != 4 || size_of::<OptObj>() != 4 {
+        return None;
+    }
+    // The dictionary and mapped-arguments words: `Option<Box<_>>`, null
+    // exactly when `None`.
+    if size_of::<Option<Box<IndexMap<PropKey, Property>>>>() != word
+        || size_of::<Option<Box<MappedArgs>>>() != word
+    {
+        return None;
+    }
+    let c = Class::Arguments(None);
+    let arguments_mapped = match &c {
+        Class::Arguments(a) => addr(a) - addr(&c),
+        _ => return None,
+    };
+    let c = Class::Array(ArrayData {
+        length: 0,
+        length_writable: true,
+    });
+    let array_length = match &c {
+        Class::Array(a) => addr(&a.length) - addr(&c),
+        _ => return None,
+    };
+    // Elements: the dense vector at the start of an `Elements` no larger
+    // than it. The sparse case must then put its discriminant in one of
+    // the vector's niches: a null buffer pointer or a capacity above
+    // `isize::MAX`, which is what compiled code tests.
+    let e = Elements::Dense(Vec::new());
+    match &e {
+        Elements::Dense(v) if addr(v) == addr(&e) && size_of::<Elements>() == size_of::<Vec<Value>>() => {}
+        _ => return None,
+    }
+    let values = agnijs_js_jit::vec_layout(Value::Undefined)?;
+    let slots = agnijs_js_jit::vec_layout(PropSlot::UNDEFINED)?;
+    let el = ObjectData::OFFSET_ELEMENTS;
+    let ov = ObjectData::OFFSET_OVERFLOW;
+    let bit = |t: u8| 1u64 << t;
+    Some(agnijs_js_jit::HeapLayout {
+        obj_stride: u32_of(size_of::<Option<ObjectData>>())?,
+        obj_offset: u32_of(obj_offset)?,
+        shape: u32_of(ObjectData::OFFSET_SHAPE)?,
+        dict: u32_of(ObjectData::OFFSET_DICT)?,
+        class: u32_of(ObjectData::OFFSET_CLASS)?,
+        proto: u32_of(ObjectData::OFFSET_PROTO)?,
+        inline: u32_of(ObjectData::OFFSET_INLINE)?,
+        inline_slots: u32_of(INLINE_SLOTS)?,
+        overflow_ptr: u32_of(ov + slots.ptr as usize)?,
+        overflow_len: u32_of(ov + slots.len as usize)?,
+        array_length: u32_of(ObjectData::OFFSET_CLASS + array_length)?,
+        elements_ptr: u32_of(el + values.ptr as usize)?,
+        elements_cap: u32_of(el + values.cap as usize)?,
+        elements_len: u32_of(el + values.len as usize)?,
+        arguments_mapped: u32_of(ObjectData::OFFSET_CLASS + arguments_mapped)?,
+        class_array: class_tag::ARRAY,
+        class_string: class_tag::STRING,
+        class_arguments: class_tag::ARGUMENTS,
+        // Class tags are below 64: `Class` has fewer variants.
+        not_receiver: bit(class_tag::TYPED_ARRAY) | bit(class_tag::NAMESPACE) | bit(class_tag::PROXY),
+        not_elements: bit(class_tag::STRING)
+            | bit(class_tag::TYPED_ARRAY)
+            | bit(class_tag::NAMESPACE)
+            | bit(class_tag::PROXY),
+    })
 }

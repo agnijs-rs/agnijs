@@ -62,6 +62,48 @@ jobs:
       - name: test262 intl402 against the AgniJS intl402 baseline (reported separately)
         run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-intl402
 
+  jit:
+    # The baseline JIT (ADR 0020, TASK-101.3.2) with every block compiled on
+    # first use, on each host it supports: the JIT crate's own tests (on
+    # macOS arm64 the probe must use MAP_JIT and per-thread write
+    # protection), the differential and inline-cache tests, the VM suite
+    # forced, and a test262 slice forced and tiered against the same
+    # baseline as the interpreter.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: jit
+      - run: cargo test --locked -p agnijs-js-jit
+      - name: VM suite with every block compiled (AGNIJS_JIT=force)
+        env:
+          AGNIJS_JIT: force
+        run: cargo test --locked -p agnijs-js-vm --features jit
+      - name: Benchmark workloads agree across JIT modes
+        run: cargo test --locked -p agnijs-js-bench --features jit --test jit_workloads
+      - name: Cache test262 at the pinned commit
+        uses: actions/cache@v4
+        with:
+          path: test262
+          key: test262-${{ hashFiles('crates/agnijs-js-test262/PIN') }}
+      - run: cargo run --release -p agnijs-js-test262 --bin test262 -- fetch
+      - name: test262 slice, JIT forced and tiered (same baseline)
+        shell: bash
+        run: |
+          for m in force on; do
+            AGNIJS_JIT=$m cargo run --release --locked -p agnijs-js-test262 --features jit --bin test262 -- run --engine agnijs \
+              --filter test/language/statements/for --filter test/language/expressions/compound-assignment \
+              --filter test/language/expressions/property-accessors --filter test/built-ins/Array/prototype/indexOf \
+              --filter test/built-ins/Array/prototype/forEach --filter test/language/arguments-object
+          done
+
   standalone:
     # The engine must build and test with nothing else beside it (ADR 0016):
     # export only the tracked files into an empty directory outside the

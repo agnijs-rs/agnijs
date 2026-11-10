@@ -17,7 +17,9 @@
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use agnijs_js_compiler::bytecode::{BinOp, CodeBlock, Constant, Instr};
+use agnijs_js_compiler::bytecode::{
+    BinOp, CodeBlock, Constant, IcEntry, IcSite, IcState, Instr, IC_ENTRIES,
+};
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I32, I64};
@@ -32,7 +34,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variab
 
 use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN};
 use crate::layout::*;
-use crate::Arith;
+use crate::{Arith, HeapLayout};
 
 /// What [`compile`] produces.
 pub(crate) struct Lowered {
@@ -196,8 +198,28 @@ fn entries(code: &CodeBlock) -> Result<BTreeSet<u32>, String> {
     Ok(set)
 }
 
-/// Compile `code` against a context with field offsets `off`.
-pub(crate) fn compile(code: &CodeBlock, off: &Offsets) -> Result<Lowered, String> {
+/// How many entries of each inline-cache site compiled code tests inline:
+/// all of them (the first empty one ends the search at run time, so a
+/// monomorphic site costs one test), none for a site that was already
+/// megamorphic when the block was compiled, which stays so.
+fn ic_unroll(code: &CodeBlock) -> Vec<u8> {
+    let n = code.ic_count as usize;
+    let fb = code.feedback.get();
+    (0..n)
+        .map(|i| match fb.and_then(|f| f.ic.get(i)) {
+            Some(site) if site.state() == IcState::Megamorphic => 0,
+            _ => IC_ENTRIES as u8,
+        })
+        .collect()
+}
+
+/// Compile `code` against a context with field offsets `off`, with the
+/// inline-cache hit paths when `heap` describes the runtime's objects.
+pub(crate) fn compile(
+    code: &CodeBlock,
+    off: &Offsets,
+    heap: Option<&HeapLayout>,
+) -> Result<Lowered, String> {
     let isa = isa()?;
     let ptr = isa.pointer_type();
     let cc = isa.default_call_conv();
@@ -255,6 +277,8 @@ pub(crate) fn compile(code: &CodeBlock, off: &Offsets) -> Result<Lowered, String
             slow_sig,
             poll_sig,
             arith_sig,
+            heap: heap.copied(),
+            unroll: ic_unroll(code),
         };
         lower.dispatch(&entries);
         for (pc, &instr) in code.instrs.iter().enumerate() {
@@ -305,6 +329,10 @@ struct Lower<'a, 'c> {
     slow_sig: SigRef,
     poll_sig: SigRef,
     arith_sig: SigRef,
+    /// The runtime's object layout, for the inline-cache hit paths.
+    heap: Option<HeapLayout>,
+    /// Entries tested inline per inline-cache site ([`ic_unroll`]).
+    unroll: Vec<u8>,
 }
 
 fn flags() -> MemFlagsData {
@@ -465,6 +493,10 @@ impl Lower<'_, '_> {
         self.b.ins().store(flags(), c, self.ctx, self.off.counter);
         let low = self.b.ins().band_imm_u(c, 0xfff);
         let due = self.b.ins().icmp_imm_u(IntCC::Equal, low, 0);
+        // Or a safe point is wanted at every back-edge (GC stress).
+        let attend = self.b.ins().load(I32, flags(), self.ctx, self.off.attend);
+        let attend = self.b.ins().icmp_imm_u(IntCC::NotEqual, attend, 0);
+        let due = self.b.ins().bor(due, attend);
         let poll = self.b.create_block();
         self.b.set_cold_block(poll);
         let blk = self.blocks[to];
@@ -683,6 +715,374 @@ impl Lower<'_, '_> {
         let c = c.unwrap();
         let c = if when { c } else { self.b.ins().bxor_imm_u(c, 1) };
         self.branch(pc, c, to);
+    }
+
+    // ---- properties -------------------------------------------------------
+    //
+    // The inline-cache hit paths (TASK-101.3.2). They read the heap through
+    // the arena base in the context, loaded afresh by each instruction and
+    // never live across a call out (the arena may move, or a collection
+    // run, under one); a value read from the heap goes straight to the
+    // accumulator, which is flushed to the context before any call. Every
+    // guard that fails jumps to the instruction's generic path, which
+    // repeats the interpreter's own lookup, so the tests below only have to
+    // be no more permissive than the interpreter's (`interp/ic.rs`).
+
+    /// A cold block running the instruction at `pc` generically; the
+    /// caller fills it with [`Self::fill_slow`] once it has branched to it.
+    fn slow_block(&mut self) -> Block {
+        let blk = self.b.create_block();
+        self.b.set_cold_block(blk);
+        blk
+    }
+
+    fn fill_slow(&mut self, blk: Block, pc: usize) {
+        self.b.switch_to_block(blk);
+        self.slow(pc, None);
+    }
+
+    /// Continue in a fresh block when `cond`, else at `otherwise`.
+    fn check(&mut self, cond: Ir, otherwise: Block) {
+        let yes = self.b.create_block();
+        self.b.ins().brif(cond, yes, &[], otherwise, &[]);
+        self.b.switch_to_block(yes);
+    }
+
+    fn load_u8(&mut self, base: Ir, off: u32) -> Ir {
+        self.b.ins().uload8(I64, flags(), base, off as i32)
+    }
+
+    fn load_u32(&mut self, base: Ir, off: u32) -> Ir {
+        self.b.ins().uload32(flags(), base, off as i32)
+    }
+
+    fn load_word(&mut self, base: Ir, off: u32) -> Ir {
+        let w = self.b.ins().load(self.ptr, flags(), base, off as i32);
+        if self.ptr == I64 {
+            w
+        } else {
+            self.b.ins().uextend(I64, w)
+        }
+    }
+
+    /// The address of object `id` (a 64-bit word holding a `u32` id).
+    fn object(&mut self, h: &HeapLayout, id: Ir) -> Ir {
+        let base = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.objects);
+        let id = if self.ptr == I64 { id } else { self.b.ins().ireduce(self.ptr, id) };
+        let at = self.b.ins().imul_imm_u(id, h.obj_stride as i64);
+        let o = self.b.ins().iadd(base, at);
+        self.b.ins().iadd_imm_u(o, h.obj_offset as i64)
+    }
+
+    /// The object in register `r`, or a jump to `miss` for anything else.
+    fn object_in(&mut self, h: &HeapLayout, r: u16, miss: Block) -> Ir {
+        let (t, p) = self.load_reg(r);
+        let is = self.is_tag(t, TAG_OBJECT);
+        self.check(is, miss);
+        let id = self.b.ins().band_imm_u(p, 0xffff_ffff);
+        self.object(h, id)
+    }
+
+    /// `bits` has the bit for the class tag `class` set.
+    fn class_in(&mut self, class: Ir, bits: u64) -> Ir {
+        let b = self.b.ins().iconst(I64, bits as i64);
+        let s = self.b.ins().ushr(b, class);
+        let s = self.b.ins().band_imm_u(s, 1);
+        self.b.ins().icmp_imm_u(IntCC::NotEqual, s, 0)
+    }
+
+    /// Whether `o` (class tag `class`) is a mapped arguments object.
+    fn mapped_arguments(&mut self, h: &HeapLayout, o: Ir, class: Ir) -> Ir {
+        let is_args = self.b.ins().icmp_imm_u(IntCC::Equal, class, h.class_arguments as i64);
+        let w = self.load_word(o, h.arguments_mapped);
+        let mapped = self.b.ins().icmp_imm_u(IntCC::NotEqual, w, 0);
+        self.b.ins().band(is_args, mapped)
+    }
+
+    /// The address of slot `slot` (a 64-bit word) of object `o`, or a jump
+    /// to `miss` when the object has no such slot.
+    fn slot_addr(&mut self, h: &HeapLayout, o: Ir, slot: Ir, miss: Block) -> Ir {
+        let inline = self.b.create_block();
+        let over = self.b.create_block();
+        let done = self.b.create_block();
+        self.b.append_block_param(done, self.ptr);
+        let in_inline = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThan, slot, h.inline_slots as i64);
+        self.b.ins().brif(in_inline, inline, &[], over, &[]);
+
+        self.b.switch_to_block(inline);
+        let s = self.narrow(slot);
+        let at = self.b.ins().imul_imm_u(s, SIZE as i64);
+        let a = self.b.ins().iadd(o, at);
+        let a = self.b.ins().iadd_imm_u(a, h.inline as i64);
+        self.b.ins().jump(done, &[a.into()]);
+
+        self.b.switch_to_block(over);
+        let i = self.b.ins().iadd_imm_s(slot, -(h.inline_slots as i64));
+        let len = self.load_word(o, h.overflow_len);
+        let ok = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.check(ok, miss);
+        let buf = self.b.ins().load(self.ptr, flags(), o, h.overflow_ptr as i32);
+        let i = self.narrow(i);
+        let at = self.b.ins().imul_imm_u(i, SIZE as i64);
+        let a = self.b.ins().iadd(buf, at);
+        self.b.ins().jump(done, &[a.into()]);
+
+        self.b.switch_to_block(done);
+        self.b.block_params(done)[0]
+    }
+
+    fn narrow(&mut self, w: Ir) -> Ir {
+        if self.ptr == I64 {
+            w
+        } else {
+            self.b.ins().ireduce(self.ptr, w)
+        }
+    }
+
+    /// Load the data property in the slot at `a` into the accumulator and
+    /// go on, or jump to `miss` for an accessor.
+    fn read_data_slot(&mut self, pc: usize, a: Ir, miss: Block) {
+        let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+        let tag = self.b.ins().band_imm_u(t, 0xff);
+        let data = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, tag, TAG_EMPTY as i64);
+        self.check(data, miss);
+        let p = self.b.ins().load(I64, flags(), a, PAYLOAD_OFFSET as i32);
+        self.set_acc(t, p);
+        self.next(pc);
+    }
+
+    /// The address of entry `k` of inline-cache site `site`.
+    fn ic_entry(&mut self, site: u16, k: usize) -> Ir {
+        let table = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.ic);
+        let at = site as usize * std::mem::size_of::<IcSite>() + k * std::mem::size_of::<IcEntry>();
+        self.b.ins().iadd_imm_u(table, at as i64)
+    }
+
+    /// `acc = obj.name` through site `ic`: own and prototype data
+    /// properties and array lengths, as `Vm::ic_get` finds them.
+    fn get_named(&mut self, pc: usize, obj: u16, ic: u16) {
+        let Some(h) = self.inline_site(ic) else {
+            self.slow(pc, None);
+            return;
+        };
+        let n = self.unroll[ic as usize] as usize;
+        let miss = self.slow_block();
+        let o = self.object_in(&h, obj, miss);
+        let class = self.load_u8(o, h.class);
+        let dict = self.load_word(o, h.dict);
+        let not_dict = self.b.ins().icmp_imm_u(IntCC::Equal, dict, 0);
+        self.check(not_dict, miss);
+        let excluded = self.class_in(class, h.not_receiver);
+        let mapped = self.mapped_arguments(&h, o, class);
+        let bad = self.b.ins().bor(excluded, mapped);
+        let ok = self.b.ins().bxor_imm_u(bad, 1);
+        self.check(ok, miss);
+        let shape = self.load_u32(o, h.shape);
+        let is_array = self.b.ins().icmp_imm_u(IntCC::Equal, class, h.class_array as i64);
+        let is_string = self.b.ins().icmp_imm_u(IntCC::Equal, class, h.class_string as i64);
+        let exotic = self.b.ins().bor(is_array, is_string);
+
+        let mut cur = self.b.create_block();
+        self.b.ins().jump(cur, &[]);
+        for k in 0..n.min(IC_ENTRIES) {
+            let next = if k + 1 < n { self.b.create_block() } else { miss };
+            self.b.switch_to_block(cur);
+            let e = self.ic_entry(ic, k);
+            let kind = self.load_u8(e, std::mem::offset_of!(IcEntry, kind) as u32);
+            let fl = self.load_u8(e, std::mem::offset_of!(IcEntry, flags) as u32);
+            // A `length` entry never applies to a length-exotic receiver.
+            let len_key = self.b.ins().band_imm_u(fl, IcEntry::FLAG_LENGTH as i64);
+            let len_key = self.b.ins().icmp_imm_u(IntCC::NotEqual, len_key, 0);
+            let skip = self.b.ins().band(len_key, exotic);
+            let applies = self.b.ins().bxor_imm_u(skip, 1);
+            self.check(applies, next);
+            // Array length.
+            let alen = self.b.create_block();
+            let other = self.b.create_block();
+            let is_alen = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_ARRAY_LENGTH as i64);
+            self.b.ins().brif(is_alen, alen, &[], other, &[]);
+            self.b.switch_to_block(alen);
+            self.check(is_array, next);
+            let l = self.load_u32(o, h.array_length);
+            let f = self.b.ins().fcvt_from_uint(F64, l);
+            self.set_acc_number(f);
+            self.next(pc);
+            // No entry, or no inline case at all, from here on.
+            self.b.switch_to_block(other);
+            let empty = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_EMPTY as i64);
+            let mega = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_MEGAMORPHIC as i64);
+            let stop = self.b.ins().bor(empty, mega);
+            let go = self.b.ins().bxor_imm_u(stop, 1);
+            self.check(go, miss);
+            let eshape = self.load_u32(e, std::mem::offset_of!(IcEntry, shape) as u32);
+            let same = self.b.ins().icmp(IntCC::Equal, shape, eshape);
+            self.check(same, next);
+            let slot = self.load_u32(e, std::mem::offset_of!(IcEntry, slot) as u32);
+            // Own data.
+            let own = self.b.create_block();
+            let not_own = self.b.create_block();
+            let is_own = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_OWN_DATA as i64);
+            self.b.ins().brif(is_own, own, &[], not_own, &[]);
+            self.b.switch_to_block(own);
+            let a = self.slot_addr(&h, o, slot, miss);
+            self.read_data_slot(pc, a, miss);
+            // Prototype data, in the epoch it was recorded in. Any other
+            // kind for this shape (an accessor) is the generic path's.
+            self.b.switch_to_block(not_own);
+            let is_proto = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_PROTO_DATA as i64);
+            self.check(is_proto, miss);
+            let proto = self.load_u32(o, h.proto);
+            let eproto = self.load_u32(e, std::mem::offset_of!(IcEntry, proto) as u32);
+            let epoch = self.b.ins().uload32(flags(), self.ctx, self.off.proto_epoch);
+            let eepoch = self.load_u32(e, std::mem::offset_of!(IcEntry, epoch) as u32);
+            let p_ok = self.b.ins().icmp(IntCC::Equal, proto, eproto);
+            let e_ok = self.b.ins().icmp(IntCC::Equal, epoch, eepoch);
+            let ok = self.b.ins().band(p_ok, e_ok);
+            self.check(ok, next);
+            let holder = self.load_u32(e, std::mem::offset_of!(IcEntry, holder) as u32);
+            let ho = self.object(&h, holder);
+            let a = self.slot_addr(&h, ho, slot, miss);
+            self.read_data_slot(pc, a, miss);
+            cur = next;
+        }
+        self.fill_slow(miss, pc);
+    }
+
+    /// `obj.name = acc` through site `ic`: an own writable data property,
+    /// as `Vm::ic_set` writes it.
+    fn set_named(&mut self, pc: usize, obj: u16, ic: u16) {
+        let Some(h) = self.inline_site(ic) else {
+            self.slow(pc, None);
+            return;
+        };
+        let n = self.unroll[ic as usize] as usize;
+        let miss = self.slow_block();
+        let o = self.object_in(&h, obj, miss);
+        let class = self.load_u8(o, h.class);
+        let dict = self.load_word(o, h.dict);
+        let not_dict = self.b.ins().icmp_imm_u(IntCC::Equal, dict, 0);
+        self.check(not_dict, miss);
+        let excluded = self.class_in(class, h.not_receiver);
+        let mapped = self.mapped_arguments(&h, o, class);
+        let bad = self.b.ins().bor(excluded, mapped);
+        let ok = self.b.ins().bxor_imm_u(bad, 1);
+        self.check(ok, miss);
+        let shape = self.load_u32(o, h.shape);
+        let mut cur = self.b.create_block();
+        self.b.ins().jump(cur, &[]);
+        for k in 0..n.min(IC_ENTRIES) {
+            let next = if k + 1 < n { self.b.create_block() } else { miss };
+            self.b.switch_to_block(cur);
+            let e = self.ic_entry(ic, k);
+            let kind = self.load_u8(e, std::mem::offset_of!(IcEntry, kind) as u32);
+            let empty = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_EMPTY as i64);
+            let mega = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_MEGAMORPHIC as i64);
+            let stop = self.b.ins().bor(empty, mega);
+            let go = self.b.ins().bxor_imm_u(stop, 1);
+            self.check(go, miss);
+            let eshape = self.load_u32(e, std::mem::offset_of!(IcEntry, shape) as u32);
+            let same = self.b.ins().icmp(IntCC::Equal, shape, eshape);
+            let is_own = self.b.ins().icmp_imm_u(IntCC::Equal, kind, IcEntry::KIND_OWN_DATA as i64);
+            let hit = self.b.ins().band(same, is_own);
+            // The same shape under another kind (an add, an accessor) is
+            // the generic path's; another shape, the next entry's.
+            let other = self.b.create_block();
+            let write = self.b.create_block();
+            self.b.ins().brif(hit, write, &[], other, &[]);
+            self.b.switch_to_block(other);
+            self.b.ins().brif(same, miss, &[], next, &[]);
+            self.b.switch_to_block(write);
+            let slot = self.load_u32(e, std::mem::offset_of!(IcEntry, slot) as u32);
+            let a = self.slot_addr(&h, o, slot, miss);
+            let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+            let tag = self.b.ins().band_imm_u(t, 0xff);
+            let data = self.b.ins().icmp_imm_u(IntCC::UnsignedLessThanOrEqual, tag, TAG_EMPTY as i64);
+            self.check(data, miss);
+            let (vt, vp) = self.acc();
+            self.b.ins().store(flags(), vt, a, TAG_OFFSET as i32);
+            self.b.ins().store(flags(), vp, a, PAYLOAD_OFFSET as i32);
+            self.next(pc);
+            cur = next;
+        }
+        self.fill_slow(miss, pc);
+    }
+
+    /// The heap layout, when site `ic` is one compiled code tests inline.
+    fn inline_site(&self, ic: u16) -> Option<HeapLayout> {
+        let h = self.heap?;
+        ((ic as usize) < self.unroll.len() && self.unroll[ic as usize] > 0).then_some(h)
+    }
+
+    /// The address of the present dense element `obj[key]`, or a jump to
+    /// `miss`, as `Vm::keyed_get_fast` and `keyed_set_fast` find it.
+    fn dense_element(&mut self, h: &HeapLayout, obj: u16, key: u16, miss: Block) -> Ir {
+        let (kt, kp) = self.load_reg(key);
+        let is_num = self.is_tag(kt, TAG_NUMBER);
+        self.check(is_num, miss);
+        let o = self.object_in(h, obj, miss);
+        // An array index: a number that survives the round trip through
+        // u32 (-0 names index 0), other than 2^32 - 1.
+        let x = self.b.ins().bitcast(F64, MemFlagsData::new(), kp);
+        let i = self.b.ins().fcvt_to_uint_sat(I32, x);
+        let back = self.b.ins().fcvt_from_uint(F64, i);
+        let exact = self.b.ins().fcmp(FloatCC::Equal, back, x);
+        let not_max = self.b.ins().icmp_imm_u(IntCC::NotEqual, i, u32::MAX as i64);
+        let index = self.b.ins().band(exact, not_max);
+        self.check(index, miss);
+        let class = self.load_u8(o, h.class);
+        let excluded = self.class_in(class, h.not_elements);
+        let mapped = self.mapped_arguments(h, o, class);
+        let bad = self.b.ins().bor(excluded, mapped);
+        let ok = self.b.ins().bxor_imm_u(bad, 1);
+        self.check(ok, miss);
+        // Dense: a non-null buffer and a capacity that is not the sparse
+        // case's niche (see `HeapLayout`).
+        let buf = self.load_word(o, h.elements_ptr);
+        let has = self.b.ins().icmp_imm_u(IntCC::NotEqual, buf, 0);
+        self.check(has, miss);
+        let cap = self.load_word(o, h.elements_cap);
+        let dense = self.b.ins().icmp_imm_s(IntCC::SignedGreaterThanOrEqual, cap, 0);
+        self.check(dense, miss);
+        let len = self.load_word(o, h.elements_len);
+        let i = self.b.ins().uextend(I64, i);
+        let inb = self.b.ins().icmp(IntCC::UnsignedLessThan, i, len);
+        self.check(inb, miss);
+        let at = self.b.ins().imul_imm_u(i, SIZE as i64);
+        let a = self.b.ins().iadd(buf, at);
+        let a = self.narrow(a);
+        let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+        let tag = self.b.ins().band_imm_u(t, 0xff);
+        let present = self.b.ins().icmp_imm_u(IntCC::NotEqual, tag, TAG_EMPTY as i64);
+        self.check(present, miss);
+        a
+    }
+
+    fn get_keyed(&mut self, pc: usize, obj: u16, key: u16) {
+        let Some(h) = self.heap else {
+            self.slow(pc, None);
+            return;
+        };
+        let miss = self.slow_block();
+        let a = self.dense_element(&h, obj, key, miss);
+        let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+        let p = self.b.ins().load(I64, flags(), a, PAYLOAD_OFFSET as i32);
+        self.set_acc(t, p);
+        self.next(pc);
+        self.fill_slow(miss, pc);
+    }
+
+    fn set_keyed(&mut self, pc: usize, obj: u16, key: u16) {
+        let Some(h) = self.heap else {
+            self.slow(pc, None);
+            return;
+        };
+        let miss = self.slow_block();
+        let a = self.dense_element(&h, obj, key, miss);
+        let (vt, vp) = self.acc();
+        self.b.ins().store(flags(), vt, a, TAG_OFFSET as i32);
+        self.b.ins().store(flags(), vp, a, PAYLOAD_OFFSET as i32);
+        self.next(pc);
+        self.fill_slow(miss, pc);
     }
 
     // ---- instructions -------------------------------------------------------
@@ -915,6 +1315,23 @@ impl Lower<'_, '_> {
             }
             Instr::JumpIfNotCmpAI { op, imm, offset } => {
                 self.compare_branch(pc, op, Src::Acc, Src::Imm(imm), offset, false);
+                return Ok(());
+            }
+
+            Instr::GetNamed { obj, ic, .. } => {
+                self.get_named(pc, obj, ic);
+                return Ok(());
+            }
+            Instr::SetNamed { obj, ic, .. } => {
+                self.set_named(pc, obj, ic);
+                return Ok(());
+            }
+            Instr::GetKeyed { obj, key } => {
+                self.get_keyed(pc, obj, key);
+                return Ok(());
+            }
+            Instr::SetKeyed { obj, key, .. } => {
+                self.set_keyed(pc, obj, key);
                 return Ok(());
             }
 

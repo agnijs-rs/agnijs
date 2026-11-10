@@ -934,7 +934,7 @@ impl Vm {
                 internal.push(("[[PromiseResult]]", result));
             }
         }
-        if let Some(proto) = self.heap.obj(o).proto {
+        if let Some(proto) = self.heap.obj(o).proto() {
             if !is_proxy {
                 internal.push(("[[Prototype]]", Value::Object(proto)));
             }

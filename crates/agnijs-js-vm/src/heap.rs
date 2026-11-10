@@ -73,6 +73,14 @@ impl<T> Arena<T> {
             .map(|(i, _)| i as u32)
     }
 
+    /// The slot array's base, for compiled code (slot `i` is
+    /// `size_of::<Option<T>>()` bytes times `i` from it). Valid until the
+    /// arena is next used from Rust.
+    #[cfg(feature = "jit")]
+    pub(crate) fn base_ptr(&mut self) -> *mut u8 {
+        self.slots.as_mut_ptr() as *mut u8
+    }
+
     #[inline]
     pub fn get(&self, i: u32) -> &T {
         match self.slots.get(i as usize) {
@@ -445,8 +453,8 @@ impl Heap {
     /// creation, so inline caches see it).
     pub fn set_proto(&mut self, obj: ObjId, proto: Option<ObjId>) {
         let o = self.obj_mut(obj);
-        if o.proto != proto {
-            o.proto = proto;
+        if o.proto() != proto {
+            o.set_proto_raw(proto);
             self.note_structure_change(obj);
         }
     }

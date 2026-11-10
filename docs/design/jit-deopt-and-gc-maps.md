@@ -27,7 +27,21 @@ Each of the following optimisations breaks one of the invariants, and must not l
 | Direct calls between compiled functions (machine frames on the native stack) | I1, and the frame stack model | both, plus section 6 |
 | Inlining, or speculation on call targets or types without a generic fallback | I2 | deopt (section 3) |
 
-Inline IC hit paths with a full miss path, which is the obvious next speed-up, need neither piece. They are a good first task for whoever picks this up. Do them before starting on this spec.
+Inline IC hit paths with a full miss path need neither piece. They are implemented (TASK-101.3.2, below).
+
+### 1.1 Inline IC hits in the baseline (TASK-101.3.2)
+
+Compiled code reads the object arena directly for named loads and stores that hit their inline cache (monomorphic up to the 4-way polymorphic form, own data and prototype data), dense array element reads and writes, and array `length`. Every guard is the interpreter's own: the receiver's shape against the cache entry's, and for a prototype hit also the holder's shape and `proto_epoch` against the entry's. Any miss calls `Runtime::slow` for the same instruction at the same pc (I2), so nothing is speculated and no deoptimization exists.
+
+The heap view adds a third invariant, which keeps I1 true for addresses as well as values:
+
+- **I3. No heap address across a call out.** The arena base (`Ctx::objects`) and the prototype epoch (`Ctx::proto_epoch`) are the runtime's (`Runtime::heap`) on entry and are refreshed by the trampoline after every call out that continues compiled code. The code generator loads them from the `Ctx` in each instruction that needs them and never keeps them, or any address or value derived from them, in a machine register across a call. Any call out may allocate (the arena may reallocate and move), collect, or change a prototype; the next instruction sees the new view.
+
+Compiled code never changes an object's structure. It only stores values into data slots and dense elements its guards checked, so the shape tables, the IC entries and the collector's invariants are the interpreter's. A store writes a `Value` and needs no write barrier, because the collector is non-incremental. The layout compiled code assumes (`HeapLayout`) is computed at start-up from the VM's own types by address differences, and code is compiled without heap access when any check fails.
+
+GC attention is serviced inside compiled code: every call out that continues it checks the attention word and collects there (`JitRt::attention`), with the frame written back. Under GC stress (`Runtime::safe_point_due`) every back-edge also calls `Runtime::poll`, so compiled loops collect at each loop head as the interpreter does. The test `heap_values_survive_collections_at_every_call_out_from_compiled_code` (in `crates/agnijs-js-vm/tests/jit_inline_cache.rs`) runs inline loads and stores around allocating calls under `heap.stress` with a collection at every safe point. It checks the result against the interpreter's.
+
+Nothing here touches the birth-serial bound (section 6): compiled code still never recurses on the native stack.
 
 ## 2. Frame layout
 
@@ -38,7 +52,7 @@ There is one frame format (ADR 0019 J1): `Frame` in `Vm::frames`, over a window 
   - the return address and saved callee-saved registers (Cranelift's ABI frame);
   - the spill area (`Location::Spill(offset)`), at fixed offsets from the frame's stack pointer and described per safe point;
   - no JS-visible layout of its own. Nothing outside the JIT reads it except through a `GcMap` or a `FrameState`.
-- **`Ctx` stays the boundary.** It is `#[repr(C)]`, with the fields `regs`, `rt`, `slow`, `poll`, `arith`, `pc`, `counter`, `acc`, at `Offsets`. New fields go after `acc` only if machine code reads them, and they get `Offsets` entries. The deopt entry point and the safe-point return-address register become new helper pointers in this struct, keeping the non-generic `extern "C"` rule (J10).
+- **`Ctx` stays the boundary.** It is `#[repr(C)]`, with the fields `regs`, `rt`, `slow`, `poll`, `arith`, `pc`, `counter`, `attend`, `proto_epoch`, `objects`, `ic`, `acc`, at `Offsets`. Fields machine code reads go before `acc` and get `Offsets` entries; the fields after `acc` are Rust's alone. The deopt entry point and the safe-point return-address register become new helper pointers in this struct, keeping the non-generic `extern "C"` rule (J10).
 - **Stale register slots are allowed only between safe points.** At a safe point (section 5), each register slot is either current in `Vm::regs` or listed in the safe point's `live` set with its location. A slot holding a stale *heap* value while the current value is elsewhere must be listed. Otherwise a collection would trace the stale value, which is harmless, but a later deopt would write back the wrong one.
 
 ## 3. Deoptimization: the state at a side exit
