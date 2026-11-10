@@ -1,10 +1,10 @@
 ---
 id: TASK-100.7
 title: 'Engine M6: Intl on ICU4X'
-status: In Progress
+status: Done
 assignee: []
 created_date: '2026-11-07T22:36:00Z'
-updated_date: '2026-11-10T04:37:00Z'
+updated_date: '2026-11-10T23:16:00Z'
 labels:
   - ready-for-agent
 dependencies:
@@ -23,7 +23,7 @@ Gable core already needs DateTimeFormat, NumberFormat and PluralRules; the rest 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 ICU4X sits behind a seam crate; locale data is trimmed to configured app locales
+- [x] #1 ICU4X sits behind a seam crate; locale data is trimmed to configured app locales
 - [x] #2 DateTimeFormat, NumberFormat and PluralRules pass their test262 intl402 directories, then the other ECMA-402 built-ins and toLocale* methods; intl402 is reported separately from the ES2025 gate
 <!-- AC:END -->
 
@@ -37,10 +37,12 @@ Verification: intl402 981 passed / 0 failed (12 reasoned exclusions in exclusion
 AC #1 left unchecked on purpose: the seam exists and the crate-owned CLDR tables are trimmed to a configured locale list, but ICU4X's own compiled data is still the crate-default set. Trimming it to application locales needs an icu4x-datagen custom baked-data crate behind the same seam; follow-up.
 
 Closeout check (2026-11-10): AC #1 re-verified as still NOT met. crates/agnijs-js-intl/Cargo.toml uses icu_provider with the baked feature on the crate-default compiled data, and ADR 0015 (Consequences) states the datagen-built custom baked-data crate trimmed to configured app locales is a planned follow-up. Missing: an icu4x-datagen baked-data crate behind the seam, a configurable app-locale list driving it, and evidence that the shipped data contains only those locales. Task stays In Progress.
+
+AC1 closed by TASK-103.5 (deb40af): ICU4X data can be trimmed to an app's locale list through ICU4X_DATA_DIR and crates/agnijs-js-intl/tools/gen-icu4x-data.js, and Intl can be left out with the intl cargo feature. See docs/binary-size.md and the ADR 0015 addendum. intl402 981/981 on default, datagen recommended and modern data.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
 
 <!-- SECTION:FINAL_SUMMARY:BEGIN -->
-Intl implemented on ICU4X 2.4 behind the gable-js-intl seam (ADR 0015): all ECMA-402 built-ins and toLocale* methods, intl402 981/981 with 12 reasoned exclusions, reported separately via --only-intl402 and baselines/gable-intl402.json; main suite 42225/42225. Open: AC #1's trimming of ICU4X's own data to app locales (datagen custom baked crate) is a documented follow-up, so the task stays In Progress.
+ECMA-402 on ICU4X behind the agnijs-js-intl seam (ADR 0015): all Intl constructors and the toLocale* methods, intl402 981/981 reported separately from the main gate. Locale data is trimmable per app via ICU4X_DATA_DIR and a datagen wrapper, and Intl is an optional cargo feature (TASK-103.5, docs/binary-size.md).
 <!-- SECTION:FINAL_SUMMARY:END -->
