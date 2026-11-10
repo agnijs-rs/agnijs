@@ -114,7 +114,7 @@ fn target(len: usize, pc: usize, off: i32) -> Result<usize, String> {
 
 /// The branch offset of an instruction that may branch, for the
 /// instructions whose taken edge can come back from the runtime.
-fn branch_offset(instr: &Instr) -> Option<i32> {
+pub(crate) fn branch_offset(instr: &Instr) -> Option<i32> {
     Some(match *instr {
         Instr::Jump(o)
         | Instr::JumpIfTrue(o)

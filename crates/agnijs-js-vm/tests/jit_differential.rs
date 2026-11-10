@@ -82,16 +82,21 @@ fn a_numeric_loop_runs_compiled() {
 
 #[test]
 fn a_hot_function_is_compiled_only_once_it_is_hot() {
-    let src = "function add(a, b) { return a + b; }
+    // Tiering compiles only blocks with a loop: entering compiled code once
+    // per call costs more than a straight-line block's dispatch saves.
+    let add = "function add(a, b) { for (var k = 0; k < 2; k++) a = a + b; return a; }";
+    let src = format!(
+        "{add}
                var s = 0;
                for (var i = 0; i < 3000; i++) s = add(s, i);
-               s";
+               s"
+    );
     let mut vm = engine(JitMode::On);
-    assert_eq!(run_in(&mut vm, src), "4498500");
+    assert_eq!(run_in(&mut vm, &src), "8997000");
     let on = vm.jit_stats();
     assert!(on.compiled >= 1 && on.entries > 0, "{on:?}");
     let mut vm = engine(JitMode::On);
-    assert_eq!(run_in(&mut vm, "function add(a, b) { return a + b; } add(1, 2)"), "3");
+    assert_eq!(run_in(&mut vm, &format!("{add} add(1, 2)")), "5");
     assert_eq!(vm.jit_stats().compiled, 0, "a cold function stays interpreted");
 }
 

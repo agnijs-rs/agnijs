@@ -111,6 +111,37 @@ fn run(code: &CodeBlock, args: &[Val]) -> (Toy, Val) {
     (rt, out.acc)
 }
 
+/// What the host says to a `MAP_JIT` mapping, for a failure message.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(unsafe_code)]
+fn map_jit_diagnostic() -> String {
+    extern "C" {
+        fn pthread_jit_write_protect_supported_np() -> std::ffi::c_int;
+    }
+    // SAFETY: a query, and a fresh anonymous mapping unmapped at once.
+    unsafe {
+        let supported = pthread_jit_write_protect_supported_np();
+        let p = libc::mmap(
+            std::ptr::null_mut(),
+            16384,
+            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            libc::MAP_PRIVATE | libc::MAP_ANON | 0x0800,
+            -1,
+            0,
+        );
+        let err = std::io::Error::last_os_error();
+        if p != libc::MAP_FAILED {
+            libc::munmap(p, 16384);
+        }
+        format!("write protect supported: {supported}; MAP_JIT mmap: {}", if p == libc::MAP_FAILED { err.to_string() } else { "ok".into() })
+    }
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+fn map_jit_diagnostic() -> String {
+    String::new()
+}
+
 #[test]
 fn the_probe_runs_machine_code_on_this_host() {
     assert!(available());
@@ -118,7 +149,7 @@ fn the_probe_runs_machine_code_on_this_host() {
     // Apple silicon uses MAP_JIT with per-thread write protection, which
     // also runs under the hardened runtime with the allow-jit entitlement.
     if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-        assert_eq!(kind, ExecMemoryKind::MapJit);
+        assert_eq!(kind, ExecMemoryKind::MapJit, "{}", map_jit_diagnostic());
     } else {
         assert_eq!(kind, ExecMemoryKind::Protect);
     }

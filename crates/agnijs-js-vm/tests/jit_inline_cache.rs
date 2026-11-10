@@ -229,6 +229,24 @@ fn keyed_edge_cases_take_the_generic_path() {
 }
 
 #[test]
+fn a_tiered_loop_that_mostly_calls_out_goes_back_to_the_interpreter() {
+    // The additions look numeric to the static estimate but concatenate
+    // strings, so every one calls out.
+    let src = "function f(n) { var t = 0; for (var r = 0; r < n; r++) { var s = '';
+                 for (var i = 0; i < 1000; i++) { s += `item-${i};`; } t += s.length; } return t; }
+               f(40)";
+    let (on, stats) = run(JitMode::On, src);
+    assert_eq!(on, run(JitMode::Off, src).0);
+    assert!(stats.compiled >= 1 && stats.abandoned >= 1, "{stats:?}");
+    // A loop that runs inline stays compiled.
+    let (_, stats) = run(
+        JitMode::On,
+        "function g(o, n) { var s = 0; for (var i = 0; i < n; i++) { s = s + o.x; } return s; } g({ x: 1 }, 100000)",
+    );
+    assert!(stats.compiled >= 1 && stats.abandoned == 0, "{stats:?}");
+}
+
+#[test]
 fn heap_values_survive_collections_at_every_call_out_from_compiled_code() {
     // Each iteration stores and loads inline around a call that allocates
     // (and so, under stress, collects and grows the object arena): compiled

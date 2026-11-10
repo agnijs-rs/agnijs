@@ -82,6 +82,21 @@ jobs:
           workspaces: .
           key: jit
       - run: cargo test --locked -p agnijs-js-jit
+      - name: macOS, the probe under the hardened runtime with the allow-jit entitlement
+        # The hardened runtime refuses ordinary pages made executable, so
+        # the probe succeeds only through MAP_JIT and per-thread write
+        # protection (TASK-101.3.2).
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          bin=$(cargo test --locked -p agnijs-js-jit --test enter --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .target.name == "enter" and .executable != null) | .executable')
+          printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>' \
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+            '<plist version="1.0"><dict><key>com.apple.security.cs.allow-jit</key><true/></dict></plist>' > "$RUNNER_TEMP/jit.entitlements"
+          codesign -s - -f --options runtime --entitlements "$RUNNER_TEMP/jit.entitlements" "$bin"
+          codesign -d --entitlements - "$bin"
+          "$bin" --test-threads 1
       - name: VM suite with every block compiled (AGNIJS_JIT=force)
         env:
           AGNIJS_JIT: force

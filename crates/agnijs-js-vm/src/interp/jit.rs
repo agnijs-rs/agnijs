@@ -88,6 +88,9 @@ pub struct JitStats {
     /// Hot blocks left to the interpreter because compiled code would
     /// mostly call back into it ([`agnijs_js_jit::profitable`]).
     pub unprofitable: u32,
+    /// Compiled blocks given back to the interpreter in mode `On` because
+    /// their loops called out on too many instructions as they ran.
+    pub abandoned: u32,
     /// Runs of compiled code.
     pub entries: u64,
     /// Calls from compiled code into the runtime ([`Runtime::slow`] and
@@ -235,6 +238,8 @@ impl Vm {
             let base = self.frames[fi].base;
             let out = compiled.enter(
                 &mut JitRt {
+                    since_calls_out: self.jit.stats.calls_out,
+                    since_counter: self.interrupt_counter,
                     vm: self,
                     fi,
                     base,
@@ -403,7 +408,14 @@ struct JitRt<'a> {
     fi: usize,
     base: usize,
     code: &'a Rc<CodeBlock>,
+    /// The call-out count and interrupt counter when this run was entered
+    /// or last judged at a poll: how often its loops call out per back-edge.
+    since_calls_out: u64,
+    since_counter: u32,
 }
+
+/// Back-edges a run must take before its loops are judged.
+const JUDGE_AFTER: u32 = 1024;
 
 impl JitRt<'_> {
     /// Where execution goes after an instruction run by the runtime.
@@ -460,6 +472,28 @@ impl JitRt<'_> {
             pc: f.pc as u32,
             acc: f.acc,
         }
+    }
+
+    /// Mode `On`'s check of its static estimate ([`agnijs_js_jit::profitable`])
+    /// against what the run did, at an interrupt poll on the back-edge from
+    /// `pc` to `target`: the run called out more than once per
+    /// [`agnijs_js_jit::CALL_OUT_SHARE`] instructions of that loop's body
+    /// per back-edge. (Instructions the estimate counts as inline, such as
+    /// `+`, call out when their operands are not numbers.)
+    fn unprofitable_loop(&mut self, pc: u32, target: u32) -> bool {
+        let vm = &*self.vm;
+        if vm.jit.mode != JitMode::On {
+            return false;
+        }
+        let edges = vm.interrupt_counter.wrapping_sub(self.since_counter);
+        if edges < JUDGE_AFTER {
+            return false;
+        }
+        let calls = vm.jit.stats.calls_out - self.since_calls_out;
+        self.since_calls_out = vm.jit.stats.calls_out;
+        self.since_counter = vm.interrupt_counter;
+        let body = u64::from(pc.saturating_sub(target)) + 1;
+        calls * agnijs_js_jit::CALL_OUT_SHARE as u64 > body * u64::from(edges)
     }
 
     #[inline(never)]
@@ -523,7 +557,17 @@ impl Runtime<Value> for JitRt<'_> {
         // reached a multiple of 0x1000, else only the safe point is (GC
         // attention under stress), which `after` services.
         let ask = if self.vm.interrupt_counter & 0xfff == 0 {
-            self.vm.ask_host_interrupt()
+            let asked = self.vm.ask_host_interrupt();
+            if asked.is_ok() && self.unprofitable_loop(pc, target) {
+                // Continue at the loop head in the interpreter, for good.
+                self.vm.frames[self.fi].pc = target as usize;
+                if let Some(fb) = self.code.feedback_if(self.vm.feedback_owner) {
+                    fb.tier.state.set(Tier::NEVER);
+                }
+                self.vm.jit.stats.abandoned += 1;
+                return Resume::Exit(Exit::Interp);
+            }
+            asked
         } else {
             Ok(())
         };

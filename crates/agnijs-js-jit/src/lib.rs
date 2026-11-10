@@ -347,16 +347,23 @@ pub fn profitable(code: &CodeBlock) -> bool {
 
 /// [`profitable`], for code compiled with a [`HeapLayout`] when `heap`:
 /// named and keyed property accesses then run inline on a cache hit.
+///
+/// A block without a loop is not worth it either: it is entered once per
+/// call, and entering compiled code (and leaving it for every call the
+/// block makes) costs more than a short block's dispatch saves.
 pub fn profitable_with(code: &CodeBlock, heap: bool) -> bool {
+    let has_loop = code
+        .instrs
+        .iter()
+        .any(|i| codegen_branch_offset(i).is_some_and(|o| o <= 0));
+    if !has_loop {
+        return false;
+    }
     let mut cost = 0usize;
     for instr in code.instrs.iter() {
         cost += match instr {
             i if expands_inline(code, i) => 0,
-            Instr::GetNamed { ic, .. } | Instr::SetNamed { ic, .. }
-                if heap && (*ic as usize) < code.ic_count as usize && !megamorphic(code, *ic) =>
-            {
-                0
-            }
+            Instr::GetNamed { ic, .. } | Instr::SetNamed { ic, .. } if heap => named_site_cost(code, *ic),
             Instr::GetKeyed { .. } | Instr::SetKeyed { .. } if heap => 0,
             Instr::Call { .. }
             | Instr::CallSpread { .. }
@@ -371,13 +378,38 @@ pub fn profitable_with(code: &CodeBlock, heap: bool) -> bool {
 /// See [`profitable`].
 pub const CALL_OUT_SHARE: usize = 6;
 
-/// Whether inline-cache site `ic` has gone megamorphic (in whichever
-/// runtime's feedback the block has): it then always calls out.
-fn megamorphic(code: &CodeBlock, ic: u16) -> bool {
-    code.feedback
-        .get()
-        .and_then(|f| f.ic.get(ic as usize))
-        .is_some_and(|s| s.state() == agnijs_js_compiler::bytecode::IcState::Megamorphic)
+/// The [`profitable`] cost of named access site `ic`, judged by the
+/// feedback the block has so far: 0 when compiled code can run its hits
+/// itself, 1 when it calls out (megamorphic, or a kind compiled code does
+/// not expand), 2 when it has seen an accessor (a call).
+fn named_site_cost(code: &CodeBlock, ic: u16) -> usize {
+    use agnijs_js_compiler::bytecode::IcEntry;
+    if ic as usize >= code.ic_count as usize {
+        return 1;
+    }
+    let Some(site) = code.feedback.get().and_then(|f| f.ic.get(ic as usize)) else {
+        return 0;
+    };
+    let mut cost = 0;
+    for e in site.entries.iter() {
+        cost = cost.max(match e.get().kind {
+            IcEntry::KIND_EMPTY | IcEntry::KIND_OWN_DATA | IcEntry::KIND_PROTO_DATA | IcEntry::KIND_ARRAY_LENGTH => 0,
+            IcEntry::KIND_OWN_ACCESSOR | IcEntry::KIND_PROTO_ACCESSOR => 2,
+            _ => 1,
+        });
+    }
+    cost
+}
+
+/// See [`codegen`]'s branch offsets; `None` on hosts without one.
+fn codegen_branch_offset(instr: &Instr) -> Option<i32> {
+    #[cfg(jit_host)]
+    return codegen::branch_offset(instr);
+    #[cfg(not(jit_host))]
+    {
+        let _ = instr;
+        None
+    }
 }
 
 /// Whether compiled code expands `instr` itself, at least for numbers
