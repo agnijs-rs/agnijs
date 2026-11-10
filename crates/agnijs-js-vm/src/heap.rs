@@ -274,20 +274,37 @@ pub(crate) const ENV_BYTES: usize = 64;
 pub(crate) const SYMBOL_BYTES: usize = 32;
 pub(crate) const STRING_BYTES: usize = 40;
 /// The floor of the collection threshold: the least allocation between two
-/// collections, which bounds the garbage a small heap holds. Overridable
-/// for pacing experiments through `AGNIJS_GC_THRESHOLD` (bytes), read once
-/// per heap.
-const DEFAULT_GC_THRESHOLD: usize = 8 * 1024 * 1024;
+/// collections, which bounds the garbage a small heap holds. 2 MiB: a
+/// collection with a small live set marks in about 0.2 ms, and the Gable
+/// benches with a live set under 1 MB peaked at three to five times
+/// QuickJS-NG's memory with the earlier 8 MiB floor (TASK-100.35).
+/// Overridable for pacing experiments through `AGNIJS_GC_THRESHOLD`
+/// (bytes), read once per process.
+const DEFAULT_GC_THRESHOLD: usize = 2 * 1024 * 1024;
+
+/// The next threshold as a percentage of the live bytes after a collection
+/// (the growth factor). Overridable through `AGNIJS_GC_GROWTH` (percent).
+const DEFAULT_GC_GROWTH_PERCENT: usize = 200;
+
+fn pacing() -> (usize, usize) {
+    static PACING: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+    *PACING.get_or_init(|| {
+        let env = |name: &str, min: usize, default: usize| {
+            std::env::var(name)
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|&v| v >= min)
+                .unwrap_or(default)
+        };
+        (
+            env("AGNIJS_GC_THRESHOLD", 64 * 1024, DEFAULT_GC_THRESHOLD),
+            env("AGNIJS_GC_GROWTH", 110, DEFAULT_GC_GROWTH_PERCENT),
+        )
+    })
+}
 
 fn threshold_floor() -> usize {
-    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *FLOOR.get_or_init(|| {
-        std::env::var("AGNIJS_GC_THRESHOLD")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&v| v >= 64 * 1024)
-            .unwrap_or(DEFAULT_GC_THRESHOLD)
-    })
+    pacing().0
 }
 
 /// Attention bit: a collection is wanted at the next safe point (threshold
@@ -359,10 +376,11 @@ pub struct Heap {
     /// through [`Heap::charge`], which raises the attention word when the
     /// threshold is reached.
     pub allocated_since_gc: usize,
-    /// Collect when `allocated_since_gc` passes this: twice the live bytes
-    /// after the last collection, at least 8 MiB, and never more than the
-    /// distance to the memory limit, so a limit is noticed as soon as it is
-    /// reached (`rearm_threshold`).
+    /// Collect when `allocated_since_gc` passes this: the live bytes after
+    /// the last collection times the growth factor (twice, by default),
+    /// at least the floor (2 MiB), and never more than the distance to the
+    /// memory limit, so a limit is noticed as soon as it is reached
+    /// (`rearm_threshold`).
     pub gc_threshold: usize,
     /// Approximate live bytes after the last collection.
     pub live_bytes: usize,
@@ -541,7 +559,8 @@ impl Heap {
     /// limit; called after a collection and when the limit changes.
     pub fn rearm_threshold(&mut self) {
         let basis = self.live_bytes.saturating_sub(self.retained_bytes);
-        let mut t = (basis * 2).max(threshold_floor());
+        let (floor, growth) = pacing();
+        let mut t = (basis / 100 * growth).max(floor);
         if let Some(limit) = self.memory_limit {
             // The limit is exceeded when live + allocated > limit.
             t = t.min(limit.saturating_sub(self.live_bytes) + 1);

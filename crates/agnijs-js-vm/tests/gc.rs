@@ -198,6 +198,24 @@ fn a_loop_that_only_grows_arrays_triggers_collections() {
     );
 }
 
+/// The threshold floor bounds the garbage a small heap carries: 50 000
+/// iterations of two objects and a two-element array (about 17 MB counted)
+/// collect every 2 MiB or so, not every 8 (TASK-100.35).
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
+fn a_garbage_only_loop_collects_every_few_megabytes() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var keep = 0; for (var i = 0; i < 50000; i++) { var o = { a: i, b: [i, i + 1] }; keep += o.b.length; }",
+    );
+    assert!(
+        vm.gc_count >= 6,
+        "17 MB of garbage ran only {} collections",
+        vm.gc_count
+    );
+}
+
 /// The memory limit is checked against the same counter, so a loop that
 /// only grows arrays must hit it instead of growing past it.
 #[test]

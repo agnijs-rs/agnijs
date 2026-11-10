@@ -120,7 +120,7 @@ fn the_memory_limit_stops_straight_line_allocation() {
     // No loop: each statement doubles the string (flat copies, which the
     // allocator counts; a rope would not be), so the limit must be noticed
     // between instructions. 64 KiB doubled eight times is 16 MiB, past the
-    // 8 MiB default collection threshold as well.
+    // default collection threshold as well.
     let r = vm.eval_script(
         realm,
         "doubling.js",
