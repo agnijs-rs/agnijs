@@ -273,7 +273,22 @@ pub(crate) const OBJECT_BYTES: usize = 160;
 pub(crate) const ENV_BYTES: usize = 64;
 pub(crate) const SYMBOL_BYTES: usize = 32;
 pub(crate) const STRING_BYTES: usize = 40;
+/// The floor of the collection threshold: the least allocation between two
+/// collections, which bounds the garbage a small heap holds. Overridable
+/// for pacing experiments through `AGNIJS_GC_THRESHOLD` (bytes), read once
+/// per heap.
 const DEFAULT_GC_THRESHOLD: usize = 8 * 1024 * 1024;
+
+fn threshold_floor() -> usize {
+    static FLOOR: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *FLOOR.get_or_init(|| {
+        std::env::var("AGNIJS_GC_THRESHOLD")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&v| v >= 64 * 1024)
+            .unwrap_or(DEFAULT_GC_THRESHOLD)
+    })
+}
 
 /// Attention bit: a collection is wanted at the next safe point (threshold
 /// or memory limit reached, requested by the host, or stress mode).
@@ -421,8 +436,8 @@ impl Heap {
             intern: HashTable::new(),
             attention: if stress_every.is_some() { ATTENTION_GC } else { 0 },
             allocated_since_gc: 0,
-            gc_threshold: DEFAULT_GC_THRESHOLD,
-            gc_threshold_base: DEFAULT_GC_THRESHOLD,
+            gc_threshold: threshold_floor(),
+            gc_threshold_base: threshold_floor(),
             live_bytes: 0,
             stress: stress_every.is_some(),
             stress_every: stress_every.unwrap_or(1),
@@ -490,6 +505,19 @@ impl Heap {
         self.allocated_since_gc >= self.gc_threshold
     }
 
+    /// Whether a collection is worth running at a free safe point: one
+    /// where no native frame is on the stack (a host call's entry, the
+    /// boundary between jobs), so that it retains nothing. Garbage left
+    /// since the last collection is kept by every nested run loop entered
+    /// after it, until a collection at a free point frees it, so such a
+    /// point collects once half the threshold has accumulated: that bounds
+    /// what the next loop can retain to half a threshold, at the cost of
+    /// at most one extra collection per threshold (TASK-100.35).
+    #[inline]
+    pub fn wants_free_gc(&self) -> bool {
+        self.allocated_since_gc * 2 >= self.gc_threshold_base
+    }
+
     /// Count `bytes` of storage that grew inside an existing heap value
     /// (elements, slots, a dictionary, a flattened string) towards the next
     /// collection and the memory limit.
@@ -513,7 +541,7 @@ impl Heap {
     /// limit; called after a collection and when the limit changes.
     pub fn rearm_threshold(&mut self) {
         let basis = self.live_bytes.saturating_sub(self.retained_bytes);
-        let mut t = (basis * 2).max(DEFAULT_GC_THRESHOLD);
+        let mut t = (basis * 2).max(threshold_floor());
         if let Some(limit) = self.memory_limit {
             // The limit is exceeded when live + allocated > limit.
             t = t.min(limit.saturating_sub(self.live_bytes) + 1);

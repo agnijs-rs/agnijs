@@ -29,6 +29,11 @@ fn gc_count(vm: &mut Vm, _a: &CallArgs) -> JsResult<VmValue> {
     Ok(VmValue::Number(vm.gc_count as f64))
 }
 
+/// Bytes the last collection kept only for native frames.
+fn retained_bytes(vm: &mut Vm, _a: &CallArgs) -> JsResult<VmValue> {
+    Ok(VmValue::Number(vm.heap.retained_bytes as f64))
+}
+
 /// `requestGc()`: what the host's `collect_garbage` does during a run.
 fn request_gc(vm: &mut Vm, _a: &CallArgs) -> JsResult<VmValue> {
     vm.collect_garbage();
@@ -64,6 +69,7 @@ fn engine(stress_every: u32) -> Vm {
     for (name, f, n) in [
         ("liveObjects", live_objects as fn(&mut Vm, &CallArgs) -> JsResult<VmValue>, 0),
         ("gcCount", gc_count, 0),
+        ("retainedBytes", retained_bytes, 0),
         ("requestGc", request_gc, 0),
         ("holdAcross", hold_across, 2),
     ] {
@@ -457,6 +463,66 @@ fn generator_and_async_resumption_from_natives_keeps_values_across_allocation() 
         );
         assert_eq!(run(&mut vm, "out"), Value::string("a0!a1!a2!a3!a4!"), "stress={stress}");
     }
+}
+
+// ---- memory: garbage from before a free safe point is not carried into the next loop ----
+
+/// `work(n)`: `n` iterations of two objects and a two-element array, about
+/// 352 counted bytes each (TASK-100.35).
+const SIZED_WORK: &str = "var retained = -1;
+    function work(n) { let keep = 0;
+    for (let i = 0; i < n; i++) { const o = { a: i, b: [i, i + 1] }; keep += o.b.length; }
+    retained = retainedBytes(); return keep; }";
+const WORK_BYTES: usize = 352;
+
+/// Garbage a host call leaves behind, under the threshold, must not be
+/// kept by the next host call for its whole duration: the host holds
+/// only handles, so the entry safe point collects it when enough has
+/// accumulated instead of the call's loop retaining it (TASK-100.35).
+#[test]
+fn garbage_left_before_a_host_call_is_not_retained_by_the_call() {
+    let mut vm = engine(0);
+    run(&mut vm, SIZED_WORK);
+    let threshold = vm.heap.gc_threshold;
+    let realm = vm.main_realm();
+    let global = vm.global_object(realm).unwrap();
+    let work = Engine::get(&mut vm, realm, &global, &PropertyKey::from("work")).unwrap();
+    // Three quarters of a threshold of garbage, then a call that allocates
+    // enough to collect inside it.
+    let before = (threshold * 3 / 4 / WORK_BYTES) as f64;
+    let inside = (threshold * 5 / 2 / WORK_BYTES) as f64;
+    Engine::call(&mut vm, realm, &work, &Value::Undefined, &[Value::Number(before)]).unwrap();
+    let count = vm.gc_count;
+    Engine::call(&mut vm, realm, &work, &Value::Undefined, &[Value::Number(inside)]).unwrap();
+    assert!(vm.gc_count > count, "no collection inside the second call");
+    let retained = num(run(&mut vm, "retained")) as usize;
+    assert!(
+        retained < threshold / 8,
+        "the second host call retained {retained} bytes of the first call's garbage (threshold {threshold})"
+    );
+}
+
+/// The same between promise jobs: the job boundary is a free safe point,
+/// so a job's garbage is collected there rather than kept by the next
+/// job's loop.
+#[test]
+fn garbage_left_before_a_job_is_not_retained_by_the_job() {
+    let mut vm = engine(0);
+    run(&mut vm, SIZED_WORK);
+    let threshold = vm.heap.gc_threshold;
+    let before = threshold * 3 / 4 / WORK_BYTES;
+    let inside = threshold * 5 / 2 / WORK_BYTES;
+    run(
+        &mut vm,
+        &format!("var count = -1; Promise.resolve().then(() => work({before})).then(() => {{ count = gcCount(); work({inside}); }});"),
+    );
+    let count = num(run(&mut vm, "count"));
+    assert!(count >= 0.0 && vm.gc_count as f64 > count, "no collection inside the second job");
+    let retained = num(run(&mut vm, "retained")) as usize;
+    assert!(
+        retained < threshold / 8,
+        "the second job retained {retained} bytes of the first job's garbage (threshold {threshold})"
+    );
 }
 
 #[test]

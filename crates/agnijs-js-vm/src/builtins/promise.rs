@@ -699,9 +699,15 @@ impl Vm {
         loop {
             // Between jobs is a safe point when the host drains the queue
             // (no frames, no native caller holding values in Rust locals),
-            // the one place a collection retains nothing for native frames.
+            // the one place a collection retains nothing for native frames;
+            // it collects early (`Heap::wants_free_gc`) so the next job's
+            // loop does not keep the garbage left before it.
             if self.native_depth == 0 && self.frames.is_empty() {
-                self.maybe_collect();
+                if self.heap.wants_free_gc() {
+                    self.collect();
+                } else {
+                    self.maybe_collect();
+                }
             }
             let Some(job) = self.jobs.pop_front() else { break };
             n += 1;

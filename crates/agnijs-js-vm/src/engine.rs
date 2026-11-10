@@ -462,10 +462,12 @@ impl Vm {
     /// is turned into an unrooted VM value: only the host's handles are
     /// live, so this collection retains nothing for native frames (inside
     /// the call, the collector keeps what the frames under it may hold).
+    /// It runs early, at half the threshold (`Heap::wants_free_gc`), so
+    /// the call's loop does not keep the garbage left before it.
     fn host_call_safe_point(&mut self) {
         if self.native_depth == 0
             && self.frames.is_empty()
-            && (self.gc_requested || self.exit_gc_due() || self.heap.wants_gc())
+            && (self.gc_requested || self.exit_gc_due() || self.heap.wants_gc() || self.heap.wants_free_gc())
         {
             self.handles.reclaim();
             self.collect();
