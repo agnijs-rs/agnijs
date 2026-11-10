@@ -15,7 +15,7 @@ jit = ["agnijs-js-vm/jit"]
 [dependencies]
 agnijs-engine-api.workspace = true
 agnijs-engine-quickjs.workspace = true
-agnijs-js-vm.workspace = true
+agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl"] }
 serde.workspace = true
 serde_json.workspace = true
 clap.workspace = true

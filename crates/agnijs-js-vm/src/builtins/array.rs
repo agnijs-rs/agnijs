@@ -1232,6 +1232,12 @@ fn proto_splice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = this_obj(vm, a)?;
+    // ECMA-402 forwards locales and options to each element; ECMA-262
+    // alone passes no arguments.
+    #[cfg(feature = "intl")]
+    let args = [a.arg(0), a.arg(1)];
+    #[cfg(not(feature = "intl"))]
+    let args: [Value; 0] = [];
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
@@ -1241,7 +1247,7 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let key = vm.number_key(k);
         let v = vm.get(o, key)?;
         if !v.is_nullish() {
-            let r = vm.invoke_str(v, "toLocaleString", &[a.arg(0), a.arg(1)])?;
+            let r = vm.invoke_str(v, "toLocaleString", &args)?;
             let s = vm.to_string(r)?;
             let u = vm.heap.units(s);
             b.push_units(&u);

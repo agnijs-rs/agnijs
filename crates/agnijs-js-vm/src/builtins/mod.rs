@@ -12,6 +12,7 @@ pub mod error;
 pub mod function;
 pub mod generator;
 pub mod global;
+#[cfg(feature = "intl")]
 pub mod intl;
 pub mod iterator;
 pub mod iterator_helpers;
@@ -61,6 +62,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     collections::install(vm, realm);
     date::install(vm, realm);
     typedarray::install(vm, realm);
+    #[cfg(feature = "intl")]
     intl::install(vm, realm);
     global::install(vm, realm);
 }

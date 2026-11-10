@@ -8,6 +8,12 @@ repository.workspace = true
 description = "agnijs-js-test262"
 
 [features]
+default = ["intl", "linear-regex"]
+# The engine's ECMA-402. Without it (`--no-default-features --features
+# linear-regex`) the main suite runs against the same baseline; intl402
+# needs it (docs/binary-size.md).
+intl = ["agnijs-js-vm/intl"]
+linear-regex = ["agnijs-js-vm/linear-regex"]
 # Build the engine with the baseline JIT; AGNIJS_JIT picks when it runs.
 jit = ["agnijs-js-vm/jit"]
 

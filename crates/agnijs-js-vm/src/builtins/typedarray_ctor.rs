@@ -1111,6 +1111,12 @@ fn proto_subarray(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = validate_typed_array(vm, a.this, "toLocaleString")?;
+    // ECMA-402 forwards locales and options to each element; ECMA-262
+    // alone passes no arguments.
+    #[cfg(feature = "intl")]
+    let args = [a.arg(0), a.arg(1)];
+    #[cfg(not(feature = "intl"))]
+    let args: [Value; 0] = [];
     let mut b = StrBuilder::new();
     for k in 0..len {
         if k > 0 {
@@ -1118,7 +1124,7 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         let v = elem(vm, o, k);
         if !v.is_nullish() {
-            let r = vm.invoke_str(v, "toLocaleString", &[a.arg(0), a.arg(1)])?;
+            let r = vm.invoke_str(v, "toLocaleString", &args)?;
             let s = vm.to_string(r)?;
             let u = vm.heap.units(s);
             b.push_units(&u);

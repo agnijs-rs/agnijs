@@ -14,6 +14,12 @@ name = "agnijs_capi"
 crate-type = ["cdylib", "staticlib", "rlib"]
 
 [features]
+# The engine's own features, passed through: a C embedder can build the
+# library without Intl (`--no-default-features --features linear-regex`,
+# docs/binary-size.md).
+default = ["intl", "linear-regex"]
+intl = ["agnijs-js-vm/intl"]
+linear-regex = ["agnijs-js-vm/linear-regex"]
 # Exports `agnijs_test_inject_panic`, which forces a panic inside a named
 # entry point so tests can prove the panic is caught (TASK-103.3). Never
 # enable it in a shipped library.

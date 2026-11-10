@@ -106,7 +106,11 @@ fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let x = this_number_value(vm, a.this)?;
-    super::intl::numberformat::to_locale_string(vm, Value::Number(x), a.arg(0), a.arg(1))
+    #[cfg(feature = "intl")]
+    return super::intl::numberformat::to_locale_string(vm, Value::Number(x), a.arg(0), a.arg(1));
+    // Without ECMA-402, ToString (ECMA-262 leaves the form open).
+    #[cfg(not(feature = "intl"))]
+    Ok(Value::String(vm.to_string(Value::Number(x))?))
 }
 
 fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

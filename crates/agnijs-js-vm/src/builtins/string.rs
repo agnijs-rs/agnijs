@@ -405,23 +405,27 @@ fn proto_to_well_formed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn proto_locale_compare(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "localeCompare")?;
     let that = vm.to_string(a.arg(0))?;
+    #[cfg(feature = "intl")]
     return super::intl::collator::locale_compare(vm, Value::String(s), Value::String(that), a.arg(1), a.arg(2));
-    #[allow(unreachable_code)]
-    // Compare by code point after NFC normalisation would be ideal; we
-    // compare canonical forms by code unit, which is a consistent total order.
-    let su = units_of(vm, s);
-    let tu = units_of(vm, that);
-    let su = normalize_units(&su, "NFC");
-    let tu = normalize_units(&tu, "NFC");
-    let a_cp: Vec<u32> = code_points(&su);
-    let b_cp: Vec<u32> = code_points(&tu);
-    Ok(Value::Number(match a_cp.cmp(&b_cp) {
-        std::cmp::Ordering::Less => -1.0,
-        std::cmp::Ordering::Equal => 0.0,
-        std::cmp::Ordering::Greater => 1.0,
-    }))
+    // Without ECMA-402: the code points of the NFC forms, a consistent
+    // total order that puts canonically equivalent strings equal.
+    #[cfg(not(feature = "intl"))]
+    {
+        let su = units_of(vm, s);
+        let tu = units_of(vm, that);
+        let su = normalize_units(&su, "NFC");
+        let tu = normalize_units(&tu, "NFC");
+        let a_cp: Vec<u32> = code_points(&su);
+        let b_cp: Vec<u32> = code_points(&tu);
+        Ok(Value::Number(match a_cp.cmp(&b_cp) {
+            std::cmp::Ordering::Less => -1.0,
+            std::cmp::Ordering::Equal => 0.0,
+            std::cmp::Ordering::Greater => 1.0,
+        }))
+    }
 }
 
+#[cfg(not(feature = "intl"))]
 fn code_points(u: &[u16]) -> Vec<u32> {
     let units = Units::Two(u);
     let mut out = Vec::with_capacity(u.len());
@@ -1216,6 +1220,7 @@ fn proto_to_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 /// ECMA-402 TransformCase: the requested locale's case mapping (the host
 /// default locale when none is given).
+#[cfg(feature = "intl")]
 fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<Value> {
     let s = this_str(vm, a, name)?;
     let requested = super::intl::abstract_ops::canonicalize_locale_list(vm, a.arg(0))?;
@@ -1226,6 +1231,13 @@ fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<V
     let u = units_of(vm, s);
     let out = agnijs_js_intl::casemap::map_utf16(&u, &tag, upper);
     Ok(vm.str_from_units(out))
+}
+
+/// Without ECMA-402: the locale-independent mapping; the locales go unread.
+#[cfg(not(feature = "intl"))]
+fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<Value> {
+    let s = this_str(vm, a, name)?;
+    Ok(case_convert(vm, s, upper))
 }
 
 fn proto_to_locale_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

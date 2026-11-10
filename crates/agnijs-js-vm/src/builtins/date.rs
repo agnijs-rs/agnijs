@@ -4,7 +4,28 @@
 //! `Host::time_zone_offset_ms`, `Host::time_zone_name`), so the engine
 //! itself knows no platform and defaults to UTC.
 
+#[cfg(feature = "intl")]
 use super::intl::datetimeformat::{Defaults, Required};
+
+/// Which toLocale*String a call is. Without the `intl` feature each is the
+/// matching ECMA-262 form (the language spec leaves them
+/// implementation-defined), so the defaults go unread.
+#[cfg(not(feature = "intl"))]
+#[derive(Clone, Copy)]
+enum Required {
+    Date,
+    Time,
+    Any,
+}
+
+#[cfg(not(feature = "intl"))]
+#[allow(dead_code)]
+#[derive(Clone, Copy)]
+enum Defaults {
+    Date,
+    Time,
+    All,
+}
 use agnijs_engine_api::RealmId;
 
 use crate::convert::Hint;
@@ -750,12 +771,29 @@ fn to_locale_time_string_m(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 /// ECMA-402 Date.prototype.toLocale*String: an invalid date is the
 /// string "Invalid Date", anything else goes through Intl.DateTimeFormat.
+#[cfg(feature = "intl")]
 fn to_locale(vm: &mut Vm, a: &CallArgs, method: &str, required: Required, defaults: Defaults) -> JsResult<Value> {
     let (_, t) = this_time_value(vm, a.this, method)?;
     if t.is_nan() {
         return Ok(vm.str("Invalid Date"));
     }
     super::intl::datetimeformat::date_to_locale_string(vm, t, a.arg(0), a.arg(1), required, defaults)
+}
+
+/// Without ECMA-402: the forms of toString, toDateString and toTimeString.
+#[cfg(not(feature = "intl"))]
+fn to_locale(vm: &mut Vm, a: &CallArgs, method: &str, required: Required, _: Defaults) -> JsResult<Value> {
+    let (_, t) = this_time_value(vm, a.this, method)?;
+    if t.is_nan() {
+        return Ok(vm.str("Invalid Date"));
+    }
+    let local = local_time(vm, t);
+    let s = match required {
+        Required::Any => to_date_string(vm, t),
+        Required::Date => date_string(local),
+        Required::Time => format!("{}{}", time_string(local), time_zone_string(vm, t)),
+    };
+    Ok(vm.str(&s))
 }
 
 fn this_time_value(vm: &mut Vm, this: Value, method: &str) -> JsResult<(ObjId, f64)> {

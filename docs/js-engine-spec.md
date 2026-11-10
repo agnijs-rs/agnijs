@@ -22,7 +22,7 @@ The maintainer cannot test on macOS. Everything is pure Rust with no platform-sp
 - Full ES2025 (ECMA-262 16th edition) plus Annex B, except `IsHTMLDDA`.
 - `eval` and `new Function` are supported, with a host switch (`HostEnsureCanCompileStrings`) that can turn them off.
 - Later editions and Stage 4 features arrive behind feature flags. Stage 3 proposals are out.
-- **Intl**: the engine implements ECMA-402 (`DateTimeFormat`, `NumberFormat`, `PluralRules`, `Collator`, `Segmenter`, `ListFormat`, `RelativeTimeFormat`, `DisplayNames`, `Locale`) and the `toLocale*` methods, on ICU4X behind a seam (ICU4X is shared with Parley, the text stack). Locale data is trimmed to the app's locales. Gable core uses `DateTimeFormat`, `NumberFormat` and `PluralRules`; those come first.
+- **Intl**: the engine implements ECMA-402 (`DateTimeFormat`, `NumberFormat`, `PluralRules`, `Collator`, `Segmenter`, `ListFormat`, `RelativeTimeFormat`, `DisplayNames`, `Locale`) and the `toLocale*` methods, on ICU4X behind a seam (ICU4X is shared with Parley, the text stack). Locale data can be trimmed to the app's locales, and Intl can be left out altogether (`intl` cargo feature; docs/binary-size.md). Gable core uses `DateTimeFormat`, `NumberFormat` and `PluralRules`; those come first.
 - **Threads, `SharedArrayBuffer` and `Atomics`**: an engine instance is single-threaded with its own heap. test262's multi-agent tests need several agents sharing a buffer, so they are listed in the exclusions file with that reason. Multi-agent support (shared backing stores) is a later milestone. `SharedArrayBuffer` and `Atomics` single-agent behaviour is implemented.
 
 ## 3. Execution model

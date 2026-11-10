@@ -8,7 +8,13 @@ repository.workspace = true
 description = "The AgniJS JavaScript virtual machine: interpreter, object model, heap and GC, built-ins"
 
 [features]
-default = ["linear-regex"]
+default = ["linear-regex", "intl"]
+# ECMA-402 on ICU4X (agnijs-js-intl, ADR 0015). Without it there is no
+# `Intl` global, ICU4X and its locale data are not linked, and the
+# locale-sensitive methods (toLocaleString, localeCompare,
+# toLocale{Upper,Lower}Case) take their plain ECMA-262 behaviour. See
+# docs/binary-size.md for what it saves.
+intl = ["dep:agnijs-js-intl"]
 # The linear-time regular-expression matcher (ADR 0013 addendum). Without
 # it every pattern backtracks, whatever Host::regex_matcher says.
 linear-regex = ["agnijs-js-regex/linear"]
@@ -29,7 +35,7 @@ agnijs-engine-api.workspace = true
 agnijs-js-parser.workspace = true
 agnijs-js-compiler.workspace = true
 agnijs-js-regex.workspace = true
-agnijs-js-intl.workspace = true
+agnijs-js-intl = { workspace = true, optional = true }
 agnijs-js-debugger.workspace = true
 agnijs-js-jit = { workspace = true, optional = true }
 hashbrown = "0.14"

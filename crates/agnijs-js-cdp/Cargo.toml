@@ -13,4 +13,4 @@ agnijs-js-debugger.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
-agnijs-js-vm.workspace = true
+agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl"] }

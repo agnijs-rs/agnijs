@@ -12,8 +12,8 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 
 | Suite | Result |
 | --- | --- |
-| test262, source scripts and modules | 42225 / 42225 |
-| test262, every script and module run from bytecode (`--precompile`) | 42225 / 42225 |
+| test262, source scripts and modules | 42231 / 42231 |
+| test262, every script and module run from bytecode (`--precompile`) | 42231 / 42231 |
 | test262 `intl402` (reported separately) | 981 / 981 |
 
 ## Layout
@@ -45,6 +45,10 @@ cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --
 cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-intl402
 node scripts/check-licenses.mjs                                                       # dependency license check
 ```
+
+## Features and binary size
+
+`agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3 MB instead of about 20 MB, stripped. A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.
 
 Rust 1.85 or newer. Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
 

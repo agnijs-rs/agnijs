@@ -183,6 +183,60 @@ jobs:
       - run: cargo miri setup
       - run: cargo miri test --locked -p agnijs-capi --lib miri_
 
+  size-profiles:
+    # The smaller builds docs/binary-size.md documents (TASK-103.5): the
+    # engine without Intl, and with ICU4X data trimmed to a locale list,
+    # each against its baselines; the wasm32 build; and the size report.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: size-profiles
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: No Intl, the feature test and the C API tests
+        run: |
+          cargo test --locked -p agnijs-js-vm --no-default-features --features linear-regex --test intl_feature
+          cargo test --locked -p agnijs-capi --no-default-features --features linear-regex
+      - name: Cache test262 at the pinned commit
+        uses: actions/cache@v4
+        with:
+          path: test262
+          key: test262-${{ hashFiles('crates/agnijs-js-test262/PIN') }}
+      - run: cargo run --release -p agnijs-js-test262 --bin test262 -- fetch
+      - name: No Intl, test262 against the main baseline (scripts and bytecode)
+        run: |
+          cargo run --release --locked -p agnijs-js-test262 --no-default-features --features linear-regex --bin test262 -- run --engine agnijs
+          cargo run --release --locked -p agnijs-js-test262 --no-default-features --features linear-regex --bin test262 -- run --engine agnijs --precompile
+      - name: Cache icu4x-datagen
+        id: datagen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/icu4x-datagen
+          key: icu4x-datagen-2.4.0-unstable
+      - if: steps.datagen.outputs.cache-hit != 'true'
+        run: cargo install icu4x-datagen --version 2.4.0 --locked --features unstable
+      - name: Trimmed Intl data (en, de, no segmenter models)
+        run: node crates/agnijs-js-intl/tools/gen-icu4x-data.js --out "$RUNNER_TEMP/icu-en-de" --locales en,de --segmenter-models none
+      - name: Trimmed Intl data, the feature test and test262 against the main baseline
+        env:
+          ICU4X_DATA_DIR: ${{ runner.temp }}/icu-en-de
+        run: |
+          cargo test --locked -p agnijs-js-vm --test intl_feature
+          cargo run --release --locked -p agnijs-js-test262 --bin test262 -- run --engine agnijs
+      - name: wasm32 builds, with and without Intl
+        run: |
+          cargo build --locked --release -p agnijs-js-vm --example size_probe --target wasm32-unknown-unknown
+          cargo build --locked --release -p agnijs-js-vm --example size_probe --target wasm32-unknown-unknown --no-default-features --features linear-regex
+      - name: Size report
+        run: node scripts/size-report.mjs --wasm --data "en, de, no segmenter models=$RUNNER_TEMP/icu-en-de" | tee -a "$GITHUB_STEP_SUMMARY"
+
   standalone:
     # The engine must build and test with nothing else beside it (ADR 0016):
     # export only the tracked files into an empty directory outside the

@@ -439,6 +439,7 @@ impl Class {
             Class::Promise(p) => p.trace(t),
             Class::RegExp(r) => r.trace(t),
             Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m.trace(t),
+            #[cfg(feature = "intl")]
             Class::Intl(d) => d.trace(t),
             Class::MapIterator(i) | Class::SetIterator(i) => t.opt_obj(i.target),
             Class::WeakRef(v) => {

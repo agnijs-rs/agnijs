@@ -431,6 +431,7 @@ pub enum Class {
     WrapForValidIterator(Box<IteratorRecord>),
     Host(Box<HostObjectData>),
     /// An ECMA-402 service object (`Intl.NumberFormat` and friends).
+    #[cfg(feature = "intl")]
     Intl(Box<crate::builtins::intl::IntlData>),
 }
 

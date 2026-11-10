@@ -28,7 +28,9 @@ agnijs-engine-api = { path = "crates/agnijs-engine-api" }
 agnijs-engine-quickjs = { path = "crates/agnijs-engine-quickjs" }
 agnijs-js-parser = { path = "crates/agnijs-js-parser" }
 agnijs-js-compiler = { path = "crates/agnijs-js-compiler" }
-agnijs-js-vm = { path = "crates/agnijs-js-vm" }
+# No default features: each member names the engine features it needs, so
+# the test262 runner can build the engine without Intl (docs/binary-size.md).
+agnijs-js-vm = { path = "crates/agnijs-js-vm", default-features = false }
 # No default features: the engine crate (agnijs-js-vm) decides whether the
 # linear-time matcher is compiled in.
 agnijs-js-regex = { path = "crates/agnijs-js-regex", default-features = false }
@@ -53,3 +55,13 @@ foldhash = "0.2"
 
 [profile.release]
 debug = 1
+
+# What docs/binary-size.md measures and what a size-conscious embedder
+# ships: the release build stripped, with whole-program LTO. Unwinding
+# stays on, so a C API's catch_unwind still turns a panic into an error.
+[profile.size]
+inherits = "release"
+debug = 0
+strip = "symbols"
+lto = "fat"
+codegen-units = 1
