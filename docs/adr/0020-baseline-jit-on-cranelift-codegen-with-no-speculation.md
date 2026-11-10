@@ -39,9 +39,9 @@ The backend was checked against the repository's rules:
 | Feature-off cost | None. The tiering state (`Feedback::tier`) exists only under `agnijs-js-compiler/tier`, which `jit` enables, and every hook in the dispatch loop is `cfg`-gated. A full `bench run` without the feature matches the pre-JIT build within noise when both are built from the same path. Builds from different checkout paths differ by up to 10% on the call workloads, through code layout alone. |
 | Toolchain | Cranelift 0.137 needs Rust 1.97. The crate declares that version, and the rest of the workspace keeps its own minimum because the crate is optional. |
 | WASM, iOS, other architectures | `build.rs` sets `cfg(jit_host)` only for x86-64 and AArch64 on Windows, Linux, macOS and Android. Cranelift is a dependency only on those targets, through the same target table. Elsewhere the crate builds without a code generator, `available()` is false, and `compile` returns an error, so the interpreter runs. The wasm32 target is not installed on the build machine, so the wasm32 build was not checked here; CI should add a `cargo check --target wasm32-unknown-unknown -p agnijs-js-jit`. |
-| macOS | Not yet as ADR 0019 describes. The mapping is plain `mmap` followed by `mprotect`, with no `MAP_JIT` and no `pthread_jit_write_protect_np`. Under the hardened runtime the probe fails and the interpreter runs, which is safe. Apple Silicon support with the entitlement is a follow-up. |
+| macOS | Since TASK-101.3.2, on Apple silicon, code is mapped with `MAP_JIT` and written with this thread's JIT write protection lifted (`pthread_jit_write_protect_np`); where the host has no per-thread protection (Apple silicon under virtualization, such as CI runners) the `MAP_JIT` mapping is written and then made read-execute with `mprotect`. That is what the hardened runtime with `com.apple.security.cs.allow-jit` permits. If `MAP_JIT` fails, plain `mmap` and `mprotect` are tried, and if the probe still fails the interpreter runs. `exec_memory_kind()` reports which path is in use; CI signs the JIT crate's probe test with the entitlement and checks it. Intel macOS uses `mmap` and `mprotect`. |
 
-Compile latency is small. With every eligible block forced, the benchmark workloads compile 5 to 8 blocks each in 2 to 5 ms in total (`JitStats::compile_time`), which is 0.4 to 0.6 ms and 600 to 1,300 bytes of machine code per block. In mode `On`, blocks compile only after 1000 entries and back-edges. That is far below ADR 0019's "a fifth of the gain" bar wherever there is a gain.
+Compile latency is small. With every eligible block forced, the benchmark workloads compile 5 to 8 blocks each in 2 to 5 ms in total (`JitStats::compile_time`), which is 0.4 to 0.6 ms and 600 to 1,300 bytes of machine code per block. In mode `On`, blocks compile only after 1000 entries and back-edges. That is far below ADR 0019's "a fifth of the gain" bar wherever there is a gain. (With the inline IC paths of TASK-101.3.2, blocks cost about 25 µs per instruction to compile, so mode `On` waits longer. See the addendum.)
 
 ### Design: a baseline that needs neither deoptimization nor GC maps
 
@@ -97,11 +97,70 @@ Run-to-run noise is about 2%.
 ## Consequences
 
 - The tier is correct by construction against the reference interpreter: every compiled instruction either has an inline path guarded by tags, or runs the interpreter's own code on an interpreter frame. `crates/agnijs-js-vm/tests/jit_differential.rs` and `crates/agnijs-js-bench/tests/jit_workloads.rs` compare the two modes, and the VM's full test suite and test262 pass with `AGNIJS_JIT=force`.
-- The speed-up is limited to blocks that run inline. Gains on property-heavy and call-heavy code need work that the current design rules out:
-  - inline IC hit paths in machine code, reading the object header at the ADR 0019 J5 offsets and the IC side table;
+- The speed-up is limited to blocks that run inline. Gains on property-heavy and call-heavy code need more work:
+  - inline IC hit paths in machine code, reading the object header at the ADR 0019 J5 offsets and the IC side table. Done in TASK-101.3.2 without deoptimization: every guard that fails runs the same instruction's helper at the same pc (see the addendum);
   - direct calls between compiled functions;
   - values kept in machine registers across instructions.
 
-  Each of these makes a compiled frame hold state the interpreter frame does not, or makes a guard able to fail without a generic path. So each one needs the reserved deoptimization and GC-map work first, specified in `docs/design/jit-deopt-and-gc-maps.md` with the stub interfaces in `agnijs-js-jit/src/handoff.rs`.
-- ADR 0019's "Code generator" section is refined: `cranelift-jit` is not used, and its macOS row is not yet met (no `MAP_JIT`), so macOS falls back to the interpreter.
+  The last two make a compiled frame hold state the interpreter frame does not, so they need the reserved deoptimization and GC-map work first, specified in `docs/design/jit-deopt-and-gc-maps.md` with the stub interfaces in `agnijs-js-jit/src/handoff.rs`.
+- ADR 0019's "Code generator" section is refined: `cranelift-jit` is not used. Its macOS row is met since TASK-101.3.2 (`MAP_JIT`, see the table above).
 - The JIT stays off by default, and spec section 1 ("no JIT" in the default build) still holds.
+
+## Addendum: inline IC hits and mode `On`'s tiering rules (TASK-101.3.2)
+
+### What compiles inline now
+
+With a heap layout from the VM (`HeapLayout`), compiled code runs these hits itself and calls the helper (`Runtime::slow`, same pc) on any miss:
+
+- named loads and stores, monomorphic up to the site's 4 entries: own data slots (inline and overflow), prototype data behind a shape compare plus `proto_epoch`, adding a property along a cached transition, and array `length`;
+- dense-array element loads and stores, including the append at `length`.
+
+Guards are compares of a shape id, the prototype id, the epoch and class tags. A failed guard runs the generic path in place, so nothing deoptimizes, and the frame holds nothing the interpreter's does not.
+
+The heap is read through a base address that compiled code reloads after every call out, and it never keeps a heap address in a machine register across one (invariant I3 in `docs/design/jit-deopt-and-gc-maps.md`, section 1.1). Any helper may collect, and the birth-serial scheme holds as before. Under GC stress every back-edge in compiled code also stops at a safe point (`Runtime::safe_point_due`), and `heap_values_survive_collections_at_every_call_out_from_compiled_code` runs with a collection at every one.
+
+### Tiering in mode `On`
+
+Measured, compiling costs about 25 µs per bytecode instruction (Cranelift, with about 20 IR instructions per bytecode instruction once the IC paths are expanded), which is the cost of interpreting some 10,000 instructions. Entering compiled code and leaving it for a call costs more than the interpreter's dispatch of a call: a call round trip is about 30 ns, and a call out about 11 ns more than the interpreter's own step. So mode `On` compiles a block only when all of these hold:
+
+- it has been offered 1000 times (`HOT_THRESHOLD`), and its static estimate is profitable then. The estimate now needs a loop, and costs named sites by their feedback: hits compiled code runs cost nothing, accessors count as calls;
+- it has since taken `HOT_PER_INSTRUCTION` (200) loop back-edges per instruction. Only back-edges count here, and these offers are counted inline in the dispatch loop.
+
+A compiled block is then judged as it runs, over a window that spans its runs (`JitState::judge`). It goes back to the interpreter for good (`JitStats::abandoned`) once, after 1024 back-edges or entries, its call-outs plus 20 per entry (`ENTRY_SHARE`) come to more than one per six instructions of the loop body per back-edge.
+
+### Measured
+
+Release build, i9-9900KF, Windows 11, binaries built from the same path. Each figure is the median over 5 alternating rounds of each process's median sample. Ratios are over the interpreter.
+
+`agnijs-js-bench`:
+
+| Workload | Feature off | `on` | `force` |
+| --- | --- | --- | --- |
+| loop-arith | 104.1 ms | 0.35 | 0.35 |
+| loop-array-index | 94.6 ms | 0.81 | 0.81 |
+| prop-monomorphic | 79.2 ms | 0.76 | 0.77 |
+| prop-polymorphic | 120.1 ms | 0.71 | 0.72 |
+| prop-write-alloc | 83.5 ms | 0.90 | 0.99 |
+| closures | 64.9 ms | 0.96 | 1.33 |
+| calls-recursive | 56.7 ms | 0.97 | 1.30 |
+| method-calls | 118.7 ms | 0.97 | 1.25 |
+
+All other workloads are within 1 to 3% in mode `On`. The exception is json-stringify, at 1.07: it compiles nothing, and the same binary with the JIT off is as slow, so the difference comes from code layout.
+
+Gable's benches (`run-bench.mjs`, `on` and `force` over off in the same binary):
+
+| Bench | `on` | `force` |
+| --- | --- | --- |
+| rxjs-operators | 1.012 | 1.38 |
+| rxjs-higher-order | 1.006 | 1.27 |
+| rxjs-subject-fanout | 0.996 | 1.30 |
+| signal-churn | 1.011 | 1.26 |
+| signal-create | 1.017 | 1.30 |
+| template-mount | 0.999 | 1.28 |
+| template-update | 0.991 | 1.37 |
+| list-diff | 0.996 | 1.16 |
+| ui-bundle-startup | 0.992 | 5.28 |
+
+- **Where the JIT pays:** loops of arithmetic, property access and array elements, by 1.2 to 2.9 times.
+- **Where it loses:** code dominated by calls, closures and short runs. Every call leaves compiled code and every return re-enters it. Gable's benches are all of that kind. When forced, they lose 16 to 38%, and startup loses five times over through compile time alone. Mode `On` now leaves such code to the interpreter, where it is within noise.
+- **What would change that:** compiled calls, meaning a frame push and a return in machine code, so that a call no longer leaves compiled code. That is a follow-up task. Cutting compile time, for example by sharing the IC paths as out-of-line stubs, would also let mode `On` compile sooner.
