@@ -51,6 +51,12 @@ use crate::string::Repr;
 use crate::value::{BigId, EnvId, ObjId, PropKey, PropSlot, ShapeId, StrId, SymId, Value};
 use crate::vm::{Job, Vm};
 
+/// `AGNIJS_GC_TRACE=1`: print one line per collection to stderr.
+fn gc_trace() -> bool {
+    static TRACE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TRACE.get_or_init(|| std::env::var_os("AGNIJS_GC_TRACE").is_some_and(|v| v != "0"))
+}
+
 /// Work items during marking: marked values whose references are not yet
 /// reported.
 enum Work {
@@ -530,7 +536,7 @@ impl Vm {
     /// Requested and stress collections run at once.
     #[inline]
     pub fn maybe_collect(&mut self) -> bool {
-        if self.gc_requested {
+        if self.gc_requested || self.exit_gc_due() {
             self.collect();
             return true;
         }
@@ -572,14 +578,53 @@ impl Vm {
 
     /// Run a full collection now. The caller guarantees that Rust locals
     /// hold no heap value born after `retain_from` (see the module docs).
+    /// With `AGNIJS_GC_TRACE=1` every collection prints one line to stderr.
     pub fn collect(&mut self) {
+        let trace = gc_trace();
+        let started = trace.then(std::time::Instant::now);
+        let allocated = self.heap.allocated_since_gc;
         self.gc_requested = false;
         self.gc_count += 1;
         self.regex_input_cache.clear();
         let marked = self.mark();
+        if let Some(t0) = started {
+            // Every exit frame (the one a native or the host called into)
+            // with the JS frame under it, whose instruction called that
+            // native; innermost first.
+            let stack: Vec<String> = self
+                .frames
+                .iter()
+                .enumerate()
+                .rev()
+                .filter(|(_, f)| f.exit)
+                .map(|(i, f)| {
+                    let caller = i.checked_sub(1).map(|j| &self.frames[j]).map(|c| {
+                        let (line, col) = Vm::line_col(&c.code, c.pc);
+                        format!("{}@{}:{}", c.code.name, line, col)
+                    });
+                    format!("{i}:{}>{}", caller.unwrap_or_default(), f.code.name)
+                })
+                .collect();
+            eprintln!(
+                "gc#{} depth={} run_depth={} series={:?} retain_from={} alloc_serial={} allocated={} live={} retained={} mark_us={} stack={}",
+                self.gc_count,
+                self.native_depth,
+                self.run_depth,
+                self.series,
+                self.retain_from,
+                self.heap.alloc_serial,
+                allocated,
+                self.heap.live_bytes,
+                marked.retained_bytes,
+                t0.elapsed().as_micros(),
+                stack.join(",")
+            );
+        }
         self.heap.serial_at_gc = self.heap.alloc_serial;
         self.retain_at_gc = self.retain_from;
-        self.retain_low = self.retain_from;
+        if self.exit_gc_due() {
+            self.exit_gc_at = None;
+        }
         self.heap.objects.restore_marks(marked.objs);
         self.heap.strings.restore_marks(marked.strs);
         self.heap.symbols.restore_marks(marked.syms);

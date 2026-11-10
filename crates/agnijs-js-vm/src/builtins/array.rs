@@ -447,58 +447,93 @@ fn proto_values(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     Ok(create_array_iterator(vm, o, IterKind::Values))
 }
 
+/// Keep a non-index key alive on the root stack for one iteration of a
+/// callback series (`Vm::callback_series`): past 2^32 - 2 the key is a
+/// string the native holds across the traps and getters it calls. Index
+/// keys need nothing. An early return leaves it there; the series cuts
+/// the stack back.
+fn pin_key(vm: &mut Vm, key: crate::value::PropKey) {
+    use crate::value::PropKey;
+    match key {
+        PropKey::Str(s) => vm.roots.push(Value::String(s)),
+        PropKey::Sym(s) => vm.roots.push(Value::Symbol(s)),
+        PropKey::Index(_) => {}
+    }
+}
+
+fn unpin_key(vm: &mut Vm, key: crate::value::PropKey) {
+    if !matches!(key, crate::value::PropKey::Index(_)) {
+        vm.roots.pop();
+    }
+}
+
 fn proto_every(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = this_obj(vm, a)?;
     let f = callback(vm, a.arg(0), "every")?;
     let this_arg = a.arg(1);
-    let mut k = 0.0;
-    while k < len {
-        let key = vm.number_key(k);
-        if vm.has_property(o, key)? {
-            let v = vm.get(o, key)?;
-            let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
-            if !vm.to_boolean(r) {
-                return Ok(Value::Bool(false));
+    vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
+        let mut k = 0.0;
+        while k < len {
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            if vm.has_property(o, key)? {
+                let v = vm.get(o, key)?;
+                let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+                if !vm.to_boolean(r) {
+                    return Ok(Value::Bool(false));
+                }
             }
+            unpin_key(vm, key);
+            k += 1.0;
         }
-        k += 1.0;
-    }
-    Ok(Value::Bool(true))
+        Ok(Value::Bool(true))
+    })
 }
 
 fn proto_some(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = this_obj(vm, a)?;
     let f = callback(vm, a.arg(0), "some")?;
     let this_arg = a.arg(1);
-    let mut k = 0.0;
-    while k < len {
-        let key = vm.number_key(k);
-        if vm.has_property(o, key)? {
-            let v = vm.get(o, key)?;
-            let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
-            if vm.to_boolean(r) {
-                return Ok(Value::Bool(true));
+    vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
+        let mut k = 0.0;
+        while k < len {
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            if vm.has_property(o, key)? {
+                let v = vm.get(o, key)?;
+                let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+                if vm.to_boolean(r) {
+                    return Ok(Value::Bool(true));
+                }
             }
+            unpin_key(vm, key);
+            k += 1.0;
         }
-        k += 1.0;
-    }
-    Ok(Value::Bool(false))
+        Ok(Value::Bool(false))
+    })
 }
 
 fn proto_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = this_obj(vm, a)?;
     let f = callback(vm, a.arg(0), "forEach")?;
     let this_arg = a.arg(1);
-    let mut k = 0.0;
-    while k < len {
-        let key = vm.number_key(k);
-        if vm.has_property(o, key)? {
-            let v = vm.get(o, key)?;
-            vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+    // A callback series (see `Vm::callback_series`): between calls this
+    // holds only `o`, `f` and `this_arg`, which are rooted, and the key;
+    // the element is held only as an argument of the call in progress.
+    vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
+        let mut k = 0.0;
+        while k < len {
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            if vm.has_property(o, key)? {
+                let v = vm.get(o, key)?;
+                vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+            }
+            unpin_key(vm, key);
+            k += 1.0;
         }
-        k += 1.0;
-    }
-    Ok(Value::Undefined)
+        Ok(Value::Undefined)
+    })
 }
 
 fn proto_fill(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -520,22 +555,34 @@ fn proto_filter(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let f = callback(vm, a.arg(0), "filter")?;
     let this_arg = a.arg(1);
     let arr = array_species_create(vm, o, 0.0)?;
-    let mut k = 0.0;
-    let mut to = 0.0;
-    while k < len {
-        let key = vm.number_key(k);
-        if vm.has_property(o, key)? {
-            let v = vm.get(o, key)?;
-            let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
-            if vm.to_boolean(r) {
-                let tk = vm.number_key(to);
-                vm.create_data_property_or_throw(arr, tk, v)?;
-                to += 1.0;
+    // Series: `arr` is created (species constructor and all) before it
+    // begins and rooted; kept elements go into `arr` before the next call.
+    vm.callback_series(&[Value::Object(o), f, this_arg, Value::Object(arr)], |vm| {
+        let mut k = 0.0;
+        let mut to = 0.0;
+        while k < len {
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            if vm.has_property(o, key)? {
+                let v = vm.get(o, key)?;
+                let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+                if vm.to_boolean(r) {
+                    // `v` is held across the define (a trap may run):
+                    // root it with the target key.
+                    vm.roots.push(v);
+                    let tk = vm.number_key(to);
+                    pin_key(vm, tk);
+                    vm.create_data_property_or_throw(arr, tk, v)?;
+                    unpin_key(vm, tk);
+                    vm.roots.pop();
+                    to += 1.0;
+                }
             }
+            unpin_key(vm, key);
+            k += 1.0;
         }
-        k += 1.0;
-    }
-    Ok(Value::Object(arr))
+        Ok(Value::Object(arr))
+    })
 }
 
 fn find_via_predicate(
@@ -547,18 +594,24 @@ fn find_via_predicate(
     let (o, len) = this_obj(vm, a)?;
     let f = callback(vm, a.arg(0), name)?;
     let this_arg = a.arg(1);
-    let mut i = 0.0;
-    while i < len {
-        let k = if from_end { len - 1.0 - i } else { i };
-        let key = vm.number_key(k);
-        let v = vm.get(o, key)?;
-        let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
-        if vm.to_boolean(r) {
-            return Ok((k, v));
+    // Series: the element is returned right after the call that found it,
+    // with no safe point in between.
+    vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
+        let mut i = 0.0;
+        while i < len {
+            let k = if from_end { len - 1.0 - i } else { i };
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            let v = vm.get(o, key)?;
+            let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+            if vm.to_boolean(r) {
+                return Ok((k, v));
+            }
+            unpin_key(vm, key);
+            i += 1.0;
         }
-        i += 1.0;
-    }
-    Ok((-1.0, Value::Undefined))
+        Ok((-1.0, Value::Undefined))
+    })
 }
 
 fn proto_find(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -764,17 +817,25 @@ fn proto_map(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let f = callback(vm, a.arg(0), "map")?;
     let this_arg = a.arg(1);
     let arr = array_species_create(vm, o, len)?;
-    let mut k = 0.0;
-    while k < len {
-        let key = vm.number_key(k);
-        if vm.has_property(o, key)? {
-            let v = vm.get(o, key)?;
-            let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
-            vm.create_data_property_or_throw(arr, key, r)?;
+    // Series: `arr` predates it and is rooted; each result is rooted
+    // across its define (a trap may run) and then lives in `arr`.
+    vm.callback_series(&[Value::Object(o), f, this_arg, Value::Object(arr)], |vm| {
+        let mut k = 0.0;
+        while k < len {
+            let key = vm.number_key(k);
+            pin_key(vm, key);
+            if vm.has_property(o, key)? {
+                let v = vm.get(o, key)?;
+                let r = vm.call_value(f, this_arg, &[v, Value::Number(k), Value::Object(o)])?;
+                vm.roots.push(r);
+                vm.create_data_property_or_throw(arr, key, r)?;
+                vm.roots.pop();
+            }
+            unpin_key(vm, key);
+            k += 1.0;
         }
-        k += 1.0;
-    }
-    Ok(Value::Object(arr))
+        Ok(Value::Object(arr))
+    })
 }
 
 fn proto_pop(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

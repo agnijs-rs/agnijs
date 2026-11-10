@@ -117,6 +117,26 @@ fn garbage_made_in_map_filter_reduce_and_sort_callbacks_is_collected() {
     assert_collected_under("[2, 1].sort((a, b) => { sum = work(); live = liveObjects(); return a - b; });");
 }
 
+/// Each of 150k callbacks leaves two objects behind; by the last one most
+/// of the earlier callbacks' garbage must be gone, not kept for the frame
+/// of the native that is still looping (a callback series).
+#[test]
+fn garbage_of_earlier_callbacks_is_collected_during_later_ones() {
+    const BODY: &str = "{ var o = { a: i, b: [i] }; sum += o.b.length * 2; if (i === 149999) live = liveObjects(); }";
+    for src in [
+        format!("var a = new Array(150000).fill(0); a.forEach((_, i) => {BODY});"),
+        format!("var a = new Array(150000).fill(0); a.map((_, i) => {BODY});"),
+        format!("var a = new Array(150000).fill(0); a.filter((_, i) => {BODY});"),
+        format!("var a = new Array(150000).fill(0); a.some((_, i) => {BODY});"),
+        format!("var a = new Array(150000).fill(0); a.every((_, i) => {{ {BODY} return true; }});"),
+        format!("var a = new Array(150000).fill(0); a.find((_, i) => {BODY});"),
+        format!("var m = new Map(); for (var j = 0; j < 150000; j++) m.set(j, 0); m.forEach((_, i) => {BODY});"),
+        format!("var s = new Set(); for (var j = 0; j < 150000; j++) s.add(j); s.forEach((i) => {BODY});"),
+    ] {
+        assert_collected_under(&src);
+    }
+}
+
 #[test]
 fn garbage_made_in_a_replace_callback_and_a_reviver_is_collected() {
     assert_collected_under("'x'.replace(/x/, () => { sum = work(); live = liveObjects(); return 'y'; });");
@@ -234,6 +254,39 @@ fn map_filter_flatmap_and_from_keep_their_results_across_allocating_callbacks() 
          var af = Array.from(fm, s => {{ garbage(); return s.length; }});
          m.length + ':' + f.length + ':' + fm.join(',').length + ':' + af.reduce((a, b) => {{ garbage(); return a + b; }}, 0)"),
         "50:25:214:165",
+    );
+}
+
+/// The natives that run a callback series read their elements through
+/// getters, proxy traps and species constructors that run JavaScript (and
+/// so may collect) while the native holds the value it just read.
+#[test]
+fn series_natives_keep_fresh_elements_read_through_getters_traps_and_species() {
+    check(
+        &format!(
+            "{GARBAGE}
+             var arr = [1, 2, 3];
+             Object.defineProperty(arr, 1, {{ get() {{ garbage(); return {{ v: 7 }}; }} }});
+             var found = arr.find(x => (garbage(), typeof x === 'object' && x.v === 7));
+             var mapped = arr.map(x => (garbage(), typeof x === 'object' ? x.v : x));
+             var kept = arr.filter(x => (garbage(), typeof x === 'object'));
+             var seen = []; arr.forEach(x => {{ garbage(); seen.push(typeof x === 'object' ? x.v : x); }});
+             var any = arr.some(x => (garbage(), typeof x === 'object' && x.v === 7));
+             var all = arr.every(x => (garbage(), typeof x !== 'object' || x.v === 7));
+             var p = new Proxy([1, 2, 3], {{
+               has(t, k) {{ garbage(); return k in t; }},
+               get(t, k) {{ garbage(); return k === '1' ? {{ v: 9 }} : t[k]; }} }});
+             var ps = []; Array.prototype.forEach.call(p, x => {{ garbage(); ps.push(typeof x === 'object' ? x.v : x); }});
+             class Sp extends Array {{ static get [Symbol.species]() {{ garbage(); return Array; }} }}
+             var sm = Sp.from([1, 2]).map(x => (garbage(), x * 2));
+             var big = Array.prototype.findLast.call({{ length: 4294967297, 4294967296: {{ v: 5 }} }}, x => (garbage(), x && x.v === 5));
+             var ra = []; Reflect.apply(Array.prototype.forEach, arr, [x => {{ garbage(); ra.push(typeof x === 'object' ? x.v : x); }}]);
+             var bf = Array.prototype.map.bind(arr); var bm = bf(x => (garbage(), typeof x === 'object' ? x.v : x));
+             var sa = []; arr.forEach(...[x => {{ garbage(); sa.push(typeof x === 'object' ? x.v : x); }}]);
+             found.v + ':' + mapped.join() + ':' + kept.length + ':' + seen.join() + ':' + any + all + ':' + ps.join() + ':' + sm.join() + ':' + (sm instanceof Sp)
+               + ':' + big.v + ':' + ra.join() + ':' + bm.join() + ':' + sa.join()"
+        ),
+        "7:1,7,3:1:1,7,3:truetrue:1,9,3:2,4:false:5:1,7,3:1,7,3:1,7,3",
     );
 }
 

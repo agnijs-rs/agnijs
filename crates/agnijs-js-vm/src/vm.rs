@@ -307,17 +307,25 @@ pub struct Vm {
     /// it as a root, which covers everything the Rust frames under the loop
     /// can hold (see `gc.rs`). Nested loops save and restore it.
     pub retain_from: u64,
-    /// The lowest `retain_from` restored by a loop exit since the last
-    /// collection: the stack has been that shallow in between. When the
-    /// last collection retained garbage for frames that have since
-    /// returned, leaving a loop asks for the collection that frees it.
-    pub(crate) retain_low: u64,
+    /// When the last collection retained garbage for frames that have since
+    /// returned, leaving a loop asks for the collection that frees it, but
+    /// only from a loop whose `retain_from` is at most this bound: a deeper
+    /// loop would retain the same garbage again (`Vm::exit_gc_due`).
+    pub(crate) exit_gc_at: Option<u64>,
     /// `retain_from` at the last collection.
     pub(crate) retain_at_gc: u64,
     /// `retain_from` of the loop in which a threshold collection was last
     /// put off (`Vm::maybe_collect`); leaving that loop puts the threshold
     /// back.
     pub(crate) put_off_at: u64,
+    /// The callback series a native is running (`Vm::callback_series`):
+    /// its native depth and the bound the run loops it calls into retain
+    /// from (the enclosing loop's), instead of their own entry.
+    pub(crate) series: Option<(u32, u64)>,
+    /// `native_depth` when the current run loop was entered: a native at
+    /// `run_depth + 1` was called by that loop's instruction directly, with
+    /// no other Rust frame holding values in between.
+    pub(crate) run_depth: u32,
     /// Set by `CheckDerivedReturn` just before it throws: the throwing
     /// frame's own handlers are skipped once.
     pub(crate) uncatchable: bool,
@@ -443,9 +451,11 @@ impl Vm {
             host,
             native_depth: 0,
             retain_from: 0,
-            retain_low: 0,
+            exit_gc_at: None,
             retain_at_gc: 0,
             put_off_at: 0,
+            series: None,
+            run_depth: 0,
             uncatchable: false,
             current_realm: RealmId(0),
             names,
@@ -909,6 +919,13 @@ impl Vm {
         self.heap.attention |= crate::heap::ATTENTION_GC;
     }
 
+    /// A collection asked for by a loop exit is due at this safe point:
+    /// the current loop retains no more than the loop that asked.
+    #[inline]
+    pub(crate) fn exit_gc_due(&self) -> bool {
+        matches!(self.exit_gc_at, Some(at) if self.retain_from <= at)
+    }
+
     /// Recompute the attention word (`Heap::attention`, ADR 0019 J7) from
     /// its sources.
     pub(crate) fn refresh_attention(&mut self) {
@@ -918,11 +935,43 @@ impl Vm {
         }
         if self.heap.stress
             || self.gc_requested
+            || self.exit_gc_due()
             || self.heap.allocated_since_gc >= self.heap.gc_threshold
         {
             a |= crate::heap::ATTENTION_GC;
         }
         self.heap.attention = a;
+    }
+
+    /// Run `f`, a native's loop of calls back into JavaScript, as a
+    /// callback series: the run loops it enters directly retain only what
+    /// the enclosing loop retains, so a collection in one callback frees
+    /// the garbage the earlier ones left and everything else the native's
+    /// caller has dropped. `roots` are the heap values the native keeps in
+    /// its locals for the whole series; they go on the root stack
+    /// (`Vm::roots`) until `f` returns. The native promises that between
+    /// its calls it holds no other heap value except through the heap, the
+    /// arguments of the call in progress, or a value it pushed on
+    /// `Vm::roots` itself (the stack is cut back to its length at entry).
+    /// Nested series save and restore the enclosing one; deeper natives are
+    /// not covered and retain from their own entry. A series native that
+    /// was itself called by another native (`Reflect.apply`, a bound
+    /// function's target...), whose Rust frame may hold fresh values,
+    /// retains everything born before now instead of inheriting the
+    /// enclosing loop's bound.
+    pub(crate) fn callback_series<T>(&mut self, roots: &[Value], f: impl FnOnce(&mut Vm) -> T) -> T {
+        let base = self.roots.len();
+        self.roots.extend_from_slice(roots);
+        let bound = if self.native_depth == self.run_depth + 1 {
+            self.retain_from
+        } else {
+            self.heap.alloc_serial
+        };
+        let saved = self.series.replace((self.native_depth, bound));
+        let r = f(self);
+        self.series = saved;
+        self.roots.truncate(base);
+        r
     }
 
     /// Run `f` as a native frame (bounds native recursion; see

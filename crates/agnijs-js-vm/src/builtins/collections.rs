@@ -560,21 +560,25 @@ fn map_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("Map.prototype.forEach callback is not a function");
     }
     let this_arg = a.arg(1);
-    let mut i = 0;
-    loop {
-        let entry = {
-            let d = data_ref(vm, o);
-            if i >= d.entries.len() {
-                break;
+    // Series (`Vm::callback_series`): the entry is read from the map and
+    // passed straight to the call; nothing else is held between calls.
+    vm.callback_series(&[a.this, f, this_arg], |vm| {
+        let mut i = 0;
+        loop {
+            let entry = {
+                let d = data_ref(vm, o);
+                if i >= d.entries.len() {
+                    break;
+                }
+                d.entries[i]
+            };
+            i += 1;
+            if let Some((k, v)) = entry {
+                vm.call_value(f, this_arg, &[v, k, a.this])?;
             }
-            d.entries[i]
-        };
-        i += 1;
-        if let Some((k, v)) = entry {
-            vm.call_value(f, this_arg, &[v, k, a.this])?;
         }
-    }
-    Ok(Value::Undefined)
+        Ok(Value::Undefined)
+    })
 }
 
 fn create_map_iterator(vm: &mut Vm, o: ObjId, kind: IterKind, set: bool) -> Value {
@@ -713,21 +717,24 @@ fn set_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("Set.prototype.forEach callback is not a function");
     }
     let this_arg = a.arg(1);
-    let mut i = 0;
-    loop {
-        let entry = {
-            let d = data_ref(vm, o);
-            if i >= d.entries.len() {
-                break;
+    // Series, as for Map.prototype.forEach.
+    vm.callback_series(&[a.this, f, this_arg], |vm| {
+        let mut i = 0;
+        loop {
+            let entry = {
+                let d = data_ref(vm, o);
+                if i >= d.entries.len() {
+                    break;
+                }
+                d.entries[i]
+            };
+            i += 1;
+            if let Some((k, _)) = entry {
+                vm.call_value(f, this_arg, &[k, k, a.this])?;
             }
-            d.entries[i]
-        };
-        i += 1;
-        if let Some((k, _)) = entry {
-            vm.call_value(f, this_arg, &[k, k, a.this])?;
         }
-    }
-    Ok(Value::Undefined)
+        Ok(Value::Undefined)
+    })
 }
 
 fn set_entries(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

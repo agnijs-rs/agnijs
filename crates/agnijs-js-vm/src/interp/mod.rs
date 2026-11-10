@@ -161,16 +161,31 @@ impl Vm {
     /// collection that frees it.
     fn run(&mut self) -> JsResult<RunOutcome> {
         let saved = self.retain_from;
+        let saved_depth = self.run_depth;
+        self.run_depth = self.native_depth;
         if self.native_depth > 0 {
-            self.retain_from = self.heap.alloc_serial;
+            self.retain_from = match self.series {
+                // Called directly by the native running the series.
+                Some((depth, from)) if depth + 1 == self.native_depth => from,
+                _ => self.heap.alloc_serial,
+            };
+            if self.exit_gc_at.is_some() {
+                // A pending exit collection is not due in here: keep the
+                // fast path.
+                self.refresh_attention();
+            }
         }
         let r = self.run_loop();
         self.retain_from = saved;
-        if saved < self.retain_low {
-            self.retain_low = saved;
-            if self.heap.retained_bytes != 0 && saved < self.retain_at_gc {
-                self.request_gc();
-            }
+        self.run_depth = saved_depth;
+        if self.heap.retained_bytes != 0
+            && saved < self.retain_at_gc
+            && self.exit_gc_at.map_or(true, |at| saved < at)
+        {
+            // The last collection kept garbage for the loop that just ended:
+            // collect from here or an enclosing loop, not a deeper one.
+            self.exit_gc_at = Some(saved);
+            self.heap.attention |= crate::heap::ATTENTION_GC;
         }
         if self.heap.gc_threshold != self.heap.gc_threshold_base && saved < self.put_off_at {
             // The loop a collection was put off for has ended: collect at

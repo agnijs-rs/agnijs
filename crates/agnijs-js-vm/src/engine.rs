@@ -461,7 +461,10 @@ impl Vm {
     /// live, so this collection retains nothing for native frames (inside
     /// the call, the collector keeps what the frames under it may hold).
     fn host_call_safe_point(&mut self) {
-        if self.native_depth == 0 && self.frames.is_empty() && (self.gc_requested || self.heap.wants_gc()) {
+        if self.native_depth == 0
+            && self.frames.is_empty()
+            && (self.gc_requested || self.exit_gc_due() || self.heap.wants_gc())
+        {
             self.handles.reclaim();
             self.collect();
         }
