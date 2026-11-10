@@ -1,11 +1,11 @@
 ---
 id: TASK-100.1
 title: 'Engine M0: workspace, engine interface, test262 runner and CI'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-07T22:36:00Z'
-updated_date: '2026-11-07T23:39:00Z'
+updated_date: '2026-11-10T04:37:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -23,11 +23,11 @@ Everything later is measured by test262 and built against the engine interface, 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Cargo workspace under native/engine/ with the crates in spec section 10 builds on Windows, macOS and Linux in CI
+- [x] #1 Cargo workspace under native/engine/ with the crates in spec section 10 builds on Windows, macOS and Linux in CI
 - [x] #2 gable-engine-api defines the engine interface (spec section 7) with a conformance test kit; the Rust API shapes are recorded in an ADR
 - [x] #3 A QuickJS-NG adapter passes the conformance kit
 - [x] #4 The test262 runner pins a commit, derives the ES2025 feature list, runs strict twice, applies the exclusions file (a missing reason is an error), reports per-directory pass rates and fails on regression against a checked-in baseline
-- [ ] #5 CI runs the runner on three OSes for pull requests touching native/engine
+- [x] #5 CI runs the runner on three OSes for pull requests touching native/engine
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -46,6 +46,8 @@ Everything later is measured by test262 and built against the engine interface, 
 M0 results (2026-11-07): workspace of ten crates builds; gable-engine-api conformance kit has 21 tests and the QuickJS-NG adapter (rquickjs 0.14 / QuickJS-NG 0.16.2) passes all of them. ADR 0005 records the API shapes. test262 runner: pin e4fbf577 (crates/gable-js-test262/PIN), ES2025 cut = features.txt Standard section minus post-es2025-features.txt (maintainer should review that list), exclusions/quickjs.txt (7 rules with reasons), strict double run, per-directory report, baseline compare. Full run under QuickJS-NG on Windows: 42196 tests, 42114 passed, 82 failed (all QuickJS-NG behaviour: Date setters with NaN, compound-assignment evaluation order, with+unscopables, growable SharedArrayBuffer, Promise.try wrapping, TLA edge cases, Annex B call-expression assignment targets), 6714 skipped by feature cut or exclusion, 41 s on 16 threads. Baseline checked in at baselines/quickjs.json. CI workflow .github/workflows/native-engine.yml (ubuntu/windows/macos) is written but has not run yet: this branch has not been pushed, so AC 1 and AC 5 are verified only on Windows locally.
 
 ADR numbering: the engine-interface ADR is docs/adr/0006 (0005 was taken by the renderer ADR created in parallel).
+
+Closeout verification (2026-11-10, read-only against main b57006f and GitHub Actions history). AC #1: the workspace was relocated from native/engine/ to the repository root by TASK-100.12 (ADR 0016, spec section 10 now says so); it holds all ten spec crates (renamed agnijs-*) plus agnijs-js-bench, and the CI run 42700302525 on main built and tested it with build-test green on ubuntu, windows and macos (also standalone, miri, sanitizers, licenses, gc-stress). AC #5: .github/workflows/ci.yml runs on every pull_request and on push to main, in a three-OS matrix, and executes the test262 runner (QuickJS-NG baseline, AgniJS baseline, precompiled, intl402, parse-only); in run 42700302525 those steps all concluded success on each OS build-test job. The path filter 'touching native/engine' no longer applies because the engine is the whole repository. The earlier M0 risk (CI never run) is resolved. The post-es2025-features.txt maintainer review noted in the original summary is not an acceptance criterion and is not covered here.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

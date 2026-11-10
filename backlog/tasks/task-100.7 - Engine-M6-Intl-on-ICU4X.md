@@ -4,7 +4,7 @@ title: 'Engine M6: Intl on ICU4X'
 status: In Progress
 assignee: []
 created_date: '2026-11-07T22:36:00Z'
-updated_date: '2026-11-08T22:06:00Z'
+updated_date: '2026-11-10T04:37:00Z'
 labels:
   - ready-for-agent
 dependencies:
@@ -35,6 +35,8 @@ Decisions (ADR 0015): ICU4X 2.4 behind the gable-js-intl seam; VM does the ECMA-
 Verification: intl402 981 passed / 0 failed (12 reasoned exclusions in exclusions/gable.txt: 8 flexible day period tests (ICU4X 2.4 has no CLDR B), DurationFormat (post-ES2025), Collator/usage-de (no German search tailoring), PluralRules plural-categories-order (no gv data), DateTimeFormat/format/numbering-system.js (expectation hard-codes U+0020 for U+202F)). Main suite 42225/42225 with 0 regressions. cargo test for gable-js-intl, gable-js-vm and gable-js-test262 green.
 
 AC #1 left unchecked on purpose: the seam exists and the crate-owned CLDR tables are trimmed to a configured locale list, but ICU4X's own compiled data is still the crate-default set. Trimming it to application locales needs an icu4x-datagen custom baked-data crate behind the same seam; follow-up.
+
+Closeout check (2026-11-10): AC #1 re-verified as still NOT met. crates/agnijs-js-intl/Cargo.toml uses icu_provider with the baked feature on the crate-default compiled data, and ADR 0015 (Consequences) states the datagen-built custom baked-data crate trimmed to configured app locales is a planned follow-up. Missing: an icu4x-datagen baked-data crate behind the seam, a configurable app-locale list driving it, and evidence that the shipped data contains only those locales. Task stays In Progress.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
