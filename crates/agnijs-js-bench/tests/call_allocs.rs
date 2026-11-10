@@ -50,6 +50,9 @@ fn allocs() -> u64 {
 fn engine() -> (Vm, RealmId) {
     let mut vm = Vm::new(TestHost::new());
     Vm::create_realm(&mut vm);
+    // This counts the calls' allocations; a collection per safe point
+    // (AGNIJS_GC_STRESS) would count the collector's instead.
+    vm.heap.stress = false;
     let realm = vm.main_realm();
     (vm, realm)
 }

@@ -14,6 +14,9 @@ use agnijs_js_vm::Vm;
 fn garbage_made_by_promise_jobs_is_collected_while_the_queue_drains() {
     let mut vm = Vm::new(TestHost::new());
     Vm::create_realm(&mut vm);
+    // A pacing test: under AGNIJS_GC_STRESS the 6M allocations below would
+    // mean 6M collections (gc_native_frames covers jobs under stress).
+    vm.heap.stress = false;
     let realm = vm.main_realm();
     // 3000 jobs, each leaving about 2000 dead objects behind.
     let src = "var n = 0;
@@ -42,6 +45,7 @@ fn garbage_made_by_promise_jobs_is_collected_while_the_queue_drains() {
 fn garbage_made_by_host_calls_is_collected_between_calls() {
     let mut vm = Vm::new(TestHost::new());
     Vm::create_realm(&mut vm);
+    vm.heap.stress = false; // the loop below switches stress on for a few calls
     let realm = vm.main_realm();
     let src = "var kept = [];
          function tick(k) {

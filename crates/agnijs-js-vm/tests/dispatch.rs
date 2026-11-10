@@ -102,6 +102,7 @@ fn stress_mode_switched_on_after_creation_collects_at_safe_points() {
     eval(&mut vm, realm, "function work() { var s = 0; for (var i = 0; i < 300; i++) s += i; return s; }");
     let before = vm.gc_count;
     vm.heap.stress = true;
+    vm.heap.stress_every = 1; // not the AGNIJS_GC_STRESS period: every safe point
     assert_eq!(eval(&mut vm, realm, "work()"), Value::Number(44850.0));
     vm.heap.stress = false;
     assert!(
