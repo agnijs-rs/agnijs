@@ -29,14 +29,35 @@
 //! born before the innermost such bound as a root, tracing it like any
 //! other. Values born inside the loop reach Rust only when the loop
 //! returns, after which the next loop entry covers them. So no built-in
-//! roots its locals by hand, the collector stays precise and non-moving,
-//! and nothing scans the Rust stack (ADR 0019 J6). Frames in the same loop
-//! hold nothing across a safe point by construction: the dispatch loop
-//! writes its state back before one. What the retention keeps that no
-//! frame holds is garbage until a collection at an outer level, which a
-//! loop exit requests when the amount is not trivial; the pacing counts
-//! it out, and a collection wanted inside a loop that has allocated little
-//! of the garbage so far is put off (within a bound) for the loop to end.
+//! has to root its locals by hand, the collector stays precise and
+//! non-moving, and nothing scans the Rust stack (ADR 0019 J6). Frames in
+//! the same loop hold nothing across a safe point by construction: the
+//! dispatch loop writes its state back before one. What the retention
+//! keeps that no frame holds is garbage until a collection at an outer
+//! level, which a loop exit asks for when the amount is not trivial
+//! (`Vm::exit_gc_at`: it runs at the next safe point at or above that
+//! level, not in a deeper loop that would keep the same garbage); the
+//! pacing counts it out, and a collection wanted inside a loop that has
+//! allocated little of the garbage so far is put off (within a bound) for
+//! the loop to end.
+//!
+//! The natives that call back once per element opt out of the bound with
+//! a callback series (`Vm::callback_series`): they root what they hold on
+//! `Vm::roots` and their callbacks retain from the enclosing loop's bound,
+//! so a collection in one callback frees the earlier ones' garbage. The
+//! audit for each is at its call site; in short, between calls each holds
+//! only its receiver, callback and `thisArg` (rooted for the series), the
+//! key of the element in hand (an index, or a string rooted for the
+//! iteration), a result array made before the series (rooted), and the
+//! element or result being passed on, which lives in the arguments of the
+//! call in progress or is rooted across a define that may run a trap:
+//! `Array.prototype.forEach`, `map`, `filter`, `some`, `every`, `find`,
+//! `findIndex`, `findLast`, `findLastIndex`, `Map.prototype.forEach` and
+//! `Set.prototype.forEach`. Natives that hold a fresh value across a call
+//! (`reduce` holds the accumulator while reading the next element through
+//! a getter, `Array.from` holds the iterator result, `replace` the match)
+//! keep the plain bound. `AGNIJS_GC_TRACE=1` prints a line per collection
+//! with the depth, bounds, retained bytes and the exit frames on the stack.
 //! There is no `unsafe` code here or in the heap; the arenas are plain
 //! vectors.
 
