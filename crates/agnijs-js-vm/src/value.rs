@@ -52,22 +52,44 @@ id_type!(
 );
 
 /// A JavaScript value, or the hole.
+///
+/// The layout is defined (ADR 0019 J5, TASK-101.3): `#[repr(C, u8)]` puts
+/// a one-byte tag ([`Value::TAG_NUMBER`] and friends, the explicit
+/// discriminants below) at offset 0 and the payload at
+/// [`Value::PAYLOAD_OFFSET`] (8): an `f64` for numbers, one byte for
+/// booleans, a `u32` id for heap values. Sixteen bytes in all. Compiled
+/// code reads and writes register-file values by these numbers.
+#[repr(C, u8)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum Value {
-    Undefined,
-    Null,
-    Bool(bool),
-    Number(f64),
-    String(StrId),
-    Symbol(SymId),
-    BigInt(BigId),
-    Object(ObjId),
+    Undefined = 0,
+    Null = 1,
+    Bool(bool) = 2,
+    Number(f64) = 3,
+    String(StrId) = 4,
+    Symbol(SymId) = 5,
+    BigInt(BigId) = 6,
+    Object(ObjId) = 7,
     /// The hole: an uninitialised binding (TDZ) or a missing array element.
     /// Never observable from JavaScript.
-    Empty,
+    Empty = 8,
 }
 
 impl Value {
+    /// Offset of the tag byte.
+    pub const TAG_OFFSET: usize = 0;
+    /// Offset of the payload.
+    pub const PAYLOAD_OFFSET: usize = 8;
+    pub const TAG_UNDEFINED: u8 = 0;
+    pub const TAG_NULL: u8 = 1;
+    pub const TAG_BOOL: u8 = 2;
+    pub const TAG_NUMBER: u8 = 3;
+    pub const TAG_STRING: u8 = 4;
+    pub const TAG_SYMBOL: u8 = 5;
+    pub const TAG_BIGINT: u8 = 6;
+    pub const TAG_OBJECT: u8 = 7;
+    pub const TAG_EMPTY: u8 = 8;
+
     #[inline]
     pub fn is_undefined(self) -> bool {
         matches!(self, Value::Undefined)
