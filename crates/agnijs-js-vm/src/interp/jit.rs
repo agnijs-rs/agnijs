@@ -20,7 +20,9 @@
 //! attention word is set, and leaves for the interpreter (`Exit::Interp`)
 //! as soon as either becomes true, so the interpreter's own loop-head
 //! handling of both (ADR 0019 J7, J9) sees every instruction boundary it
-//! would have seen.
+//! would have seen. A fuel budget (TASK-103.1) is the same: it sets the
+//! attention word and keeps compiled code out, so every instruction is
+//! counted by the interpreter and the count does not depend on the tier.
 
 use std::rc::Rc;
 use std::time::Duration;
@@ -296,7 +298,7 @@ impl Vm {
             } else {
                 JitRun::NotEntered
             };
-            if self.debug_hot {
+            if self.debug_hot || self.fuel_on {
                 return idle;
             }
             let fi = self.frames.len() - 1;
@@ -622,7 +624,7 @@ impl JitRt<'_> {
     fn enter_callee(&mut self) -> Resume<Value> {
         let callee = self.fi + 1;
         let vm = &mut *self.vm;
-        if vm.debug_hot || vm.jit.nest >= MAX_NEST {
+        if vm.debug_hot || vm.fuel_on || vm.jit.nest >= MAX_NEST {
             return Resume::Exit(Exit::Frame);
         }
         let code = vm.frames[callee].code.clone();
@@ -729,6 +731,11 @@ impl JitRt<'_> {
     #[inline(never)]
     fn attention(&mut self) -> Resume<Value> {
         let vm = &mut *self.vm;
+        if vm.fuel_on {
+            // A host call set a budget: the interpreter counts from the
+            // next instruction.
+            return Resume::Exit(Exit::Interp);
+        }
         if let Err(fault) = vm.attention_slow(self.fi) {
             vm.jit.fault = Some(fault);
             return Resume::Exit(Exit::Fault);

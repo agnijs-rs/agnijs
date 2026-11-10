@@ -565,6 +565,67 @@ fn the_memory_limit_stops_runaway_allocation() {
     free_engine(e);
 }
 
+#[test]
+fn a_fuel_budget_stops_an_infinite_loop_at_the_same_instruction_every_time() {
+    let run = || {
+        let e = engine();
+        eval(e, "var n = 0");
+        let mut left = 0u64;
+        // No budget yet.
+        assert_eq!(unsafe { agnijs_get_fuel(e, &mut left) }, AGNIJS_ERR_NOT_FOUND);
+        assert_eq!(agnijs_set_fuel(e, 100_000), AGNIJS_OK);
+        let (st, _) = eval_status(e, "for (;;) n++;");
+        assert_eq!(st, AGNIJS_OUT_OF_FUEL, "{}", last_error());
+        assert_eq!(unsafe { agnijs_get_fuel(e, &mut left) }, AGNIJS_OK);
+        assert_eq!(left, 0);
+        // Spent: later calls fail too, until the budget is cleared.
+        assert_eq!(eval_status(e, "1").0, AGNIJS_OUT_OF_FUEL);
+        assert_eq!(agnijs_clear_fuel(e), AGNIJS_OK);
+        let n = eval_display(e, "n");
+        free_engine(e);
+        n
+    };
+    let first = run();
+    assert_eq!(run(), first);
+    assert_eq!(first, "12499");
+}
+
+#[test]
+fn a_random_seed_makes_math_random_repeat() {
+    let draw = |seed: u64| {
+        let e = engine();
+        assert_eq!(agnijs_set_random_seed(e, seed), AGNIJS_OK);
+        let first = eval_display(e, "[Math.random(), Math.random()].join()");
+        // Reseeding mid-run restarts the sequence.
+        assert_eq!(agnijs_set_random_seed(e, seed), AGNIJS_OK);
+        assert_eq!(eval_display(e, "[Math.random(), Math.random()].join()"), first);
+        free_engine(e);
+        first
+    };
+    assert_eq!(draw(42), draw(42));
+    assert_ne!(draw(42), draw(43));
+}
+
+#[test]
+fn a_host_function_returning_out_of_fuel_passes_it_on() {
+    unsafe extern "C-unwind" fn spent(_e: AgnijsEngine, _call: *const AgnijsCallInfo, _ud: *mut c_void, _result: *mut AgnijsValue) -> AgnijsStatus {
+        AGNIJS_OUT_OF_FUEL
+    }
+    let e = engine();
+    let r = realm(e);
+    let mut f = 0;
+    assert_eq!(
+        unsafe { agnijs_new_function(e, r, "spent".as_ptr().cast(), 5, Some(spent), ptr::null_mut(), None, &mut f) },
+        AGNIJS_OK,
+        "{}",
+        last_error()
+    );
+    set_global(e, "spent", f);
+    let (st, _) = eval_status(e, "try { spent() } catch (x) {}");
+    assert_eq!(st, AGNIJS_OUT_OF_FUEL, "{}", last_error());
+    free_engine(e);
+}
+
 unsafe extern "C-unwind" fn interrupt_after(ud: *mut c_void) -> i32 {
     let n = unsafe { &*(ud as *const RefCell<u32>) };
     *n.borrow_mut() += 1;

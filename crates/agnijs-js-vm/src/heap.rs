@@ -281,6 +281,9 @@ pub const ATTENTION_GC: u32 = 1;
 /// Attention bit: a debugger client is attached, so every instruction is a
 /// potential pause.
 pub const ATTENTION_DEBUG: u32 = 2;
+/// Attention bit: a fuel budget is set (`Vm::set_fuel`), so every
+/// instruction is charged one unit at the loop head.
+pub const ATTENTION_FUEL: u32 = 4;
 /// One dense element (a `Value`).
 pub(crate) const ELEMENT_BYTES: usize = 16;
 /// One shape-described property slot past the inline ones (a `PropSlot`).
@@ -331,7 +334,8 @@ pub struct Heap {
     /// loop must leave its fast path before the next instruction, for a
     /// collection ([`ATTENTION_GC`]: the threshold or the memory limit was
     /// reached, the host or `$262.gc()` asked, or stress mode is on) or for
-    /// the debugger ([`ATTENTION_DEBUG`]: a client is attached). It lives in
+    /// the debugger ([`ATTENTION_DEBUG`]: a client is attached) or for fuel
+    /// ([`ATTENTION_FUEL`]: a budget is set). It lives in
     /// the heap because the allocator is its most frequent setter; it is one
     /// word at a fixed offset of `Vm` all the same. `Vm::refresh_attention`
     /// recomputes it from its sources.

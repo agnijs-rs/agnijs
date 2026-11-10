@@ -54,7 +54,7 @@ Every function returns an `AgnijsStatus`. After any call, `agnijs_last_error` (c
 | Range | Meaning | Codes |
 | --- | --- | --- |
 | `0` | success | `AGNIJS_OK` |
-| positive | an outcome of running JavaScript | `AGNIJS_EXCEPTION` (take it with `agnijs_take_exception`), `AGNIJS_INTERRUPTED`, `AGNIJS_OUT_OF_MEMORY` (the engine's memory limit) |
+| positive | an outcome of running JavaScript | `AGNIJS_EXCEPTION` (take it with `agnijs_take_exception`), `AGNIJS_INTERRUPTED`, `AGNIJS_OUT_OF_MEMORY` (the engine's memory limit), `AGNIJS_OUT_OF_FUEL` (the fuel budget, ABI 1.1) |
 | negative | the call itself was wrong, or the library refused it | `NULL_POINTER`, `INVALID_ENGINE`, `WRONG_THREAD`, `INVALID_HANDLE`, `WRONG_ENGINE`, `INVALID_REALM`, `INVALID_ARGUMENT`, `INVALID_UTF8`, `TYPE_MISMATCH`, `BUSY`, `POISONED`, `PANIC`, `BYTECODE`, `HOST`, `ENGINE`, `UNSUPPORTED`, `BUFFER_TOO_SMALL`, `LIMIT`, `NOT_FOUND` |
 
 No function writes its output on failure, and outputs are checked before any work is done, so a bad output pointer leaves no side effects.
@@ -104,7 +104,7 @@ Every callback is called as `extern "C-unwind"`.
 
 - **Hooks that receive the engine may call back into it.** These are host functions, the `import.meta` hook and the rejection hook. Nesting is capped at `max_reentrancy` (default `AGNIJS_DEFAULT_MAX_REENTRANCY` = 32, at most 256). Past the cap a call gets `AGNIJS_ERR_LIMIT`.
 - **Hooks that receive no engine must not call into it.** These are module resolution and loading, console, interrupt, the clock and finalizers. Doing so gets `AGNIJS_ERR_BUSY`, as does `agnijs_engine_free` on an engine from inside its own callback. Module hooks answer through their sink: `agnijs_sink_set_string`, `agnijs_sink_set_module` or `agnijs_sink_set_error`.
-- **What a host function returns.** It returns `AGNIJS_OK` with `*result` set; leaving it unset gives `undefined`. To throw, call `agnijs_throw(e, value)` and return `AGNIJS_EXCEPTION`. Returning the `AGNIJS_EXCEPTION` a nested call gave you passes that exception on. Returning any negative status becomes a JavaScript `Error` naming the status and message. `AGNIJS_INTERRUPTED` and `AGNIJS_OUT_OF_MEMORY` propagate as themselves.
+- **What a host function returns.** It returns `AGNIJS_OK` with `*result` set; leaving it unset gives `undefined`. To throw, call `agnijs_throw(e, value)` and return `AGNIJS_EXCEPTION`. Returning the `AGNIJS_EXCEPTION` a nested call gave you passes that exception on. Returning any negative status becomes a JavaScript `Error` naming the status and message. `AGNIJS_INTERRUPTED`, `AGNIJS_OUT_OF_MEMORY` and `AGNIJS_OUT_OF_FUEL` propagate as themselves.
 - **Argument handles.** The `this` and argument values in `AgnijsCallInfo` are valid only during the call. Use `agnijs_value_dup` on any you keep, as `setTimeout` does in `timers.c`.
 - **Host functions are not constructors in ABI 1.0.** `new f()` throws a `TypeError`, and `AgnijsCallInfo.new_target` is always 0. Give a host class a constructor by wrapping a host factory in a JS function, as `classes.cpp` does.
 - **Exceptions and unwinding.** A C++ exception must not leave a callback. Catch everything and turn it into `agnijs_throw` or a status, as the wrappers in `classes.cpp` do. A Rust panic unwinding out of a callback written in Rust is caught and reported.
@@ -129,7 +129,8 @@ Free the three buffers and the value when you are done. The next API call that r
   - **Platform defaults.** The default budget suits a main thread or a 1 MiB thread. macOS secondary threads default to 512 KiB, so give them a smaller budget or a larger stack.
   - **Depth.** The depth a budget allows depends on the build: release frames are much smaller than debug ones.
   - **Nesting.** A reentrant call keeps the outer, tighter limit.
-- **Fuel.** There is no instruction-count fuel; the engine has none. Use the interrupt hook with a counter or a clock to bound running time.
+- **Fuel (ABI 1.1).** `agnijs_set_fuel(e, n)` lets JavaScript run `n` more bytecode instructions, counted across every realm and inside host callbacks. When none is left the running call returns `AGNIJS_OUT_OF_FUEL`, which JavaScript cannot catch (no `finally` runs), and every later call returns it too until the host sets a new budget or calls `agnijs_clear_fuel`. `agnijs_get_fuel` reads what is left (`AGNIJS_ERR_NOT_FOUND` when no budget is set), so a host meters one call by setting a budget before it and reading the rest after; to meter a realm on its own, give it its own engine. The count depends only on the script and the library version, so exhaustion comes at the same instruction on every run and platform. Native built-ins cost only the instruction that calls them; bound them with the memory limit and the interrupt hook. While a budget is set the JIT does not run, and a budget makes the interpreter about 1.6x slower; without one it costs nothing.
+- **Deterministic runs (ABI 1.1).** `agnijs_set_random_seed(e, seed)` seeds `Math.random` (any value, zero included; calling it again restarts the sequence). With a seed, the `now_ms` hook returning fixed times, and fuel instead of the interrupt hook, a program gives the same output on every run and platform. The C API's time zone is always UTC and its locale `en-US`. `docs/determinism.md` lists what can still vary.
 
 ## What never happens, and what still can
 

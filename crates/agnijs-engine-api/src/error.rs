@@ -43,6 +43,9 @@ pub enum Error {
     Interrupted,
     /// The memory limit was hit.
     OutOfMemory,
+    /// The fuel budget set with [`crate::Engine::set_fuel`] was spent. Like
+    /// an interrupt, JavaScript cannot catch it.
+    OutOfFuel,
     /// A handle from another engine, or an already-released slot.
     ForeignHandle,
     /// The realm id is unknown.
@@ -87,6 +90,7 @@ impl fmt::Display for Error {
             }
             Error::Interrupted => f.write_str("execution interrupted by host"),
             Error::OutOfMemory => f.write_str("memory limit exceeded"),
+            Error::OutOfFuel => f.write_str("fuel budget exhausted"),
             Error::ForeignHandle => f.write_str("handle does not belong to this engine"),
             Error::UnknownRealm => f.write_str("unknown realm"),
             Error::BytecodeMismatch { expected, found } => {

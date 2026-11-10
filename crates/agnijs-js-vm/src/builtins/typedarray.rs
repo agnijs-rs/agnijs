@@ -334,8 +334,18 @@ pub fn write_element(dst: &mut [u8], kind: ElementKind, c: Converted) {
         ElementKind::Int32 => dst.copy_from_slice(&crate::convert::f64_to_int32(n).to_le_bytes()),
         ElementKind::Uint32 => dst.copy_from_slice(&crate::convert::f64_to_uint32(n).to_le_bytes()),
         ElementKind::Float16 => dst.copy_from_slice(&f64_to_f16_bits(n).to_le_bytes()),
-        ElementKind::Float32 => dst.copy_from_slice(&(n as f32).to_le_bytes()),
-        ElementKind::Float64 => dst.copy_from_slice(&n.to_le_bytes()),
+        // NaN is stored as the one quiet NaN, whatever bits arithmetic gave
+        // it (x86 and ARM differ), so buffer bytes are the same on every
+        // platform (TASK-103.1, docs/determinism.md). The spec leaves the
+        // pattern to the implementation.
+        ElementKind::Float32 => {
+            let f = if n.is_nan() { f32::from_bits(0x7fc0_0000) } else { n as f32 };
+            dst.copy_from_slice(&f.to_le_bytes())
+        }
+        ElementKind::Float64 => {
+            let f = if n.is_nan() { f64::from_bits(0x7ff8_0000_0000_0000) } else { n };
+            dst.copy_from_slice(&f.to_le_bytes())
+        }
         ElementKind::BigInt64 | ElementKind::BigUint64 => unreachable!(),
     }
 }

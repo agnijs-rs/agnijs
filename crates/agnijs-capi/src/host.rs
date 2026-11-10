@@ -43,6 +43,7 @@ pub fn status_name(s: AgnijsStatus) -> &'static str {
         AGNIJS_EXCEPTION => "AGNIJS_EXCEPTION",
         AGNIJS_INTERRUPTED => "AGNIJS_INTERRUPTED",
         AGNIJS_OUT_OF_MEMORY => "AGNIJS_OUT_OF_MEMORY",
+        AGNIJS_OUT_OF_FUEL => "AGNIJS_OUT_OF_FUEL",
         AGNIJS_ERR_NULL_POINTER => "AGNIJS_ERR_NULL_POINTER",
         AGNIJS_ERR_INVALID_ENGINE => "AGNIJS_ERR_INVALID_ENGINE",
         AGNIJS_ERR_WRONG_THREAD => "AGNIJS_ERR_WRONG_THREAD",
@@ -288,6 +289,7 @@ fn callback_status(engine: AgnijsEngine, status: AgnijsStatus, what: &str) -> ap
         }
         AGNIJS_INTERRUPTED => Err(api::Error::Interrupted),
         AGNIJS_OUT_OF_MEMORY => Err(api::Error::OutOfMemory),
+        AGNIJS_OUT_OF_FUEL => Err(api::Error::OutOfFuel),
         other => {
             let (_, msg) = last_error();
             Err(api::Error::Host(format!("{what} failed with {} ({msg})", status_name(other))))

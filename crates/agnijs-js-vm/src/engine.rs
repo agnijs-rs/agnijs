@@ -338,6 +338,7 @@ impl Vm {
             },
             Error::Interrupted => Fault::Interrupt,
             Error::OutOfMemory => Fault::OutOfMemory,
+            Error::OutOfFuel => Fault::OutOfFuel,
             Error::ForeignHandle => self.throw_type("handle belongs to another engine"),
             Error::UnknownRealm => self.throw_type("unknown realm"),
             Error::BytecodeMismatch { expected, found } => self.throw_type(&format!(
@@ -354,6 +355,7 @@ impl Vm {
         match f {
             Fault::Interrupt => Error::Interrupted,
             Fault::OutOfMemory => Error::OutOfMemory,
+            Fault::OutOfFuel => Error::OutOfFuel,
             Fault::Throw(v) => {
                 let (name, message) = self.exception_name_message(v);
                 let stack = std::mem::take(&mut self.throw_stack);
@@ -653,6 +655,20 @@ impl Engine for Vm {
 
     fn set_memory_limit(&mut self, bytes: Option<usize>) {
         self.heap.set_memory_limit(bytes);
+    }
+
+    fn set_fuel(&mut self, fuel: Option<u64>) -> Result<(), Error> {
+        Vm::set_fuel(self, fuel);
+        Ok(())
+    }
+
+    fn fuel(&self) -> Option<u64> {
+        Vm::fuel(self)
+    }
+
+    fn set_random_seed(&mut self, seed: u64) -> Result<(), Error> {
+        Vm::set_random_seed(self, seed);
+        Ok(())
     }
 
     fn memory_usage(&mut self) -> MemoryUsage {

@@ -418,6 +418,7 @@ pub fn engine_error(e: AgnijsEngine, err: api::Error) -> Fail {
         api::Error::Exception(_) => AGNIJS_EXCEPTION,
         api::Error::Interrupted => AGNIJS_INTERRUPTED,
         api::Error::OutOfMemory => AGNIJS_OUT_OF_MEMORY,
+        api::Error::OutOfFuel => AGNIJS_OUT_OF_FUEL,
         api::Error::ForeignHandle => AGNIJS_ERR_WRONG_ENGINE,
         api::Error::UnknownRealm => AGNIJS_ERR_INVALID_REALM,
         api::Error::BytecodeMismatch { .. } | api::Error::BytecodeCorrupt(_) => AGNIJS_ERR_BYTECODE,

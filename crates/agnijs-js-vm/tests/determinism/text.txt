@@ -1,0 +1,13 @@
+aBCD
+1@1,22@3,333@6
+one|two|three|four
+STRASSE 2 ǆ FF
+2 7785
+2024
+αβγ
+no match
+a\n2b
+121abc|abc  |
+a%20b%26c%3Dd%2F%C3%A9 %E4+
+3 5
+"\u0000\u001f\ud834"

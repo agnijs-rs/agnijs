@@ -483,6 +483,57 @@ pub extern "C" fn agnijs_set_memory_limit(engine: AgnijsEngine, bytes: usize) ->
     })
 }
 
+/// Set the fuel budget: how many more bytecode instructions JavaScript may
+/// run. Every instruction costs one unit, in any realm and inside host
+/// callbacks; once none is left the running call returns
+/// `AGNIJS_OUT_OF_FUEL` (JavaScript cannot catch it), and so does every
+/// later call until a new budget is set or the budget is cleared. The
+/// count depends only on the script and the library build, so exhaustion
+/// comes at the same instruction on every run and platform. Native
+/// built-ins cost only the instruction that calls them; the memory limit
+/// and the interrupt hook bound them. ABI 1.1.
+#[no_mangle]
+pub extern "C" fn agnijs_set_fuel(engine: AgnijsEngine, fuel: u64) -> AgnijsStatus {
+    ffi("agnijs_set_fuel", || engine_op(engine, |eng| eng_res(engine, eng.set_fuel(Some(fuel)))))
+}
+
+/// Remove the fuel budget. ABI 1.1.
+#[no_mangle]
+pub extern "C" fn agnijs_clear_fuel(engine: AgnijsEngine) -> AgnijsStatus {
+    ffi("agnijs_clear_fuel", || engine_op(engine, |eng| eng_res(engine, eng.set_fuel(None))))
+}
+
+/// The fuel left. `AGNIJS_ERR_NOT_FOUND` when no budget is set. A host
+/// meters a call by setting a budget before it and reading this after.
+/// ABI 1.1.
+///
+/// # Safety
+/// `out` must be writable.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_get_fuel(engine: AgnijsEngine, out: *mut u64) -> AgnijsStatus {
+    ffi("agnijs_get_fuel", || {
+        let out = Out::new(out, "out")?;
+        match engine_op(engine, |eng| Ok(eng.fuel()))? {
+            Some(left) => {
+                out.write(left);
+                Ok(())
+            }
+            None => Err(Fail::new(AGNIJS_ERR_NOT_FOUND, "no fuel budget is set")),
+        }
+    })
+}
+
+/// Seed `Math.random`: from here on the values it gives depend only on
+/// `seed` (any value, zero included) and how many it has given, the same
+/// on every run and platform. All realms of the engine share one stream.
+/// Without a call the seed comes from the clock. For deterministic runs
+/// (`docs/determinism.md`) call it right after creating the engine and
+/// supply the `now_ms` hook. ABI 1.1.
+#[no_mangle]
+pub extern "C" fn agnijs_set_random_seed(engine: AgnijsEngine, seed: u64) -> AgnijsStatus {
+    ffi("agnijs_set_random_seed", || engine_op(engine, |eng| eng_res(engine, eng.set_random_seed(seed))))
+}
+
 /// Heap and handle statistics.
 ///
 /// # Safety

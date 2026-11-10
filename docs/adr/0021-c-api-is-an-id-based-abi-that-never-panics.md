@@ -69,7 +69,7 @@ Deep nesting in untrusted source must not overflow the host's stack either, thou
 
 **Host functions are not constructors in ABI 1.0.** The engine interface has no constructor host functions, so `new_target` is always zero, and a JS wrapper gives a host class its constructor. Adding constructor support later is an append-only change.
 
-**There is no fuel.** The engine counts no instructions. Interrupt hooks, polled while JavaScript runs, and the cross-thread interrupt request bound running time instead.
+**There is no fuel.** The engine counts no instructions. Interrupt hooks, polled while JavaScript runs, and the cross-thread interrupt request bound running time instead. (Superseded by the TASK-103.1 addendum below: ABI 1.1 adds fuel.)
 
 ## Considered options
 
@@ -85,3 +85,9 @@ Deep nesting in untrusted source must not overflow the host's stack either, thou
 - The remaining ways the process can end are outside the library: system allocation failure (Rust aborts), a calling thread with less free stack than budget plus headroom, and broken caller contracts (a pointer shorter than its length, a C++ exception thrown through a callback). They are documented in `docs/c-api.md`.
 - The stack checks are now part of the engine. New recursive paths in the parser, compiler or native built-ins should check `stack::exhausted()`, and the C API's hostile suite sweeps nesting depths to catch a missed one.
 - Bindings for other languages (Python, Go, C#) are built on this ABI, not on the Rust trait.
+
+## Addendum (TASK-103.1, 2026-11-10): fuel, ABI 1.1
+
+The engine now meters instructions (`Engine::set_fuel` and `Engine::fuel`), so the C API exposes it as a minor, additive version: `AGNIJS_ABI_VERSION_MINOR` is 1. `agnijs_set_fuel(e, n)` sets a budget of `n` bytecode instructions, `agnijs_clear_fuel` removes it and `agnijs_get_fuel` reads what is left (`AGNIJS_ERR_NOT_FOUND` with no budget). Exhaustion is a new positive status, `AGNIJS_OUT_OF_FUEL` (4): an outcome of running JavaScript like `AGNIJS_OUT_OF_MEMORY`, uncatchable by script, and returned by every later call until the budget is reset. A host function may return it to pass exhaustion on, as it may `AGNIJS_INTERRUPTED`. The budget belongs to the engine, not the realm: it spans realms, host callbacks and promise jobs, and a host meters a single call by setting a budget before it and reading `agnijs_get_fuel` after. Hosts built against 1.0 never see status 4 unless they call the new functions. Interrupt hooks stay the tool for wall-clock limits; fuel is the deterministic one.
+
+ABI 1.1 also adds `agnijs_set_random_seed`, the C side of deterministic mode (`docs/determinism.md`). It is a function rather than an `AgnijsEngineOptions` field because the options struct cannot grow without breaking 1.0 callers: `versioned` refuses a struct smaller than the library's. It also lets a host reseed in the middle of a run.

@@ -118,6 +118,13 @@ fn entry_points() -> Vec<(&'static str, Call)> {
     }));
     v.push(("agnijs_buffer_free", |c| agnijs_buffer_free(c.e, c.buffer)));
     v.push(("agnijs_set_memory_limit", |c| agnijs_set_memory_limit(c.e, 0)));
+    v.push(("agnijs_set_fuel", |c| agnijs_set_fuel(c.e, 1_000_000)));
+    v.push(("agnijs_clear_fuel", |c| agnijs_clear_fuel(c.e)));
+    v.push(("agnijs_get_fuel", |c| {
+        let mut left = 0;
+        unsafe { agnijs_get_fuel(c.e, &mut left) }
+    }));
+    v.push(("agnijs_set_random_seed", |c| agnijs_set_random_seed(c.e, 7)));
     v.push(("agnijs_memory_usage", |c| {
         let mut m = AgnijsMemoryUsage { struct_size: std::mem::size_of::<AgnijsMemoryUsage>() as u32, ..Default::default() };
         unsafe { agnijs_memory_usage(c.e, &mut m) }

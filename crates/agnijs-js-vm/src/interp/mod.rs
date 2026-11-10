@@ -358,7 +358,7 @@ impl Vm {
         loop {
             if self.heap.attention != 0 {
                 writeback!();
-                if let Err(fault) = self.attention_slow(fi) {
+                if let Err(fault) = self.attention_slow_interp(fi) {
                     fault!(fault);
                 }
                 // A debugger pause may have run code in this frame.
@@ -709,9 +709,29 @@ impl Vm {
     }
 
     /// The dispatch loop's slow path, taken before an instruction while
-    /// the attention word is non-zero: the debugger hook, a collection at
-    /// this safe point, and the memory limit. The frame has been written
-    /// back; `frames[fi].pc` is the instruction about to run.
+    /// the attention word is non-zero: the fuel charge, the debugger hook,
+    /// a collection at this safe point, and the memory limit. The frame
+    /// has been written back; `frames[fi].pc` is the instruction about to
+    /// run.
+    ///
+    /// Fuel (TASK-103.1) is charged here rather than in the loop so that
+    /// the loop without a budget is the same machine code as before fuel
+    /// existed; a budget costs this call per instruction.
+    #[cold]
+    #[inline(never)]
+    fn attention_slow_interp(&mut self, fi: usize) -> JsResult<()> {
+        if self.heap.attention == crate::heap::ATTENTION_FUEL && self.fuel != 0 {
+            // Fuel alone, with some left.
+            self.fuel -= 1;
+            return Ok(());
+        }
+        self.attention_slow(fi)?;
+        self.charge_fuel()
+    }
+
+    /// The safe point the attention word asks for, shared with compiled
+    /// code (which never runs under a fuel budget): the debugger hook, a
+    /// collection, and the memory limit.
     #[cold]
     #[inline(never)]
     fn attention_slow(&mut self, fi: usize) -> JsResult<()> {

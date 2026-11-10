@@ -27,7 +27,7 @@
 
 // ABI minor version: grows when functions, constants or trailing struct
 // fields are added.
-#define AGNIJS_ABI_VERSION_MINOR 0
+#define AGNIJS_ABI_VERSION_MINOR 1
 
 // `typeof` results from [`crate::agnijs_value_type`].
 #define AGNIJS_TYPE_UNDEFINED 0
@@ -304,6 +304,9 @@ typedef uint64_t AgnijsClass;
 // The engine's memory limit was reached.
 #define AGNIJS_OUT_OF_MEMORY 3
 
+// The fuel budget set with [`crate::agnijs_set_fuel`] is spent (ABI 1.1).
+#define AGNIJS_OUT_OF_FUEL 4
+
 // A required pointer was NULL.
 #define AGNIJS_ERR_NULL_POINTER -1
 
@@ -525,6 +528,36 @@ AgnijsStatus agnijs_buffer_free(AgnijsEngine engine, AgnijsBuffer buffer);
 // Cap the heap in bytes (0 removes the cap). Allocation beyond it fails
 // the running call with `AGNIJS_OUT_OF_MEMORY`.
 AgnijsStatus agnijs_set_memory_limit(AgnijsEngine engine, size_t bytes);
+
+// Set the fuel budget: how many more bytecode instructions JavaScript may
+// run. Every instruction costs one unit, in any realm and inside host
+// callbacks; once none is left the running call returns
+// `AGNIJS_OUT_OF_FUEL` (JavaScript cannot catch it), and so does every
+// later call until a new budget is set or the budget is cleared. The
+// count depends only on the script and the library build, so exhaustion
+// comes at the same instruction on every run and platform. Native
+// built-ins cost only the instruction that calls them; the memory limit
+// and the interrupt hook bound them. ABI 1.1.
+AgnijsStatus agnijs_set_fuel(AgnijsEngine engine, uint64_t fuel);
+
+// Remove the fuel budget. ABI 1.1.
+AgnijsStatus agnijs_clear_fuel(AgnijsEngine engine);
+
+// The fuel left. `AGNIJS_ERR_NOT_FOUND` when no budget is set. A host
+// meters a call by setting a budget before it and reading this after.
+// ABI 1.1.
+//
+// # Safety
+// `out` must be writable.
+AgnijsStatus agnijs_get_fuel(AgnijsEngine engine, uint64_t *out);
+
+// Seed `Math.random`: from here on the values it gives depend only on
+// `seed` (any value, zero included) and how many it has given, the same
+// on every run and platform. All realms of the engine share one stream.
+// Without a call the seed comes from the clock. For deterministic runs
+// (`docs/determinism.md`) call it right after creating the engine and
+// supply the `now_ms` hook. ABI 1.1.
+AgnijsStatus agnijs_set_random_seed(AgnijsEngine engine, uint64_t seed);
 
 // Heap and handle statistics.
 //

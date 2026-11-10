@@ -20,6 +20,9 @@ pub enum Fault {
     Interrupt,
     /// The memory limit was exceeded; not catchable by JavaScript.
     OutOfMemory,
+    /// The fuel budget was spent (`Vm::set_fuel`); not catchable by
+    /// JavaScript.
+    OutOfFuel,
 }
 
 pub type JsResult<T> = Result<T, Fault>;
@@ -329,6 +332,14 @@ pub struct Vm {
     /// Set by `CheckDerivedReturn` just before it throws: the throwing
     /// frame's own handlers are skipped once.
     pub(crate) uncatchable: bool,
+    /// Instructions JavaScript may still run while `fuel_on` (TASK-103.1,
+    /// `Vm::set_fuel`); the dispatch loop charges one per instruction.
+    pub(crate) fuel: u64,
+    /// A fuel budget is set; mirrored by `heap::ATTENTION_FUEL`.
+    pub(crate) fuel_on: bool,
+    /// `Math.random`'s xorshift64* state; zero until the first draw seeds
+    /// it from `Host::random_seed` (or `Vm::set_random_seed` does).
+    pub(crate) rng: u64,
     pub current_realm: RealmId,
     pub names: Names,
     pub well_known: WellKnown,
@@ -460,6 +471,9 @@ impl Vm {
             series: None,
             run_depth: 0,
             uncatchable: false,
+            fuel: 0,
+            fuel_on: false,
+            rng: 0,
             current_realm: RealmId(0),
             names,
             well_known,
@@ -918,6 +932,41 @@ impl Vm {
         Ok(())
     }
 
+    /// Set the fuel budget (TASK-103.1): how many more bytecode instructions
+    /// may be dispatched, or `None` for no budget. See
+    /// [`agnijs_engine_api::Engine::set_fuel`]. A budget raises
+    /// `ATTENTION_FUEL`, so the dispatch loop without one is unchanged and
+    /// compiled code is never entered while one is set (the count is the
+    /// interpreter's, whatever the tier).
+    pub fn set_fuel(&mut self, fuel: Option<u64>) {
+        self.fuel_on = fuel.is_some();
+        self.fuel = fuel.unwrap_or(0);
+        self.refresh_attention();
+    }
+
+    /// Reseed `Math.random` (TASK-103.1, deterministic mode); see
+    /// [`agnijs_engine_api::Engine::set_random_seed`].
+    pub fn set_random_seed(&mut self, seed: u64) {
+        self.rng = crate::builtins::math::rng_state(seed);
+    }
+
+    /// The fuel left, or `None` when no budget is set.
+    pub fn fuel(&self) -> Option<u64> {
+        self.fuel_on.then_some(self.fuel)
+    }
+
+    /// Charge the instruction about to be dispatched to the fuel budget.
+    #[inline]
+    pub(crate) fn charge_fuel(&mut self) -> JsResult<()> {
+        if self.fuel_on {
+            if self.fuel == 0 {
+                return Err(Fault::OutOfFuel);
+            }
+            self.fuel -= 1;
+        }
+        Ok(())
+    }
+
     /// Ask for a collection at the next safe point.
     pub(crate) fn request_gc(&mut self) {
         self.gc_requested = true;
@@ -937,6 +986,9 @@ impl Vm {
         let mut a = 0;
         if self.debug_hot {
             a |= crate::heap::ATTENTION_DEBUG;
+        }
+        if self.fuel_on {
+            a |= crate::heap::ATTENTION_FUEL;
         }
         if self.heap.stress
             || self.gc_requested

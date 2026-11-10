@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09T02:14:00Z'
-updated_date: '2026-11-10T16:54:00Z'
+updated_date: '2026-11-10T21:56:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -21,7 +21,7 @@ A stable C API next to the Rust one so C, C++, Swift, Go, Python, Zig and other 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A C header and static and dynamic libraries expose realm creation, script and module evaluation, values and handles, host functions and host classes, jobs and timers, limits and fuel, and bytecode load and save
+- [x] #1 A C header and static and dynamic libraries expose realm creation, script and module evaluation, values and handles, host functions and host classes, jobs and timers, limits and fuel, and bytecode load and save
 - [x] #2 A C test suite and a small non-Rust example (for example Swift or Python via ctypes) run in CI; a leak and sanitizer run is clean
 - [x] #3 An ABI and versioning policy is documented and enforced by a header-drift check
 - [x] #4 No panic can escape or abort the host: clippy denies unwrap, expect, panic, indexing and slicing in the C API crate; every extern function is wrapped in catch_unwind and maps a panic to an error result; the crate builds with panic=unwind; a fault-injection test forces panics at each entry point, and malformed input, invalid handles, double frees and use after teardown all return errors, with the process surviving and a poisoned handle failing safely
@@ -83,4 +83,6 @@ Known limits:
 - System OOM still aborts (the Rust allocator).
 - A thread with less free stack than budget plus headroom can still overflow.
 - The macOS static link libraries are as listed in c/CMakeLists.txt; CI is green with them.
+
+2026-11-10: AC1 closed by TASK-103.1. The C API now has fuel (ABI 1.1): agnijs_set_fuel, agnijs_clear_fuel, agnijs_get_fuel and status AGNIJS_OUT_OF_FUEL, plus agnijs_set_random_seed for deterministic runs. Header regenerated; covered by the C test, basics.rs and fault_injection.rs. Docs: docs/c-api.md and an ADR 0021 addendum.
 <!-- SECTION:NOTES:END -->

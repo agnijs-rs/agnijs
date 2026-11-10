@@ -68,7 +68,8 @@ Required capabilities:
 - A host-driven job queue: the engine enqueues promise jobs and the host runs them after every host task (for example, a Gable flush ends with a microtask checkpoint).
 - A promise-rejection tracker (`HostPromiseRejectionTracker`) routed to the host.
 - Host-supplied timers: the engine has no event loop and no clock-driven callbacks of its own.
-- Interrupt and memory limits.
+- Interrupt and memory limits, and an instruction fuel budget (TASK-103.1).
+- Deterministic mode: every input from outside (clock, time zone, locale, `Math.random` seed) is host-supplied, and what still varies is documented (`docs/determinism.md`).
 - Realm creation.
 - Bytecode load and save.
 - Host classes with trace hooks, and host functions callable from JS.
@@ -176,9 +177,9 @@ Later tiers (TASK-101: snapshots, a baseline JIT, an optimizing tier, AOT) are o
 | J4 | Feedback is plain data in per-`CodeBlock` side tables, indexed by a compiler-allocated slot. Entry states are explicit, and megamorphic sticks. Feedback is never serialised and belongs to one heap. |
 | J5 | Shapes are never freed while feedback or code names them. `Value` and the object header that the inline-cache hit path reads get a defined layout before TASK-101.3. No raw heap pointer outlives a runtime call. |
 | J6 | The collector is precise and non-moving. Roots are explicit, and natives and JIT helpers share one rooting mechanism. There are no stack maps and no stack scanning. Any write barrier is a single `Heap` function. |
-| J7 | One attention word (interrupt, memory limit, GC, stress, debugger), polled at function entry, back-edges and call returns. |
+| J7 | One attention word (interrupt, memory limit, GC, stress, debugger, fuel), polled at function entry, back-edges and call returns. |
 | J8 | One entry into JavaScript and one frame-push path. Arguments are a slice of the caller's register window. Faults are returned values. Generators suspend to `SavedFrame`. |
-| J9 | An attached debugger forces the interpreter. Hot update creates new code blocks and never patches code. |
+| J9 | An attached debugger or a fuel budget forces the interpreter. Hot update creates new code blocks and never patches code. |
 | J10 | `agnijs-engine-api` names no interpreter type, and the tier is an engine option. The JIT sits behind the `jit` cargo feature, off by default, in `agnijs-js-jit`, the only engine crate with `unsafe`. Runtime helpers are `extern "C"`. |
 | J11 | A realm's heap serialises as data: native functions by registry index, no shared `Rc<Cell<_>>` state, and host objects through a hook or an error. |
 

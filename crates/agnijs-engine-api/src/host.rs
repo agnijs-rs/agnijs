@@ -132,6 +132,22 @@ pub trait Host {
         }
     }
 
+    /// The seed behind `Math.random`, read once per engine, at its first
+    /// draw. The default mixes in the system clock, so sequences differ
+    /// between runs; a host that needs reproducible runs (tests, replay,
+    /// deterministic mode, docs/determinism.md) returns a fixed value.
+    /// Every `u64`, zero included, is a valid seed.
+    fn random_seed(&self) -> u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        // Distinct engines created within one clock tick still differ.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        nanos ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)
+    }
+
     /// The local time zone offset from UTC in milliseconds (positive east
     /// of Greenwich) in effect at `epoch_ms`. When `is_utc` is false the
     /// instant is given in local time (the spec's `UTC(t)` direction). The

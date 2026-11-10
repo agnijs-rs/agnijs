@@ -778,6 +778,7 @@ impl Vm {
         match fault {
             Fault::Throw(v) => v,
             Fault::Interrupt => self.make_error(crate::vm::ErrorType::Error, "interrupted"),
+            Fault::OutOfFuel => self.make_error(crate::vm::ErrorType::Error, "out of fuel"),
             Fault::OutOfMemory => {
                 self.make_error(crate::vm::ErrorType::RangeError, "out of memory")
             }

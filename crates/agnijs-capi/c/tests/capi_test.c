@@ -294,6 +294,19 @@ static void test_misuse(void) {
   CHECK(agnijs_eval_script(e, r, NULL, 0, S("let a = []; for (;;) a.push([1, 2, 3]);"), &v) == AGNIJS_OUT_OF_MEMORY);
   CHECK(agnijs_set_memory_limit(e, 0) == AGNIJS_OK);
 
+  /* A fuel budget stops a loop at the same instruction every run. */
+  uint64_t fuel = 1;
+  CHECK(agnijs_get_fuel(e, &fuel) == AGNIJS_ERR_NOT_FOUND);
+  CHECK(agnijs_eval_script(e, r, NULL, 0, S("var fuel_n = 0"), &v) == AGNIJS_OK);
+  CHECK(agnijs_value_free(e, v) == AGNIJS_OK);
+  CHECK(agnijs_set_fuel(e, 100000) == AGNIJS_OK);
+  CHECK(agnijs_eval_script(e, r, NULL, 0, S("for (;;) fuel_n++;"), &v) == AGNIJS_OUT_OF_FUEL);
+  CHECK(agnijs_get_fuel(e, &fuel) == AGNIJS_OK && fuel == 0);
+  CHECK(agnijs_clear_fuel(e) == AGNIJS_OK);
+  CHECK(agnijs_eval_script(e, r, NULL, 0, S("fuel_n"), &v) == AGNIJS_OK);
+  CHECK(agnijs_value_get_number(e, v, &n) == AGNIJS_OK && n == 12499);
+  CHECK(agnijs_value_free(e, v) == AGNIJS_OK);
+
   /* A deeply nested script fails cleanly instead of overflowing the stack. */
   size_t depth = 100000;
   char *deep = (char *)malloc(depth * 2 + 1);

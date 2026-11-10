@@ -1,0 +1,14 @@
+1,2,10,a,-1,b
+1,2,10,a,-1,b,Symbol(s)
+{"1":"one","2":"two","10":"ten","a":2,"-1":"neg","b":4}
+{| "z": [|  1,|  {|   "y": null|  }| ],| "w": " \ud800"|}
+k1=1,k3=3,k2=22,NaN=nan,0=zero
+3,2,1
+bob,eve,dan,ann,cat,fay
+10,9,B,a,aa,b,é
+-1,1,10,100,9
+constructor,m,g
+length,name,prototype,s
+c,3,a,1,b,2
+for-in y
+for-in x

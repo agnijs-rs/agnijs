@@ -1,0 +1,13 @@
+async start
+gen got 21
+gen 1 42
+sync end
+then 1
+after await 1
+caught x
+then 2
+after await 2
+all 1,2,3
+race r
+for await a
+for await b

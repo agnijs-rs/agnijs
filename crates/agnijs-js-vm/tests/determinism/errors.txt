@@ -1,0 +1,11 @@
+TypeError: Cannot read properties of null (reading 'x')
+TypeError: undefined is not a function
+TypeError: Assignment to constant variable 'c'
+RangeError: Invalid array length
+SyntaxError: JSON.parse: Expected property name at position 1
+RangeError: The number 1.5 cannot be converted to a BigInt because it is not an integer
+TypeError: Cannot convert a Symbol value to a string
+ReferenceError: x_not_defined is not defined
+undefined
+1
+7

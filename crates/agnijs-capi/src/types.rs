@@ -10,7 +10,7 @@ use std::ffi::{c_char, c_void};
 pub const AGNIJS_ABI_VERSION_MAJOR: u32 = 1;
 /// ABI minor version: grows when functions, constants or trailing struct
 /// fields are added.
-pub const AGNIJS_ABI_VERSION_MINOR: u32 = 0;
+pub const AGNIJS_ABI_VERSION_MINOR: u32 = 1;
 
 /// The result of every function that can fail. Zero is success, positive
 /// values are outcomes of running JavaScript, negative values are errors in
@@ -25,6 +25,8 @@ pub const AGNIJS_EXCEPTION: AgnijsStatus = 1;
 pub const AGNIJS_INTERRUPTED: AgnijsStatus = 2;
 /// The engine's memory limit was reached.
 pub const AGNIJS_OUT_OF_MEMORY: AgnijsStatus = 3;
+/// The fuel budget set with [`crate::agnijs_set_fuel`] is spent (ABI 1.1).
+pub const AGNIJS_OUT_OF_FUEL: AgnijsStatus = 4;
 /// A required pointer was NULL.
 pub const AGNIJS_ERR_NULL_POINTER: AgnijsStatus = -1;
 /// The engine id is unknown or the engine was freed.

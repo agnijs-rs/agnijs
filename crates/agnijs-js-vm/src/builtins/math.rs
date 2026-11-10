@@ -6,7 +6,6 @@ use crate::realm::Intrinsic;
 use crate::value::{Attrs, Value};
 use crate::vm::{JsResult, Vm};
 use agnijs_engine_api::RealmId;
-use std::cell::Cell;
 
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let math = vm.new_object();
@@ -191,26 +190,26 @@ fn math_pow(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     Ok(Value::Number(js_pow(b, e)))
 }
 
-thread_local! {
-    static RNG: Cell<u64> = const { Cell::new(0) };
+/// The xorshift64* state for `seed`: splitmix64 spreads nearby seeds
+/// apart, and the state is never zero (xorshift's fixed point).
+pub(crate) fn rng_state(seed: u64) -> u64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^= z >> 31;
+    if z == 0 { 0x9E37_79B9_7F4A_7C15 } else { z }
 }
 
-fn math_random(_vm: &mut Vm, _a: &CallArgs) -> JsResult<Value> {
-    // xorshift64*, seeded from the clock on first use.
-    let r = RNG.with(|c| {
-        let mut s = c.get();
-        if s == 0 {
-            let t = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos() as u64)
-                .unwrap_or(0x9E3779B97F4A7C15);
-            s = t | 1;
-        }
-        s ^= s >> 12;
-        s ^= s << 25;
-        s ^= s >> 27;
-        c.set(s);
-        s.wrapping_mul(0x2545F4914F6CDD1D)
-    });
+fn math_random(vm: &mut Vm, _a: &CallArgs) -> JsResult<Value> {
+    // xorshift64*, one stream per engine, seeded by the host (TASK-103.1).
+    let mut s = vm.rng;
+    if s == 0 {
+        s = rng_state(vm.host.random_seed());
+    }
+    s ^= s >> 12;
+    s ^= s << 25;
+    s ^= s >> 27;
+    vm.rng = s;
+    let r = s.wrapping_mul(0x2545_F491_4F6C_DD1D);
     Ok(Value::Number((r >> 11) as f64 / (1u64 << 53) as f64))
 }

@@ -113,6 +113,39 @@ pub trait Engine {
     /// [`crate::Error::OutOfMemory`]. `None` removes the cap.
     fn set_memory_limit(&mut self, bytes: Option<usize>);
     fn memory_usage(&mut self) -> MemoryUsage;
+
+    /// Set the fuel budget: how many more bytecode instructions JavaScript
+    /// may run (`None` removes the budget). Every instruction the engine
+    /// dispatches, in any realm and at any nesting of host calls, costs one
+    /// unit; once none is left the running call fails with
+    /// [`crate::Error::OutOfFuel`], which JavaScript cannot catch, and so
+    /// does every later call until the host sets a new budget. The budget
+    /// spans calls: a host meters one call by setting a budget before it
+    /// (and reads what is left with [`Engine::fuel`] after), and meters a
+    /// realm by giving it an engine of its own. The count depends only on
+    /// the program and the engine build, so exhaustion comes at the same
+    /// instruction on every run and platform. A native built-in costs only
+    /// the instruction that calls it (and the instructions of any
+    /// JavaScript it calls back); the memory limit and the interrupt hook
+    /// bound the rest. Engines without fuel return
+    /// [`crate::Error::Unsupported`].
+    fn set_fuel(&mut self, fuel: Option<u64>) -> Result<()> {
+        let _ = fuel;
+        Err(crate::error::Error::Unsupported("fuel"))
+    }
+    /// The fuel left, or `None` when no budget is set.
+    fn fuel(&self) -> Option<u64> {
+        None
+    }
+    /// Reseed `Math.random` now: the values it gives from here on depend
+    /// only on `seed` and how many it gives, the same on every run and
+    /// platform. All realms of the engine draw from one stream. Until the
+    /// first draw or a reseed the seed is [`crate::Host::random_seed`].
+    /// Engines that cannot be seeded return [`crate::Error::Unsupported`].
+    fn set_random_seed(&mut self, seed: u64) -> Result<()> {
+        let _ = seed;
+        Err(crate::error::Error::Unsupported("random seed"))
+    }
     /// Run a full collection now.
     fn collect_garbage(&mut self);
 
