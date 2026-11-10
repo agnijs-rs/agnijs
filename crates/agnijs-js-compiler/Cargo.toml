@@ -10,3 +10,8 @@ description = "agnijs-js-compiler"
 [dependencies]
 agnijs-js-parser.workspace = true
 foldhash.workspace = true
+
+[features]
+# Per-block tiering state in the feedback side table (Feedback::tier),
+# enabled by agnijs-js-vm's `jit` feature; without it the table is unchanged.
+tier = []

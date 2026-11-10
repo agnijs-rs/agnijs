@@ -14,6 +14,7 @@ use crate::serialize::DecodeError;
 use agnijs_js_parser::ast::FunctionKind;
 use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
+#[cfg(feature = "tier")]
 use std::any::Any;
 use std::cell::{Cell, OnceCell};
 use std::fmt;
@@ -1018,7 +1019,9 @@ pub struct Feedback {
     /// The owning VM's collection that last traced this feedback (its
     /// collector's bookkeeping).
     pub gc_mark: Cell<u64>,
-    /// The block's tiering state (ADR 0019, TASK-101.3).
+    /// The block's tiering state (ADR 0019, TASK-101.3). Only with the
+    /// `tier` feature, so that builds without a JIT keep the table as it was.
+    #[cfg(feature = "tier")]
     pub tier: Tier,
 }
 
@@ -1026,6 +1029,7 @@ pub struct Feedback {
 /// its compiled code, if any. The VM owns the meaning; the compiled code
 /// is opaque here (the JIT is an optional crate the compiler does not
 /// depend on).
+#[cfg(feature = "tier")]
 #[derive(Default)]
 pub struct Tier {
     /// Function entries and loop back-edges counted so far.
@@ -1035,6 +1039,7 @@ pub struct Tier {
     pub code: OnceCell<Rc<dyn Any>>,
 }
 
+#[cfg(feature = "tier")]
 impl Tier {
     pub const COLD: u8 = 0;
     pub const COMPILED: u8 = 1;
@@ -1042,6 +1047,7 @@ impl Tier {
     pub const NEVER: u8 = 2;
 }
 
+#[cfg(feature = "tier")]
 impl fmt::Debug for Tier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Tier")
@@ -1152,6 +1158,7 @@ impl CodeBlock {
             name: Cell::new(ConstString::EMPTY),
             shape_epoch: Cell::new(0),
             gc_mark: Cell::new(0),
+            #[cfg(feature = "tier")]
             tier: Tier::default(),
         });
         if f.owner == owner {

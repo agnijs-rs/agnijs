@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09T01:52:00Z'
-updated_date: '2026-11-10T07:08:00Z'
+updated_date: '2026-11-10T09:19:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -45,4 +45,41 @@ Groundwork split (maintainer, 2026-11-10): Opus builds everything that does not 
 
 <!-- SECTION:NOTES:BEGIN -->
 From TASK-101.1 (ADR 0019): code generator decided as Cranelift (one IR for x86-64 and AArch64, verifier, cranelift-object for AOT in TASK-101.5); measure compile time per function first and reopen the choice if it exceeds about a fifth of the gain on the Gable set. The baseline keeps the interpreter frame layout (Sparkplug-style), so deopt is continue-at-pc and OSR a jump. Prerequisites: defined Value and object-header layout (J5), one JS entry point (J8, TASK-100.19), attention word (J7, TASK-100.17). Cargo feature jit on agnijs-js-vm, crate agnijs-js-jit (only engine crate with unsafe), runtime executable-memory probe with interpreter fallback; never compiled for iOS or wasm32.
+
+Groundwork landed (Opus, 2026-11-10): commits c122932 (the defined Value layout) and f9ad2a1 (the baseline JIT), plus a follow-up that gates the tiering state behind agnijs-js-compiler/tier.
+
+Backend: ADR 0020. Cranelift 0.137.1 is used for code generation only (codegen, frontend and native, with default features off). It does not use cranelift-jit; executable memory is managed by agnijs-js-jit's own exec module.
+- The license check passes (168 packages).
+- The feature adds about 5.5 MB to the binary and about 100 s to a clean build.
+- Code generation is enabled only for x86-64 and AArch64 on Windows, Linux, macOS and Android (cfg jit_host). Other targets fall back to the interpreter. The wasm32 build was not checked, because the target is not installed.
+- macOS does not use MAP_JIT yet, so under the hardened runtime it falls back to the interpreter.
+
+Design: the tier never speculates. It keeps the interpreter's frame (ADR 0019 J1) and never holds a JS value outside the frame across a call out. Calls exit compiled code and re-enter it through Vm::jit_run. As a result it needs no deoptimization and no GC maps, and the birth-serial bound is unchanged.
+- Inline: constants, moves, number arithmetic, bitwise operators, comparisons, fused compare-and-branch, truthiness and tag branches, Inc/Dec, ToNumeric, CheckTdz, jumps and polls.
+- Everything else calls Runtime::slow, which first tries the interpreter's IC, global, env and string fast paths.
+- Tiering: AGNIJS_JIT=off|on|force (or Vm::set_jit_mode), with hotness counters in Feedback::tier, threshold 1000.
+- Eligibility is checked per block before code generation. In mode on, a profitability rule (at most one call out per six instructions) leaves blocks that would mostly call out to the interpreter.
+
+Measured (bench, median of 5, interpreter to on / force):
+- loop-arith: 104.9 to 35.3 / 36.2 ms (about 2.9x faster).
+- Property and call workloads: within noise in mode on, and 1.16 to 1.40x slower when forced, because of the cost of each call out.
+- Compile time: 0.4 to 0.6 ms per block.
+
+Tests:
+- crates/agnijs-js-vm/tests/jit_differential.rs: 14 tests comparing the interpreter with force and on, covering edge values, mixed types, ICs, calls, exceptions, globals, interrupts, GC stress and profitability.
+- crates/agnijs-js-bench/tests/jit_workloads.rs: every workload's checksum agrees in all three modes.
+- crates/agnijs-js-jit/tests/enter.rs.
+- The VM test suite passes with AGNIJS_JIT=force.
+
+Gates:
+- test262: default and --precompile 42231/42231; intl402 981/981; RegExp CI set 2511/2511 under auto, backtracking-only and linear-when-eligible. All of these hold with the feature off and with AGNIJS_JIT=force; the default set also passes with AGNIJS_JIT=on.
+- GC stress 16 subset (literals/regexp, RegExp/prototype/exec, statements/class): 4722/4722 with the feature off and forced, at --timeout-ms 120000. At the default 10 s limit, 4 literal-regexp tests time out in both modes.
+- Gable suites (path-patched native/engine-harness, restored afterwards): 759 passed, 1 failed, with the feature off and with the feature on and AGNIJS_JIT=force (65.7 s against 43.4 s). The failure is the known yjs per-change timing test.
+- Bench with the feature off: no change against the pre-JIT build from the same path. Builds from different checkout paths differ by up to 10% on the call workloads, through code layout alone.
+
+Hand-off: docs/design/jit-deopt-and-gc-maps.md, with the stubs and 4 ignored contract tests in agnijs-js-jit/src/handoff.rs. Follow-ups are TASK-101.3.1 (deopt and GC maps, Fable) and TASK-101.3.2 (inline IC hit paths, MAP_JIT).
+
+ACs are left unchecked:
+- AC1: there is a measured speed-up only on numeric blocks; gable-js-bench workloads have not shown a win yet.
+- AC2: the differential tests do not run in CI yet (CI does not build --features jit), and there is no fuzzer.
 <!-- SECTION:NOTES:END -->
