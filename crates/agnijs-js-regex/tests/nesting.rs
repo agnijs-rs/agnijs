@@ -205,7 +205,18 @@ fn programs_from_bytes_nested_far_past_the_limit_load_and_run() {
         for mode in MODES {
             let re = Regex::from_program_bytes(&bytes, mode).unwrap();
             assert_eq!(re.exec(&u("ab"), 1).unwrap().ranges, vec![Some((1, 1))]);
-            assert_eq!(re.program_bytes(), bytes);
+            // The encoding keeps the linear ineligibility reason only when
+            // the linear matcher is built; without it every program is
+            // written as "compiled out", so there the round trip is checked
+            // on the re-encoded bytes instead.
+            let out = re.program_bytes();
+            if cfg!(feature = "linear") {
+                assert_eq!(out, bytes);
+            } else {
+                let again = Regex::from_program_bytes(&out, mode).unwrap();
+                assert_eq!(again.program_bytes(), out);
+                assert_eq!(again.exec(&u("ab"), 1).unwrap().ranges, vec![Some((1, 1))]);
+            }
         }
     });
 }
