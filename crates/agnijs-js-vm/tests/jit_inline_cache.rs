@@ -58,6 +58,12 @@ const N: u64 = 10_000;
 
 fn mostly_inline(stats: JitStats) {
     assert!(stats.compiled >= 1, "{stats:?}");
+    // Under AGNIJS_GC_STRESS every back edge is a safe point that collects,
+    // so compiled code polls (a call out) once per iteration by design; the
+    // values are still checked above, the bound only holds without stress.
+    if std::env::var_os("AGNIJS_GC_STRESS").is_some() {
+        return;
+    }
     assert!(stats.calls_out < N / 20, "the hits ran out of line: {stats:?}");
 }
 
