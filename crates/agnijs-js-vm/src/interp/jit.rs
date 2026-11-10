@@ -478,17 +478,11 @@ impl Vm {
     #[inline(always)]
     fn jit_fast(&mut self, instr: Instr, fi: usize, base: usize, code: &CodeBlock, acc: Value) -> Option<Value> {
         match instr {
-            Instr::GetNamed { obj, ic, .. } => match self.ic_get(code, ic, self.regs[base + obj as usize]) {
-                Some(super::ic::IcGet::Value(v)) => Some(v),
-                _ => None,
-            },
-            Instr::SetNamed { obj, ic, .. } => {
-                let target = self.regs[base + obj as usize];
-                match target {
-                    Value::Object(oid) if self.ic_set(code, ic, oid, acc) => Some(acc),
-                    _ => None,
-                }
-            }
+            // (Not `GetNamed` or `SetNamed`: compiled code probed their
+            // inline cache already, and the generic path probes it first,
+            // so a miss, the common reason to be here, would probe it
+            // three times; a megamorphic site in Gable's signal-churn lost
+            // a tenth of its time to that.)
             Instr::GetKeyed { obj, key } => match (self.regs[base + obj as usize], self.regs[base + key as usize]) {
                 (Value::Object(oid), Value::Number(n)) => self.keyed_get_fast(oid, n),
                 _ => None,
@@ -793,7 +787,7 @@ impl Runtime<Value> for JitRt<'_> {
         Some(self.vm.frames[self.fi].this)
     }
 
-    /// A cached global or a declarative environment slot: the hit
+    /// A cached global, a declarative environment slot or the callee: the hit
     /// in a small function; a miss, or a safe point due, by [`Runtime::slow`].
     fn fast(&mut self, pc: u32, acc: Value) -> Option<Value> {
         let vm = &mut *self.vm;
@@ -813,6 +807,7 @@ impl Runtime<Value> for JitRt<'_> {
                     acc
                 })
             }
+            Instr::LdaCallee => Some(vm.frames[self.fi].callee.map_or(Value::Undefined, Value::Object)),
             _ => None,
         };
         vm.jit.stats.calls_out += 1;

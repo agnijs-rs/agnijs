@@ -217,8 +217,8 @@ pub trait Runtime<V: JitValue> {
         self.slow(pc, acc)
     }
 
-    /// [`Runtime::slow`] for a global or environment load or store
-    /// (`LdaGlobal`, `LdaEnv`, `StaEnv`), through its own
+    /// [`Runtime::slow`] for a global or environment load or store or the
+    /// callee (`LdaGlobal`, `LdaEnv`, `StaEnv`, `LdaCallee`), through its own
     /// entry: the common case is a cache hit or a slot read, which a small
     /// function serves at a fraction of the general path's cost.
     ///

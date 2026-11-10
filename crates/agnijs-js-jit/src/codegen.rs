@@ -1360,7 +1360,7 @@ impl Lower<'_, '_> {
                 let p = self.b.ins().load(I64, flags(), self.ctx, o + PAYLOAD_OFFSET as i32);
                 self.set_acc(t, p);
             }
-            Instr::LdaGlobal(_) | Instr::LdaEnv { .. } | Instr::StaEnv { .. } => {
+            Instr::LdaGlobal(_) | Instr::LdaEnv { .. } | Instr::StaEnv { .. } | Instr::LdaCallee => {
                 self.call_out(self.off.fast, pc, None);
                 return Ok(());
             }
