@@ -78,6 +78,19 @@ pub enum JitMode {
 /// [`JitMode::On`].
 pub const HOT_THRESHOLD: u32 = 1000;
 
+/// In mode [`JitMode::On`] a block must also have taken this many loop
+/// back-edges per instruction before it is compiled: compiling costs about
+/// 25 µs per bytecode instruction (Cranelift, about 20 IR instructions
+/// each), what interpreting some 10 000 instructions costs, so a block is
+/// compiled only once its loops look like they will run long enough to
+/// pay that back (Gable's ui-bundle-startup lost its compile time).
+pub const HOT_PER_INSTRUCTION: u32 = 200;
+
+#[inline(always)]
+fn hot_for(code: &CodeBlock) -> u32 {
+    (code.instrs.len() as u32).saturating_mul(HOT_PER_INSTRUCTION)
+}
+
 /// What the JIT has done in a VM.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct JitStats {
@@ -93,6 +106,8 @@ pub struct JitStats {
     pub abandoned: u32,
     /// Runs of compiled code.
     pub entries: u64,
+    /// Loop back-edges taken by compiled code.
+    pub back_edges: u64,
     /// Calls from compiled code into the runtime ([`Runtime::slow`] and
     /// [`Runtime::poll`]): what compiled code could not do inline.
     pub calls_out: u64,
@@ -109,6 +124,22 @@ pub(crate) struct JitState {
     fault: Option<Fault>,
     done: Option<RunOutcome>,
     pub(crate) stats: JitStats,
+    /// Mode `On`'s window over the block last judged at a poll.
+    judge: Judge,
+    /// The interrupt counter when the current run was entered.
+    run_start: u32,
+}
+
+/// The block (by address) a judgement window is over, and the counts when
+/// it opened: how often runs of that block call out, and are entered, per
+/// back-edge, across runs (a loop that calls a function leaves compiled
+/// code and re-enters it on every call).
+#[derive(Clone, Copy, Default)]
+struct Judge {
+    block: usize,
+    calls_out: u64,
+    entries: u64,
+    edges: u64,
 }
 
 impl JitState {
@@ -125,6 +156,8 @@ impl JitState {
             fault: None,
             done: None,
             stats: JitStats::default(),
+            judge: Judge::default(),
+            run_start: 0,
         };
         s.set_mode(mode);
         s
@@ -174,12 +207,56 @@ impl Vm {
     /// offer, compile the block when it is hot, and run compiled code from
     /// the frame's pc while it can (through calls and returns, which leave
     /// and re-enter it).
+    /// `back_edge`: the offer is at a loop back-edge (else at function
+    /// entry or a call's return).
     #[inline]
-    pub(crate) fn jit_run(&mut self) -> JitRun {
-        if self.jit.mode == JitMode::Off {
+    pub(crate) fn jit_run(&mut self, back_edge: bool) -> JitRun {
+        if self.jit.mode == JitMode::Off || self.counted(back_edge) {
             return JitRun::NotEntered;
         }
         self.jit_run_slow()
+    }
+
+    /// The common offer while a block is warming up, counted without
+    /// leaving the dispatch loop: it is not yet hot, or (mode `On`) is
+    /// judged worth compiling but has not yet looped enough to pay for it
+    /// ([`HOT_PER_INSTRUCTION`]; only back-edges count towards that). False
+    /// when [`Vm::jit_run_slow`] has to look (and counts the offer itself).
+    #[inline(always)]
+    fn counted(&self, back_edge: bool) -> bool {
+        if self.heap.attention != 0 || self.debug_hot {
+            return false;
+        }
+        let Some(fr) = self.frames.last() else {
+            return false;
+        };
+        let Some(f) = fr.code.feedback_if(self.feedback_owner) else {
+            return false;
+        };
+        let tier = &f.tier;
+        if tier.state.get() != Tier::COLD {
+            return false;
+        }
+        let seen = tier.hotness.get();
+        let t = self.jit.threshold;
+        if seen < t {
+            tier.hotness.set(seen + 1);
+            return true;
+        }
+        if self.jit.mode != JitMode::On || seen == t {
+            // Hot: judged by the slow path.
+            return false;
+        }
+        // Judged worth compiling, warming up on its loops.
+        if !back_edge {
+            return true;
+        }
+        let h = seen.saturating_add(1);
+        let waiting = h <= hot_for(&fr.code);
+        if waiting {
+            tier.hotness.set(h);
+        }
+        waiting
     }
 
     /// Whether `code` may yet run compiled: the JIT is on and the block
@@ -232,14 +309,23 @@ impl Vm {
             if !compiled.is_entry(pc) {
                 return idle;
             }
+            // Runs that end soon after they start (the block's loops run
+            // few times per call, or call out) are judged as they begin,
+            // by the whole block.
+            if self.unprofitable_runs(&code, code.instrs.len() as u64, false) {
+                if let Some(f) = code.feedback_if(self.feedback_owner) {
+                    f.tier.state.set(Tier::NEVER);
+                }
+                self.jit.stats.abandoned += 1;
+                return idle;
+            }
             entered = true;
             self.jit.stats.entries += 1;
+            self.jit.run_start = self.interrupt_counter;
             let acc = self.frames[fi].acc;
             let base = self.frames[fi].base;
             let out = compiled.enter(
                 &mut JitRt {
-                    since_calls_out: self.jit.stats.calls_out,
-                    since_counter: self.interrupt_counter,
                     vm: self,
                     fi,
                     base,
@@ -248,6 +334,7 @@ impl Vm {
                 pc as u32,
                 acc,
             );
+            self.jit.stats.back_edges += u64::from(self.interrupt_counter.wrapping_sub(self.jit.run_start));
             match out.exit {
                 Exit::Return => {
                     let f = &mut self.frames[fi];
@@ -282,6 +369,40 @@ impl Vm {
         }
     }
 
+    /// Mode `On`'s check of its static estimate ([`agnijs_js_jit::profitable`])
+    /// against what runs of `code` did since the window over it opened:
+    /// they called out more than once per [`agnijs_js_jit::CALL_OUT_SHARE`]
+    /// instructions of `body` per back-edge, an entry (a call returning to
+    /// the block, or a call of it) counting as [`ENTRY_SHARE`] call-outs.
+    /// (Instructions the estimate counts as inline, such as `+`, call out
+    /// when their operands are not numbers.) The window spans runs, since a
+    /// loop that calls is a new run after every call, and is judged after
+    /// [`JUDGE_AFTER`] back-edges or entries.
+    fn unprofitable_runs(&mut self, code: &Rc<CodeBlock>, body: u64, running: bool) -> bool {
+        if self.jit.mode != JitMode::On {
+            return false;
+        }
+        let now = Judge {
+            block: Rc::as_ptr(code) as usize,
+            calls_out: self.jit.stats.calls_out,
+            entries: self.jit.stats.entries,
+            edges: self.jit.stats.back_edges + if running { u64::from(self.interrupt_counter.wrapping_sub(self.jit.run_start)) } else { 0 },
+        };
+        let open = self.jit.judge;
+        if open.block != now.block {
+            self.jit.judge = now;
+            return false;
+        }
+        let edges = now.edges - open.edges;
+        let entries = now.entries - open.entries;
+        if edges < u64::from(JUDGE_AFTER) && entries < u64::from(JUDGE_AFTER) {
+            return false;
+        }
+        self.jit.judge = now;
+        let calls = (now.calls_out - open.calls_out) + entries * ENTRY_SHARE;
+        calls * agnijs_js_jit::CALL_OUT_SHARE as u64 > body * edges
+    }
+
     /// The compiled code of `code`, compiling it if it has become hot.
     fn jit_code<'c>(&mut self, code: &'c CodeBlock) -> Option<&'c Compiled<Value>> {
         // A script body may have none yet: it is created on first use.
@@ -296,10 +417,21 @@ impl Vm {
                     return None;
                 }
                 let layout = crate::object::jit_heap_layout();
-                if self.jit.mode == JitMode::On && !agnijs_js_jit::profitable_with(code, layout.is_some()) {
-                    self.jit.stats.unprofitable += 1;
-                    tier.state.set(Tier::NEVER);
-                    return None;
+                if self.jit.mode == JitMode::On {
+                    // Judged when it first becomes hot, so that a block not
+                    // worth compiling stops being counted, and again when
+                    // it is hot enough to compile, by its feedback then.
+                    let ready = h > hot_for(code);
+                    if (ready || h == self.jit.threshold + 1)
+                        && !agnijs_js_jit::profitable_with(code, layout.is_some())
+                    {
+                        self.jit.stats.unprofitable += 1;
+                        tier.state.set(Tier::NEVER);
+                        return None;
+                    }
+                    if !ready {
+                        return None;
+                    }
                 }
                 match Compiled::<Value>::compile_with(code, layout.as_ref()) {
                     Ok(c) => {
@@ -408,13 +540,16 @@ struct JitRt<'a> {
     fi: usize,
     base: usize,
     code: &'a Rc<CodeBlock>,
-    /// The call-out count and interrupt counter when this run was entered
-    /// or last judged at a poll: how often its loops call out per back-edge.
-    since_calls_out: u64,
-    since_counter: u32,
 }
 
-/// Back-edges a run must take before its loops are judged.
+/// What a call from compiled code costs the caller's loop, in call-outs:
+/// leaving compiled code, the function-entry and return polls, and a new
+/// run after the return that starts from the frame in memory. Set where a
+/// loop of calls (Gable's signal-churn) stops losing to the interpreter;
+/// the round trip alone measures about 3 call-outs.
+const ENTRY_SHARE: u64 = 20;
+
+/// Back-edges a block's runs must take before its loops are judged.
 const JUDGE_AFTER: u32 = 1024;
 
 impl JitRt<'_> {
@@ -474,26 +609,11 @@ impl JitRt<'_> {
         }
     }
 
-    /// Mode `On`'s check of its static estimate ([`agnijs_js_jit::profitable`])
-    /// against what the run did, at an interrupt poll on the back-edge from
-    /// `pc` to `target`: the run called out more than once per
-    /// [`agnijs_js_jit::CALL_OUT_SHARE`] instructions of that loop's body
-    /// per back-edge. (Instructions the estimate counts as inline, such as
-    /// `+`, call out when their operands are not numbers.)
+    /// [`Vm::unprofitable_runs`] at an interrupt poll on the back-edge from
+    /// `pc` to `target`, judged by that loop's body.
     fn unprofitable_loop(&mut self, pc: u32, target: u32) -> bool {
-        let vm = &*self.vm;
-        if vm.jit.mode != JitMode::On {
-            return false;
-        }
-        let edges = vm.interrupt_counter.wrapping_sub(self.since_counter);
-        if edges < JUDGE_AFTER {
-            return false;
-        }
-        let calls = vm.jit.stats.calls_out - self.since_calls_out;
-        self.since_calls_out = vm.jit.stats.calls_out;
-        self.since_counter = vm.interrupt_counter;
         let body = u64::from(pc.saturating_sub(target)) + 1;
-        calls * agnijs_js_jit::CALL_OUT_SHARE as u64 > body * u64::from(edges)
+        self.vm.unprofitable_runs(self.code, body, true)
     }
 
     #[inline(never)]

@@ -247,6 +247,20 @@ fn a_tiered_loop_that_mostly_calls_out_goes_back_to_the_interpreter() {
 }
 
 #[test]
+fn a_tiered_loop_that_calls_a_function_every_iteration_goes_back_to_the_interpreter() {
+    // Mostly inline work, but each call leaves compiled code and the
+    // return enters it again, which costs more than the inline work saves.
+    let src = "function h(x) { return x & 0xffff; }
+               function f(o, n) { var s = 0;
+                 for (var i = 0; i < n; i++) { s = s + o.x + o.y + o.x * o.y + (i & 7) * 3 + (i | 1); s = h(s); }
+                 return s; }
+               f({ x: 3, y: 4 }, 200000)";
+    let (on, stats) = run(JitMode::On, src);
+    assert_eq!(on, run(JitMode::Off, src).0);
+    assert!(stats.compiled >= 1 && stats.abandoned >= 1, "{stats:?}");
+}
+
+#[test]
 fn heap_values_survive_collections_at_every_call_out_from_compiled_code() {
     // Each iteration stores and loads inline around a call that allocates
     // (and so, under stress, collects and grows the object arena): compiled

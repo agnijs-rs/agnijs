@@ -281,8 +281,8 @@ impl Vm {
         // at function entry, when a call returns and at loop back-edges.
         #[cfg(feature = "jit")]
         macro_rules! jit {
-            () => {
-                match self.jit_run() {
+            ($back_edge:expr) => {
+                match self.jit_run($back_edge) {
                     jit::JitRun::NotEntered => jit_live = self.jit_live(&code),
                     jit::JitRun::Reload => reload!(),
                     jit::JitRun::Done(outcome) => return Ok(outcome),
@@ -309,7 +309,7 @@ impl Vm {
                         }
                         #[cfg(feature = "jit")]
                         if jit_live {
-                            jit!();
+                            jit!(false);
                         }
                     }
                     Ok(Flow::Done(outcome)) => return Ok(outcome),
@@ -338,14 +338,15 @@ impl Vm {
                 #[cfg(feature = "jit")]
                 if off <= 0 && jit_live {
                     writeback!();
-                    jit!();
+                    jit!(true);
                 }
             }};
         }
 
         #[cfg(feature = "jit")]
-        match self.jit_run() {
-            jit::JitRun::NotEntered => jit_live = self.jit_live(&code),
+        match if jit_live { self.jit_run(false) } else { jit::JitRun::NotEntered } {
+            jit::JitRun::NotEntered if jit_live => jit_live = self.jit_live(&code),
+            jit::JitRun::NotEntered => {}
             jit::JitRun::Reload => reload!(),
             jit::JitRun::Done(outcome) => return Ok(outcome),
             jit::JitRun::Fault(f) => {

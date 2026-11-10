@@ -105,14 +105,14 @@ fn a_hot_loop_that_mostly_calls_out_stays_interpreted_when_tiered() {
     // Every iteration reads a global, a property and an element: compiled
     // code would hand most instructions back to the runtime.
     let src = "var o = { xs: [1, 2, 3, 4] }, s = 0;
-               for (var i = 0; i < 5000; i++) { s = s + o.xs[i & 3]; }
+               for (var i = 0; i < 50000; i++) { s = s + o.xs[i & 3]; }
                s";
     let mut vm = engine(JitMode::On);
-    assert_eq!(run_in(&mut vm, src), "12500");
+    assert_eq!(run_in(&mut vm, src), "125000");
     let on = vm.jit_stats();
     assert!(on.unprofitable >= 1 && on.compiled == 0, "{on:?}");
     let (forced, stats) = run(JitMode::Force, src);
-    assert_eq!(forced, "12500");
+    assert_eq!(forced, "125000");
     assert!(stats.compiled >= 1, "forcing compiles it anyway: {stats:?}");
 }
 
