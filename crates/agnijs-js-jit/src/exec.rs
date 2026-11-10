@@ -300,9 +300,7 @@ mod macos {
     pub(super) fn map_jit(code: &[u8]) -> Option<*mut u8> {
         let len = code.len();
         // SAFETY: a query with no arguments.
-        if unsafe { pthread_jit_write_protect_supported_np() } == 0 {
-            return None;
-        }
+        let per_thread = unsafe { pthread_jit_write_protect_supported_np() } != 0;
         // SAFETY: a fresh private anonymous mapping.
         let p = unsafe {
             libc::mmap(
@@ -318,14 +316,31 @@ mod macos {
             return None;
         }
         let ptr = p as *mut u8;
-        // SAFETY: lifting and restoring this thread's JIT write protection
-        // has no memory effects of its own; between the two calls this
-        // thread writes only the fresh mapping, of at least `len` bytes,
-        // and runs no code from it.
-        unsafe {
-            pthread_jit_write_protect_np(0);
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
-            pthread_jit_write_protect_np(1);
+        if per_thread {
+            // SAFETY: lifting and restoring this thread's JIT write
+            // protection has no memory effects of its own; between the two
+            // calls this thread writes only the fresh mapping, of at least
+            // `len` bytes, and runs no code from it.
+            unsafe {
+                pthread_jit_write_protect_np(0);
+                std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
+                pthread_jit_write_protect_np(1);
+            }
+        } else {
+            // Without per-thread write protection (Apple silicon under
+            // virtualization, such as CI runners) a MAP_JIT mapping is
+            // plainly writable: write it, then drop write access, so the
+            // code is never writable and executable at once while it runs.
+            // SAFETY: `ptr..ptr+len` is the fresh mapping above.
+            let rx = unsafe {
+                std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
+                libc::mprotect(p, len, libc::PROT_READ | libc::PROT_EXEC) == 0
+            };
+            if !rx {
+                // SAFETY: our own mapping, of `len` bytes, never run.
+                unsafe { libc::munmap(p, len) };
+                return None;
+            }
         }
         super::sys::flush_icache(ptr, len);
         Some(ptr)
