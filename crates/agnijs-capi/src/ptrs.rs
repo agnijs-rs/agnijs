@@ -244,6 +244,9 @@ mod tests {
 
     #[test]
     fn miri_inputs_check_null_alignment_length_and_encoding() {
+        // SAFETY: every pointer is NULL, points at the local arrays with a
+        // length they cover, or is refused (misaligned, overflowing) before
+        // it is read.
         unsafe {
             assert_eq!(bytes(std::ptr::null(), 0, "p").unwrap(), b"");
             assert_eq!(status(bytes(std::ptr::null(), 1, "p")), AGNIJS_ERR_NULL_POINTER);
@@ -273,6 +276,7 @@ mod tests {
     fn miri_outputs_write_only_into_checked_memory() {
         let mut slot = std::mem::MaybeUninit::<u64>::uninit();
         Out::new(slot.as_mut_ptr(), "out").unwrap().write(5);
+        // SAFETY: `write` just initialised the slot.
         assert_eq!(unsafe { slot.assume_init() }, 5);
         assert_eq!(status(Out::<u64>::new(std::ptr::null_mut(), "out")), AGNIJS_ERR_NULL_POINTER);
         assert!(Out::<u64>::optional(std::ptr::null_mut(), "out").unwrap().is_none());
@@ -280,9 +284,11 @@ mod tests {
         let odd = words.as_mut_ptr().cast::<u8>().wrapping_add(1).cast::<u64>();
         assert_eq!(status(Out::new(odd, "out")), AGNIJS_ERR_INVALID_ARGUMENT);
 
-        let src = [b'a', b'b', b'c'];
+        let src = *b"abc";
         let mut dst = [0xAAu8; 4];
         let mut needed = 0usize;
+        // SAFETY: `dst` holds 4 bytes and every `cap` passed with it is at
+        // most 4; NULL is passed only where it must be refused.
         unsafe {
             let n = Out::optional(&mut needed, "needed").unwrap();
             assert_eq!(status(copy_out(&src, dst.as_mut_ptr(), 3, n)), AGNIJS_ERR_BUFFER_TOO_SMALL);
@@ -311,6 +317,9 @@ mod tests {
             b: u64,
         }
         let size = |n: usize| u32::try_from(n).unwrap();
+        // SAFETY: each pointer is NULL or points at a local struct at least
+        // as large as its `struct_size` claims (or claims more and is refused
+        // before the extra bytes are read: 4096 is the cap, u32::MAX fails it).
         unsafe {
             let ok = V1 { struct_size: size(8), a: 3 };
             assert_eq!(versioned(&ok, "o").unwrap().a, 3);
