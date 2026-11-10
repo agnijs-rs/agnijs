@@ -104,8 +104,12 @@ pub struct JitStats {
     /// Compiled blocks given back to the interpreter in mode `On` because
     /// their loops called out on too many instructions as they ran.
     pub abandoned: u32,
-    /// Runs of compiled code.
+    /// Runs of compiled code started by the tier loop ([`Vm::jit_run`]).
     pub entries: u64,
+    /// Calls (and getter or setter runs) whose callee's compiled code was
+    /// entered from the caller's compiled code, and returned into it,
+    /// without going back to the tier loop.
+    pub direct_calls: u64,
     /// Loop back-edges taken by compiled code.
     pub back_edges: u64,
     /// Calls from compiled code into the runtime ([`Runtime::slow`] and
@@ -128,7 +132,20 @@ pub(crate) struct JitState {
     judge: Judge,
     /// The interrupt counter when the current run was entered.
     run_start: u32,
+    /// Compiled callees running inside a call out of their callers'
+    /// compiled code ([`JitRt::call`]), bounded by [`MAX_NEST`].
+    nest: u32,
 }
+
+/// How deep compiled code may nest on the native stack through direct
+/// calls. A call past it leaves compiled code as before (`Exit::Frame`),
+/// which unwinds the nested machine frames to the tier loop; their frames
+/// are interpreter frames already, so they continue from memory. A level
+/// measured 1.2 KB of native stack in a release build and 1.7 KB in a
+/// debug one, so the bound adds at most about 110 KB to the stack the
+/// interpreter's own native depth limit allows; the bound is per engine,
+/// not per run, so native re-entry does not multiply it.
+pub const MAX_NEST: u32 = 64;
 
 /// The block (by address) a judgement window is over, and the counts when
 /// it opened: how often runs of that block call out, and are entered, per
@@ -158,6 +175,7 @@ impl JitState {
             stats: JitStats::default(),
             judge: Judge::default(),
             run_start: 0,
+            nest: 0,
         };
         s.set_mode(mode);
         s
@@ -573,11 +591,110 @@ impl JitRt<'_> {
                     acc: f.acc,
                 }
             }
+            Ok(Flow::Next) | Ok(Flow::Reload) if vm.frames.len() == self.fi + 2 => self.call(),
             Ok(Flow::Next) | Ok(Flow::Reload) => Resume::Exit(Exit::Frame),
             Ok(Flow::Done(outcome)) => {
                 vm.jit.done = Some(outcome);
                 Resume::Exit(Exit::Done)
             }
+            Err(fault) => {
+                vm.jit.fault = Some(fault);
+                Resume::Exit(Exit::Fault)
+            }
+        }
+    }
+
+    /// The instruction just run (a call, `new`, a getter or setter) pushed
+    /// one frame over this one: run the callee's compiled code from here,
+    /// inside this call out, and continue this function's compiled code
+    /// when it returns (TASK-101.3.3). Nothing of the caller is outside its
+    /// frame (it was written back for the call out), so the caller's
+    /// machine frame below holds no value the collector cannot see and no
+    /// state the interpreter frame lacks: no GC map and no deoptimization.
+    ///
+    /// The callee's frame was pushed by the interpreter's own path (the
+    /// stack-depth check included); this does what the tier loop does for
+    /// it: the function-entry poll (J7) and the attention safe point, then
+    /// a run, then on `Return` the interpreter's `do_return` and the poll
+    /// after a call returns. Any other end of the callee's run (it pushed a
+    /// frame it did not run, faulted, finished the run, or wants the
+    /// interpreter) unwinds this caller's machine code too, to the tier
+    /// loop, which carries on from the frames as they are.
+    ///
+    /// A callee that has no compiled code yet, a debugger, or the nesting
+    /// bound leave the old way (`Exit::Frame`), before the poll, so the
+    /// tier loop polls and counts the entry as it always has.
+    #[inline(never)]
+    fn call(&mut self) -> Resume<Value> {
+        let callee = self.fi + 1;
+        let vm = &mut *self.vm;
+        if vm.debug_hot || vm.jit.nest >= MAX_NEST {
+            return Resume::Exit(Exit::Frame);
+        }
+        let code = vm.frames[callee].code.clone();
+        let pc = vm.frames[callee].pc;
+        // Already compiled: a callee still being counted towards its
+        // threshold is counted by the tier loop, once.
+        let compiled = match code.feedback_if(vm.feedback_owner) {
+            Some(f) if f.tier.state.get() == Tier::COMPILED => f.tier.code.get().and_then(|c| c.downcast_ref::<Compiled<Value>>()),
+            _ => None,
+        };
+        let Some(compiled) = compiled else {
+            return Resume::Exit(Exit::Frame);
+        };
+        if !compiled.is_entry(pc) {
+            return Resume::Exit(Exit::Frame);
+        }
+        let c0 = vm.interrupt_counter;
+        let outer_start = vm.jit.run_start;
+        let r: JsResult<Result<(), Exit>> = (|| {
+            // Function entry (J7), then the safe point at the callee's
+            // first instruction, as the tier loop makes them.
+            vm.poll_interrupt()?;
+            if vm.heap.attention != 0 {
+                vm.attention_slow(callee)?;
+            }
+            vm.jit.nest += 1;
+            vm.jit.stats.direct_calls += 1;
+            let start = vm.interrupt_counter;
+            vm.jit.run_start = start;
+            let f = &vm.frames[callee];
+            let (acc, base) = (f.acc, f.base);
+            let out = compiled.enter(
+                &mut JitRt {
+                    vm: &mut *vm,
+                    fi: callee,
+                    base,
+                    code: &code,
+                },
+                pc as u32,
+                acc,
+            );
+            vm.jit.nest -= 1;
+            vm.jit.stats.back_edges += u64::from(vm.interrupt_counter.wrapping_sub(start));
+            if out.exit != Exit::Return {
+                return Ok(Err(out.exit));
+            }
+            let f = &mut vm.frames[callee];
+            f.pc = out.pc as usize;
+            f.acc = out.acc;
+            if let Flow::Done(outcome) = vm.do_return() {
+                vm.jit.done = Some(outcome);
+                return Ok(Err(Exit::Done));
+            }
+            // A call returned (J7).
+            vm.poll_interrupt()?;
+            if vm.frames.len() != callee {
+                return Ok(Err(Exit::Interp));
+            }
+            Ok(Ok(()))
+        })();
+        // The caller's run does not count the callee's back-edges or the
+        // polls made for it.
+        vm.jit.run_start = outer_start.wrapping_add(vm.interrupt_counter.wrapping_sub(c0));
+        match r {
+            Ok(Ok(())) => self.after(Ok(Flow::Next)),
+            Ok(Err(exit)) => Resume::Exit(exit),
             Err(fault) => {
                 vm.jit.fault = Some(fault);
                 Resume::Exit(Exit::Fault)

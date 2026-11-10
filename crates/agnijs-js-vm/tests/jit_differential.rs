@@ -218,6 +218,97 @@ fn calls_closures_and_recursion_match() {
 }
 
 #[test]
+fn calls_between_compiled_functions_stay_in_compiled_code() {
+    // fib(15) makes 1973 calls, 1972 of them from fib itself; forced, each
+    // enters the callee's compiled code from the caller's without going
+    // back to the tier loop, and returns straight into the caller's.
+    let stats = same("function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } fib(15)", "610");
+    assert!(stats.direct_calls >= 1972, "{stats:?}");
+    assert!(stats.entries < 10, "no call or return goes back to the tier loop: {stats:?}");
+}
+
+#[test]
+fn a_throw_in_a_nested_callee_is_caught_several_compiled_frames_up() {
+    // catcher -> a -> b -> c all compiled and entered directly; c throws
+    // every fifth call, and the handler in catcher, three compiled callers
+    // up, takes it; the loop then goes on calling directly.
+    let stats = same(
+        "function c(i) { if (i % 5 === 4) throw new RangeError('r' + i); return i; }
+         function b(i) { var t = c(i); return t + 1; }
+         function a(i) { var t = b(i); return t * 2; }
+         function catcher(n) {
+           var s = 0, caught = 0, last = '';
+           for (var i = 0; i < n; i++) {
+             try { s += a(i); } catch (e) { caught++; last = e.message; }
+           }
+           return s + '/' + caught + '/' + last;
+         }
+         catcher(500)",
+        "200000/100/r499",
+    );
+    assert!(stats.direct_calls >= 1000, "{stats:?}");
+}
+
+#[test]
+fn recursion_deeper_than_the_nesting_bound_runs_and_overflows_alike() {
+    // Past the bound, calls go back through the tier loop and nest again
+    // from there; the frame limit still ends unbounded recursion with a
+    // RangeError the compiled caller can catch.
+    let stats = same(
+        "function sum(n) { return n === 0 ? 0 : n + sum(n - 1); }
+         function down(n) { return down(n + 1) + 1; }
+         var r; try { down(0); } catch (e) { r = e.constructor.name; }
+         sum(5000) + ',' + r + ',' + sum(10)",
+        "12502500,RangeError,55",
+    );
+    assert!(stats.direct_calls >= 5000, "{stats:?}");
+}
+
+#[test]
+fn collections_at_every_safe_point_keep_nested_compiled_frames_values() {
+    let src = "function leaf(o, i) { return { v: o.v + i, s: o.s + i }; }
+               function mid(o, i) { var p = leaf(o, i); var q = leaf(p, 1); return [p, q]; }
+               function top(n) {
+                 var o = { v: 0, s: '' }, keep = [];
+                 for (var i = 0; i < n; i++) {
+                   var pq = mid(o, i);
+                   o = { v: pq[1].v % 1000, s: pq[0].s.slice(-4) };
+                   if (i % 10 === 0) keep.push(pq[0]);
+                 }
+                 var t = 0; for (var j = 0; j < keep.length; j++) t += keep[j].v;
+                 return o.v + ',' + o.s + ',' + t;
+               }
+               function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+               top(200) + ',' + fib(12)";
+    let mut out = Vec::new();
+    for mode in [JitMode::Off, JitMode::Force] {
+        let mut vm = engine(mode);
+        vm.heap.stress = true;
+        out.push(run_in(&mut vm, src));
+        if mode == JitMode::Force {
+            assert!(vm.jit_stats().direct_calls > 400, "{:?}", vm.jit_stats());
+        }
+    }
+    assert_eq!(out[0], out[1]);
+}
+
+#[test]
+fn an_interrupt_stops_a_loop_in_a_nested_callee() {
+    let host = TestHost::new();
+    let mut vm = Vm::new(host.clone());
+    Vm::create_realm(&mut vm);
+    vm.set_jit_mode(JitMode::Force);
+    let realm = vm.main_realm();
+    run_in(&mut vm, "function id(x) { return x; } function spin() { for (var i = 0; ; i++) id(i); } id(1)");
+    host.interrupt_after.set(Some(host.interrupt_polls.get() + 50));
+    let r = vm.eval_script(realm, "spin.js", "function outer() { return spin(); } outer()");
+    assert!(matches!(r, Err(Error::Interrupted)), "{r:?}");
+    assert!(vm.jit_stats().direct_calls > 3, "{:?}", vm.jit_stats());
+    host.interrupt_after.set(None);
+    assert_eq!(run_in(&mut vm, "function f(n) { return n ? f(n - 1) + 1 : 0; } f(30)"), "30");
+}
+
+#[test]
 fn exceptions_unwind_through_compiled_frames() {
     same(
         "function thrower(i) { if (i % 7 === 3) throw new Error('e' + i); return i; }
