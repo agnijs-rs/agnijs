@@ -267,6 +267,34 @@ fn weak_containers_are_processed() {
     assert_eq!(v, Value::string("v1,v2,true,true,true"));
 }
 
+/// A WeakMap value that is a string or a bigint is reached through its
+/// key like any other value (the ephemeron pass used to treat non-object
+/// values as already marked, so a fresh string value was swept while its
+/// key lived; the Gable devtools suite found it under GC stress).
+#[test]
+fn weak_map_string_and_bigint_values_survive() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var wm = new WeakMap(); var k1 = {}, k2 = {}, k3 = {};
+         wm.set(k1, 'http://localhost:5173/src/page.ts?t=1'.split('?')[0]);
+         wm.set(k2, BigInt('123456789012345678901234567890') * 2n);
+         wm.set(k3, Symbol('fresh ' + 'description'));
+         for (var i = 0; i < 2000; i++) { var junk = { s: 'junk' + i, get entries() { return i; } }; }",
+    );
+    vm.collect_garbage();
+    run(&mut vm, "for (var i = 0; i < 2000; i++) { var more = { s: 'more' + i, get entries() { return i; } }; }");
+    vm.collect_garbage();
+    let v = run(
+        &mut vm,
+        "[wm.get(k1), String(wm.get(k2)), wm.get(k3).description].join('|')",
+    );
+    assert_eq!(
+        v,
+        Value::string("http://localhost:5173/src/page.ts|246913578024691357802469135780|fresh description")
+    );
+}
+
 /// A Miri-sized program: closures, a generator, an exception and a
 /// string concatenation, with a collection at every safe point.
 #[test]

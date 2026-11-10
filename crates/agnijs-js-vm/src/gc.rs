@@ -319,11 +319,16 @@ impl<'v> Tracer<'v> {
         }
     }
 
+    /// Whether a heap value has been reached; values that are not on the
+    /// heap count as reached. A WeakMap value that is a string or a bigint
+    /// has to be marked like any other, so those arenas are checked too.
     #[inline]
     fn is_marked(&self, v: Value) -> bool {
         match v {
             Value::Object(o) => self.objs[o.0 as usize],
             Value::Symbol(s) => self.syms[s.0 as usize],
+            Value::String(s) => self.strs[s.0 as usize],
+            Value::BigInt(b) => self.bigs[b.0 as usize],
             _ => true,
         }
     }
