@@ -1,0 +1,28 @@
+[package]
+name = "agnijs-js-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Cranelift 0.137 needs Rust 1.97; the crate is optional (feature `jit` of
+# agnijs-js-vm), so the rest of the workspace keeps its own minimum.
+rust-version = "1.97"
+repository.workspace = true
+description = "The AgniJS baseline JIT (ADR 0019, ADR 0020): Cranelift code generation over the interpreter's frames"
+
+[dependencies]
+agnijs-js-parser.workspace = true
+agnijs-js-compiler.workspace = true
+
+# The code generator, on the targets build.rs marks `jit_host` (keep the
+# two lists in step). No default features: no unwind tables, no timing
+# statistics, and only the host architecture's backend (ADR 0020).
+[target.'cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), any(target_os = "windows", target_os = "linux", target_os = "macos", target_os = "android")))'.dependencies]
+cranelift-codegen = { version = "=0.137.1", default-features = false, features = ["std", "host-arch"] }
+cranelift-frontend = { version = "=0.137.1", default-features = false, features = ["std"] }
+cranelift-native = { version = "=0.137.1" }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Memory", "Win32_System_Diagnostics_Debug", "Win32_System_Threading", "Win32_Foundation"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

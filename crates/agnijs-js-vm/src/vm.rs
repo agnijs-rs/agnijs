@@ -398,6 +398,9 @@ pub struct Vm {
     /// Instructions dispatched by `Vm::run` (feature `instr-count`).
     #[cfg(feature = "instr-count")]
     pub instr_count: u64,
+    /// The baseline JIT's mode, counters and pending exits (feature `jit`).
+    #[cfg(feature = "jit")]
+    pub(crate) jit: crate::interp::jit::JitState,
 }
 
 /// A distinct, non-zero feedback owner per VM.
@@ -489,6 +492,8 @@ impl Vm {
             ic_stats: Default::default(),
             #[cfg(feature = "instr-count")]
             instr_count: 0,
+            #[cfg(feature = "jit")]
+            jit: crate::interp::jit::JitState::from_env(),
         };
         let main = vm.create_realm();
         vm.current_realm = main;
@@ -906,7 +911,7 @@ impl Vm {
 
     #[cold]
     #[inline(never)]
-    fn ask_host_interrupt(&mut self) -> JsResult<()> {
+    pub(crate) fn ask_host_interrupt(&mut self) -> JsResult<()> {
         if self.host.interrupt() {
             return Err(Fault::Interrupt);
         }

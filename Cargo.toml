@@ -12,6 +12,7 @@ members = [
     "crates/agnijs-js-cdp",
     "crates/agnijs-js-test262",
     "crates/agnijs-js-bench",
+    "crates/agnijs-js-jit",
 ]
 
 [workspace.package]
@@ -33,6 +34,8 @@ agnijs-js-regex = { path = "crates/agnijs-js-regex", default-features = false }
 agnijs-js-intl = { path = "crates/agnijs-js-intl" }
 agnijs-js-debugger = { path = "crates/agnijs-js-debugger" }
 agnijs-js-cdp = { path = "crates/agnijs-js-cdp" }
+# The baseline JIT: optional, behind agnijs-js-vm's `jit` feature (ADR 0020).
+agnijs-js-jit = { path = "crates/agnijs-js-jit" }
 rquickjs = { version = "0.14", features = ["loader", "array-buffer", "classes", "properties"] }
 regress = { version = "0.12", features = ["utf16"] }
 serde = { version = "1", features = ["derive"] }

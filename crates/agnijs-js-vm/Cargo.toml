@@ -18,6 +18,11 @@ instr-count = []
 # Counts inline-cache hits, misses and fills in `Vm::ic_stats`
 # (TASK-100.20). For measurement only.
 ic-stats = []
+# The baseline JIT (TASK-101.3, ADR 0020): Cranelift-compiled code for hot
+# functions, chosen at run time by AGNIJS_JIT (off, on, force) or
+# `Vm::set_jit_mode`. Off by default; without it the engine has no
+# dependency on the code generator and no unsafe code anywhere.
+jit = ["dep:agnijs-js-jit"]
 
 [dependencies]
 agnijs-engine-api.workspace = true
@@ -26,6 +31,7 @@ agnijs-js-compiler.workspace = true
 agnijs-js-regex.workspace = true
 agnijs-js-intl.workspace = true
 agnijs-js-debugger.workspace = true
+agnijs-js-jit = { workspace = true, optional = true }
 hashbrown = "0.14"
 indexmap = "2"
 num-bigint = "0.4"

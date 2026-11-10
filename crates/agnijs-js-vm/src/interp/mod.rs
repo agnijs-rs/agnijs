@@ -9,6 +9,8 @@ pub mod calls;
 pub mod generator;
 pub mod globals;
 pub mod ic;
+#[cfg(feature = "jit")]
+pub mod jit;
 pub mod step;
 
 use crate::convert::{number_arith, number_binop, number_bitwise, number_compare};
@@ -214,6 +216,9 @@ impl Vm {
     /// The arms below are the hot cases that allocate nothing, fault
     /// nothing and observe no frame; each falls back to `step` for the
     /// generic semantics (J3) of the same instruction.
+    // With the JIT, a reload can be followed by another one when compiled
+    // code ran.
+    #[cfg_attr(feature = "jit", allow(unused_assignments))]
     fn run_loop(&mut self) -> JsResult<RunOutcome> {
         debug_assert!(self.frames.last().map(|f| f.exit).unwrap_or(false));
         self.refresh_attention();
@@ -227,6 +232,10 @@ impl Vm {
         let mut base = self.frames[fi].base;
         let mut pc = self.frames[fi].pc;
         let mut acc = self.frames[fi].acc;
+        // Whether `code` may run compiled: false once it is left to the
+        // interpreter, so the offers below cost a test of a local.
+        #[cfg(feature = "jit")]
+        let mut jit_live = self.jit_live(&code);
 
         macro_rules! reg {
             ($r:expr) => {
@@ -246,6 +255,10 @@ impl Vm {
                 let f = &self.frames[fi];
                 if !Rc::ptr_eq(&code, &f.code) {
                     code = f.code.clone();
+                    #[cfg(feature = "jit")]
+                    {
+                        jit_live = self.jit_live(&code);
+                    }
                 }
                 base = f.base;
                 pc = f.pc;
@@ -264,6 +277,22 @@ impl Vm {
                 }
             }};
         }
+        // Offer the top frame, written back, to compiled code (TASK-101.3):
+        // at function entry, when a call returns and at loop back-edges.
+        #[cfg(feature = "jit")]
+        macro_rules! jit {
+            () => {
+                match self.jit_run() {
+                    jit::JitRun::NotEntered => jit_live = self.jit_live(&code),
+                    jit::JitRun::Reload => reload!(),
+                    jit::JitRun::Done(outcome) => return Ok(outcome),
+                    jit::JitRun::Fault(f) => {
+                        reload!();
+                        fault!(f);
+                    }
+                }
+            };
+        }
         macro_rules! flow {
             ($flow:expr) => {
                 match $flow {
@@ -277,6 +306,10 @@ impl Vm {
                         // Function entry, or a call returned (J7).
                         if let Err(f) = self.poll_interrupt() {
                             fault!(f);
+                        }
+                        #[cfg(feature = "jit")]
+                        if jit_live {
+                            jit!();
                         }
                     }
                     Ok(Flow::Done(outcome)) => return Ok(outcome),
@@ -302,7 +335,23 @@ impl Vm {
                     }
                 }
                 pc = (pc as i64 - 1 + off as i64) as usize;
+                #[cfg(feature = "jit")]
+                if off <= 0 && jit_live {
+                    writeback!();
+                    jit!();
+                }
             }};
+        }
+
+        #[cfg(feature = "jit")]
+        match self.jit_run() {
+            jit::JitRun::NotEntered => jit_live = self.jit_live(&code),
+            jit::JitRun::Reload => reload!(),
+            jit::JitRun::Done(outcome) => return Ok(outcome),
+            jit::JitRun::Fault(f) => {
+                self.handle_fault(f)?;
+                reload!();
+            }
         }
 
         loop {

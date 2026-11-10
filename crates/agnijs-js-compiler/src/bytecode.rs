@@ -14,6 +14,7 @@ use crate::serialize::DecodeError;
 use agnijs_js_parser::ast::FunctionKind;
 use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
+use std::any::Any;
 use std::cell::{Cell, OnceCell};
 use std::fmt;
 use std::rc::Rc;
@@ -1017,6 +1018,37 @@ pub struct Feedback {
     /// The owning VM's collection that last traced this feedback (its
     /// collector's bookkeeping).
     pub gc_mark: Cell<u64>,
+    /// The block's tiering state (ADR 0019, TASK-101.3).
+    pub tier: Tier,
+}
+
+/// Tiering state of one block for its owning VM: how hot the block is and
+/// its compiled code, if any. The VM owns the meaning; the compiled code
+/// is opaque here (the JIT is an optional crate the compiler does not
+/// depend on).
+#[derive(Default)]
+pub struct Tier {
+    /// Function entries and loop back-edges counted so far.
+    pub hotness: Cell<u32>,
+    /// [`Tier::COLD`], [`Tier::COMPILED`] or [`Tier::NEVER`].
+    pub state: Cell<u8>,
+    pub code: OnceCell<Rc<dyn Any>>,
+}
+
+impl Tier {
+    pub const COLD: u8 = 0;
+    pub const COMPILED: u8 = 1;
+    /// Not eligible, or compilation failed: stays in the interpreter.
+    pub const NEVER: u8 = 2;
+}
+
+impl fmt::Debug for Tier {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tier")
+            .field("hotness", &self.hotness.get())
+            .field("state", &self.state.get())
+            .finish()
+    }
 }
 
 /// A cached global binding for one name of a block ([`CodeBlock::globals`],
@@ -1120,6 +1152,7 @@ impl CodeBlock {
             name: Cell::new(ConstString::EMPTY),
             shape_epoch: Cell::new(0),
             gc_mark: Cell::new(0),
+            tier: Tier::default(),
         });
         if f.owner == owner {
             Some(f)

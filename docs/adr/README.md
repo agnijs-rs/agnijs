@@ -17,3 +17,4 @@ Crate names in these records use the current `agnijs-*` names; where a record sa
 - [16. The engine workspace stands alone: Gable reaches in only through the engine interface](0016-the-engine-workspace-stands-alone.md)
 - [17. The debugger is a capability beside the engine interface, and CDP lives in its own crate](0017-debugger-is-a-capability-beside-the-engine-interface-with-cdp-in-its-own-crate.md)
 - [19. Later tiers share the interpreter's frames, and the interpreter, bytecode, object model and collector keep the constraints that make them possible](0019-jit-readiness-constraints-tiering-and-deoptimization.md) (0018 is Gable's adoption ADR)
+- [20. The baseline JIT generates code with Cranelift's code generator alone, never speculates, and leaves compiled code for every call](0020-baseline-jit-on-cranelift-codegen-with-no-speculation.md)

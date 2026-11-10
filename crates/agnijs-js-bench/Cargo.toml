@@ -8,6 +8,10 @@ repository.workspace = true
 description = "Engine micro-benchmarks: the same JS workloads on every engine behind the engine interface"
 publish = false
 
+[features]
+# Build the engine with the baseline JIT; AGNIJS_JIT picks when it runs.
+jit = ["agnijs-js-vm/jit"]
+
 [dependencies]
 agnijs-engine-api.workspace = true
 agnijs-engine-quickjs.workspace = true

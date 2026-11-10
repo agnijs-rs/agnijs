@@ -7,6 +7,10 @@ rust-version.workspace = true
 repository.workspace = true
 description = "agnijs-js-test262"
 
+[features]
+# Build the engine with the baseline JIT; AGNIJS_JIT picks when it runs.
+jit = ["agnijs-js-vm/jit"]
+
 [dependencies]
 agnijs-engine-api.workspace = true
 agnijs-engine-quickjs.workspace = true
