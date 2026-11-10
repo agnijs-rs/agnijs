@@ -164,3 +164,67 @@ Gable's benches (`run-bench.mjs`, `on` and `force` over off in the same binary):
 - **Where the JIT pays:** loops of arithmetic, property access and array elements, by 1.2 to 2.9 times.
 - **Where it loses:** code dominated by calls, closures and short runs. Every call leaves compiled code and every return re-enters it. Gable's benches are all of that kind. When forced, they lose 16 to 38%, and startup loses five times over through compile time alone. Mode `On` now leaves such code to the interpreter, where it is within noise.
 - **What would change that:** compiled calls, meaning a frame push and a return in machine code, so that a call no longer leaves compiled code. That is a follow-up task. Cutting compile time, for example by sharing the IC paths as out-of-line stubs, would also let mode `On` compile sooner.
+
+## Addendum: calls without leaving compiled code (TASK-101.3.3)
+
+The title's "leaves compiled code for every call" no longer holds for a call to a function that is already compiled. Everything else in the decision stands: there is still no speculation, no deoptimization and no GC map.
+
+### Nested entry
+
+A `Call` in compiled code goes out through its own entry (`Ctx::call`, which runs `Runtime::call`). The interpreter runs the call instruction as before: frame push, stack-overflow check and function-entry poll. Most of the time that push leaves exactly one new bytecode frame, and its block may already have machine code at the frame's pc. In that case the runtime enters that code from inside the call out (`JitRt::enter_callee`), at most 64 levels deep (`MAX_NEST`). On the callee's `Return` the runtime pops the frame (`do_return`), polls, and hands the caller `Resume::Next` with the return value. The caller then continues in its own machine code at the next instruction, without going back to `Vm::jit_run`.
+
+This needs neither deoptimization nor GC maps, for the same reason as the rest of the tier:
+
+- The caller has flushed its state to its interpreter frame before the call out (I1, I2).
+- No heap address stays in a machine register across the call out (I3).
+
+Any other way out of the callee (`Frame`, `Fault`, `Interp`, `Done`, or a nest deeper than the cap) unwinds every nested machine frame back to `Vm::jit_run`. The interpreter frames are already valid at that point, so exceptions unwind exactly as in the interpreter, through frames that compiled code left. When the debugger is attached (`debug_hot`), or the heap's attention word is set, the runtime takes the full `after` path instead of the direct return, so stepping, breakpoints and safe points behave as before.
+
+### Lighter call outs
+
+Instructions that touch neither the frame stack nor the heap layout go through `Ctx::fast` (`Runtime::fast`): `LdaGlobal` with its cache, `LdaEnv`, `StaEnv` and `LdaCallee`. A `Some` result promises that nothing cached changed, so the trampoline does not reload the register window, the heap view or the counters. `LdaThis` compiles inline. A frame's `this` is fixed for the frame's life, so `exec::enter` stores it in `Ctx` once. A `GetNamed` or `SetNamed` that machine code hands over has already missed its inline cache, so it goes straight to the generic step, which probes the cache only once.
+
+### Measured
+
+Measured on the same machine and in the same way as above (median of 5 alternating rounds), with ratios over the feature-off interpreter in the same binary. The before column is the TASK-101.3.2 table above.
+
+`agnijs-js-bench`:
+
+| Workload | `force` before | `force` now | `on` now |
+| --- | --- | --- | --- |
+| closures | 1.33 | 1.07 | 1.01 |
+| calls-recursive | 1.30 | 1.07 | 1.00 |
+| method-calls | 1.25 | 0.89 | 1.01 |
+| loop-arith | 0.35 | 0.37 | 0.37 |
+| prop-monomorphic | 0.77 | 0.59 | 0.58 |
+| prop-polymorphic | 0.72 | 0.58 | 0.57 |
+| prop-write-alloc | 0.99 | 1.07 | 1.00 |
+
+Every other workload is within 2% in mode `On`, and regex-tokenize is 9% faster.
+
+Gable's benches, `force` over off:
+
+| Bench | Before | Now |
+| --- | --- | --- |
+| rxjs-operators | 1.38 | 1.27 |
+| rxjs-higher-order | 1.27 | 1.18 |
+| rxjs-subject-fanout | 1.30 | 1.11 |
+| signal-churn | 1.26 | 1.14 |
+| signal-create | 1.30 | 1.21 |
+| template-mount | 1.28 | 1.21 |
+| template-update | 1.37 | 1.26 |
+| list-diff | 1.16 | 1.12 |
+
+Mode `On` is within 1.5% of off on every one of them, from 0.986 to 1.010.
+
+### What this did not reach, and why
+
+Forced calls are now cheaper, but closures and calls-recursive are still about 7% slower than the interpreter, and Gable's benches 11 to 27% slower. None of the remaining cost is speculation, so no deoptimization or GC maps would remove it. It is per-call glue spread over several Rust layers:
+
+- `enter_callee` and `exec::enter` set up a `Ctx` for each call, about 22% of the time on rxjs-operators.
+- The call and return trampolines.
+- The frame push and pop that the interpreter shares: `push_function_frame`, `do_return`, and the register clearing in `regs.resize`.
+
+The interpreter does the same push and pop, but without the second layer around it. Winning here needs the frame push and the return in machine code, or a much lighter `Ctx` set up once per nest rather than once per call. The `Frame` representation (a `Vec` of frames holding `Rc`s) makes the first of these hard to do from Cranelift. For that reason mode `On` still compiles only blocks with a loop, and loop-free callees stay in the interpreter.
+
+The prototype became a four-byte `OptObj` in TASK-101.3.2. That change also left four bytes of padding in `ObjectData`, which made the feature-off interpreter 6% slower on prop-write-alloc (bisected; same-path builds). The padding is now an explicit zeroed field, which brings it back to 0.98 of the pre-JIT build. promise-chain was noise.
