@@ -119,6 +119,70 @@ jobs:
               --filter test/built-ins/Array/prototype/forEach --filter test/language/arguments-object
           done
 
+  capi:
+    # The C API (ADR 0021, TASK-103.3): the Rust tests with fault injection,
+    # the bounded fuzz test in release, and the C test program and the C and
+    # C++ examples built with CMake and run against the static and the
+    # shared library.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: capi
+      - run: cargo test --locked -p agnijs-capi --features fault-injection
+      - name: Fuzz the C API, bounded (release, 10x the default work)
+        timeout-minutes: 10
+        env:
+          AGNIJS_CAPI_FUZZ_ITERS: "10"
+        run: cargo test --release --locked -p agnijs-capi --test fuzz
+      - run: cargo build --release --locked -p agnijs-capi
+      - name: C test program and C/C++ examples (static and shared)
+        shell: bash
+        run: |
+          cmake -S crates/agnijs-capi/c -B target/capi-c -DCMAKE_BUILD_TYPE=Release -DAGNIJS_LIB_DIR="$PWD/target/release"
+          cmake --build target/capi-c --config Release
+          ctest --test-dir target/capi-c -C Release --output-on-failure
+
+  capi-checks:
+    # The checked-in header matches the sources, clippy is clean, the C test
+    # runs under AddressSanitizer and LeakSanitizer, and the raw-pointer
+    # helpers and the handle table run under Miri.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: capi-checks
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cbindgen@0.29.4
+      - name: Header drift (regenerate include/agnijs.h and compare)
+        run: |
+          cbindgen --config crates/agnijs-capi/cbindgen.toml --crate agnijs-capi --output crates/agnijs-capi/include/agnijs.h
+          git diff --exit-code -- crates/agnijs-capi/include/agnijs.h
+      - run: cargo clippy --locked -p agnijs-capi --no-deps --all-targets --features fault-injection -- -D warnings
+      - name: C test program under AddressSanitizer and LeakSanitizer
+        run: |
+          cargo build --release --locked -p agnijs-capi
+          cmake -S crates/agnijs-capi/c -B target/capi-asan -DCMAKE_BUILD_TYPE=Debug -DAGNIJS_LIB_DIR="$PWD/target/release" \
+            -DCMAKE_C_FLAGS="-fsanitize=address -fno-omit-frame-pointer" -DCMAKE_CXX_FLAGS="-fsanitize=address -fno-omit-frame-pointer" \
+            -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address"
+          cmake --build target/capi-asan
+          ASAN_OPTIONS=detect_leaks=1 ctest --test-dir target/capi-asan --output-on-failure
+      - run: cargo miri setup
+      - run: cargo miri test --locked -p agnijs-capi --lib miri_
+
   standalone:
     # The engine must build and test with nothing else beside it (ADR 0016):
     # export only the tracked files into an empty directory outside the
@@ -152,6 +216,12 @@ jobs:
         with:
           workspaces: .
       - run: cargo test --locked -p agnijs-js-vm -p agnijs-js-compiler
+      - name: C API handles and host objects under GC stress
+        # The allocation-limit, deep-nesting and fuzz tests are skipped: a
+        # collection at every safe point makes them take hours.
+        run: >-
+          cargo test --locked -p agnijs-capi --features fault-injection --lib --test basics --test hostile --test fault_injection --
+          --skip the_memory_limit --skip deeply_nested --skip stack_budget
       - name: Cache test262 at the pinned commit
         uses: actions/cache@v4
         with:

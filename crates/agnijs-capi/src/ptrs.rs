@@ -226,3 +226,109 @@ pub unsafe fn copy_out<T: Copy + Default>(src: &[T], dst: *mut T, cap: usize, ne
     }
     Ok(())
 }
+
+/// Run under Miri in CI (`cargo miri test -p agnijs-capi --lib miri_`):
+/// every raw-pointer path here, with the hostile inputs the checks exist
+/// for, so Miri sees no out-of-bounds, misaligned or uninitialised access.
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    fn status<T>(r: Res<T>) -> AgnijsStatus {
+        match r {
+            Ok(_) => AGNIJS_OK,
+            Err(f) => f.status,
+        }
+    }
+
+    #[test]
+    fn miri_inputs_check_null_alignment_length_and_encoding() {
+        unsafe {
+            assert_eq!(bytes(std::ptr::null(), 0, "p").unwrap(), b"");
+            assert_eq!(status(bytes(std::ptr::null(), 1, "p")), AGNIJS_ERR_NULL_POINTER);
+            let data = [1u8, 2, 3];
+            assert_eq!(bytes(data.as_ptr(), 3, "p").unwrap(), &data);
+            assert_eq!(status(bytes(data.as_ptr(), usize::MAX, "p")), AGNIJS_ERR_INVALID_ARGUMENT);
+            assert_eq!(utf8(b"h\xc3\xa9".as_ptr().cast(), 3, "s").unwrap(), "h\u{e9}");
+            assert_eq!(status(utf8(b"\xff".as_ptr().cast(), 1, "s")), AGNIJS_ERR_INVALID_UTF8);
+            assert_eq!(status(utf8(b"\xc3".as_ptr().cast(), 1, "s")), AGNIJS_ERR_INVALID_UTF8);
+
+            let units = [0xD800u16, 0x41, 0x42];
+            assert_eq!(utf16(units.as_ptr(), 3, "u").unwrap(), &units);
+            let odd = units.as_ptr().cast::<u8>().wrapping_add(1).cast::<u16>();
+            assert_eq!(status(utf16(odd, 1, "u")), AGNIJS_ERR_INVALID_ARGUMENT);
+            assert_eq!(status(utf16(units.as_ptr(), usize::MAX / 2 + 1, "u")), AGNIJS_ERR_INVALID_ARGUMENT);
+            assert_eq!(status(utf16(std::ptr::null(), 1, "u")), AGNIJS_ERR_NULL_POINTER);
+
+            let ids = [7u64, 8];
+            assert_eq!(handles(ids.as_ptr(), 2, "h").unwrap(), &ids);
+            let odd = ids.as_ptr().cast::<u8>().wrapping_add(4).cast::<u64>();
+            assert_eq!(status(handles(odd, 1, "h")), AGNIJS_ERR_INVALID_ARGUMENT);
+            assert_eq!(status(handles(ids.as_ptr(), usize::MAX / 8 + 1, "h")), AGNIJS_ERR_INVALID_ARGUMENT);
+        }
+    }
+
+    #[test]
+    fn miri_outputs_write_only_into_checked_memory() {
+        let mut slot = std::mem::MaybeUninit::<u64>::uninit();
+        Out::new(slot.as_mut_ptr(), "out").unwrap().write(5);
+        assert_eq!(unsafe { slot.assume_init() }, 5);
+        assert_eq!(status(Out::<u64>::new(std::ptr::null_mut(), "out")), AGNIJS_ERR_NULL_POINTER);
+        assert!(Out::<u64>::optional(std::ptr::null_mut(), "out").unwrap().is_none());
+        let mut words = [0u64; 2];
+        let odd = words.as_mut_ptr().cast::<u8>().wrapping_add(1).cast::<u64>();
+        assert_eq!(status(Out::new(odd, "out")), AGNIJS_ERR_INVALID_ARGUMENT);
+
+        let src = [b'a', b'b', b'c'];
+        let mut dst = [0xAAu8; 4];
+        let mut needed = 0usize;
+        unsafe {
+            let n = Out::optional(&mut needed, "needed").unwrap();
+            assert_eq!(status(copy_out(&src, dst.as_mut_ptr(), 3, n)), AGNIJS_ERR_BUFFER_TOO_SMALL);
+            assert_eq!(needed, 3);
+            assert_eq!(dst, [0xAA; 4], "a short buffer is left untouched");
+            assert_eq!(status(copy_out(&src, std::ptr::null_mut(), 0, None)), AGNIJS_ERR_BUFFER_TOO_SMALL);
+            assert_eq!(status(copy_out(&src, std::ptr::null_mut(), 9, None)), AGNIJS_ERR_NULL_POINTER);
+            copy_out(&src, dst.as_mut_ptr(), 4, None).unwrap();
+        }
+        assert_eq!(dst, *b"abc\0");
+    }
+
+    #[test]
+    fn miri_versioned_structs_check_size_and_unknown_fields() {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        struct V1 {
+            struct_size: u32,
+            a: u32,
+        }
+        // A caller built against a newer header: V1 plus one more field.
+        #[repr(C)]
+        #[allow(dead_code)] // `b` is read only through raw bytes
+        struct V2 {
+            v1: V1,
+            b: u64,
+        }
+        let size = |n: usize| u32::try_from(n).unwrap();
+        unsafe {
+            let ok = V1 { struct_size: size(8), a: 3 };
+            assert_eq!(versioned(&ok, "o").unwrap().a, 3);
+            let small = V1 { struct_size: 4, a: 3 };
+            assert_eq!(status(versioned(&small, "o")), AGNIJS_ERR_INVALID_ARGUMENT);
+            let huge = V1 { struct_size: u32::MAX, a: 3 };
+            assert_eq!(status(versioned(&huge, "o")), AGNIJS_ERR_INVALID_ARGUMENT);
+            assert_eq!(status(versioned::<V1>(std::ptr::null(), "o")), AGNIJS_ERR_NULL_POINTER);
+
+            let newer = V2 { v1: V1 { struct_size: size(std::mem::size_of::<V2>()), a: 4 }, b: 0 };
+            assert_eq!(versioned(std::ptr::addr_of!(newer).cast::<V1>(), "o").unwrap().a, 4);
+            let newer_used = V2 { v1: V1 { struct_size: size(std::mem::size_of::<V2>()), a: 4 }, b: 1 };
+            assert_eq!(status(versioned(std::ptr::addr_of!(newer_used).cast::<V1>(), "o")), AGNIJS_ERR_INVALID_ARGUMENT);
+
+            let mut out = V1 { struct_size: 4, a: 0 };
+            assert_eq!(status(versioned_out(&mut out, "o")), AGNIJS_ERR_INVALID_ARGUMENT);
+            out.struct_size = size(8);
+            assert!(versioned_out(&mut out, "o").is_ok());
+        }
+    }
+}
