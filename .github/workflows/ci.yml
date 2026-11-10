@@ -289,8 +289,20 @@ jobs:
     # The VM has no unsafe code; Miri checks the dependencies we lean on
     # (hashbrown, indexmap) and the arena discipline under its stricter
     # aliasing and uninitialised-memory rules. Only the collector tests run:
-    # the full engine under Miri is too slow.
+    # the full engine under Miri is too slow. The loops are shrunk under Miri
+    # (cfg!(miri) in tests/gc.rs); one job per test keeps the wall time to the
+    # slowest test. The full-size run is tools/miri-local.mjs (docs/miri-local.md).
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - small_program_under_gc_stress
+          - live_data_survives_collection
+          - recycled_storage_starts_empty
+          - weak_containers_are_processed
+          - weak_map_string_and_bigint_values_survive
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -299,8 +311,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: .
+          shared-key: miri
+          save-if: ${{ matrix.test == 'small_program_under_gc_stress' }}
       - run: cargo miri setup
-      - run: cargo miri test --locked -p agnijs-js-vm --test gc
+      - run: cargo miri test --locked -p agnijs-js-vm --test gc -- --exact ${{ matrix.test }}
         env:
           MIRIFLAGS: -Zmiri-disable-isolation
 

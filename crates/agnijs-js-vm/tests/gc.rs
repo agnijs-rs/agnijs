@@ -13,6 +13,20 @@ fn engine(stress: bool) -> Vm {
     vm
 }
 
+/// Iteration counts for the tests that run under Miri. Miri is roughly three
+/// orders of magnitude slower than a native run, so under it the loops shrink
+/// (they only need to exercise each collector path a few times; the native
+/// runs and the GC-stress CI job cover the large counts). Set
+/// `AGNIJS_MIRI_FULL=1` (needs `-Zmiri-disable-isolation`) to run the full
+/// sizes under Miri too; the local nightly runner does (tools/miri-local.mjs).
+fn scaled(full: u32, under_miri: u32) -> u32 {
+    if cfg!(miri) && std::env::var_os("AGNIJS_MIRI_FULL").is_none() {
+        under_miri
+    } else {
+        full
+    }
+}
+
 fn num(v: Value) -> f64 {
     v.as_number()
         .unwrap_or_else(|| panic!("expected a number, got {v:?}"))
@@ -52,13 +66,14 @@ fn garbage_is_reclaimed() {
 #[test]
 fn live_data_survives_collection() {
     let mut vm = engine(false);
-    run(&mut vm, "var keep = []; for (var i = 0; i < 500; i++) keep.push({ i, s: 'v' + i, f() { return this.i; } });");
+    let n = scaled(500, 40);
+    run(&mut vm, &format!("var keep = []; for (var i = 0; i < {n}; i++) keep.push({{ i, s: 'v' + i, f() {{ return this.i; }} }});"));
     vm.collect_garbage();
     let total = num(run(
         &mut vm,
         "keep.reduce((a, o) => a + o.f() + (o.s === 'v' + o.i ? 0 : 1e9), 0)",
     ));
-    assert_eq!(total, (0..500).sum::<i32>() as f64);
+    assert_eq!(total, (0..n as i32).sum::<i32>() as f64);
 }
 
 #[test]
@@ -214,29 +229,30 @@ fn a_memory_limit_stops_a_loop_that_only_grows_arrays() {
 #[test]
 fn recycled_storage_starts_empty() {
     let mut vm = engine(false);
+    let n = scaled(3000, 60);
     run(
         &mut vm,
-        "var junk = []; for (var i = 0; i < 3000; i++) {
-           var o = { a: i, b: 'x', c: null, d: i }; o.e = [i, i, i];
-           junk.push(o, [1, 2, 3, 4, 5, 6, 7, 8], (function (z) { var q = z; let w = z; return () => q + w; })(i));
-         }
-         junk = null;",
+        &format!("var junk = []; for (var i = 0; i < {n}; i++) {{
+           var o = {{ a: i, b: 'x', c: null, d: i }}; o.e = [i, i, i];
+           junk.push(o, [1, 2, 3, 4, 5, 6, 7, 8], (function (z) {{ var q = z; let w = z; return () => q + w; }})(i));
+         }}
+         junk = null;"),
     );
     vm.collect_garbage();
     let v = run(
         &mut vm,
-        "var ok = true;
-         for (var i = 0; i < 3000 && ok; i++) {
-           var o = {}; var a = []; var b = new Array(3);
+        &format!("var ok = true;
+         for (var i = 0; i < {n} && ok; i++) {{
+           var o = {{}}; var a = []; var b = new Array(3);
            ok = Object.keys(o).length === 0 && o.a === undefined && a.length === 0 && a[0] === undefined
              && b.length === 3 && !(0 in b);
            o.z = i; a.push(i);
            ok = ok && Object.keys(o).join() === 'z' && o.z === i && a.length === 1 && a[0] === i;
-           ok = ok && (function () { var u; var tdz; try { tdz; } catch (e) { return false; }
-                      try { late; return false; } catch (e) { if (!(e instanceof ReferenceError)) return false; }
-                      let late = 1; return u === undefined && late === 1; })();
-         }
-         ok",
+           ok = ok && (function () {{ var u; var tdz; try {{ tdz; }} catch (e) {{ return false; }}
+                      try {{ late; return false; }} catch (e) {{ if (!(e instanceof ReferenceError)) return false; }}
+                      let late = 1; return u === undefined && late === 1; }})();
+         }}
+         ok"),
     );
     assert_eq!(v, Value::Bool(true));
 }
@@ -274,16 +290,17 @@ fn weak_containers_are_processed() {
 #[test]
 fn weak_map_string_and_bigint_values_survive() {
     let mut vm = engine(false);
+    let n = scaled(2000, 50);
     run(
         &mut vm,
-        "var wm = new WeakMap(); var k1 = {}, k2 = {}, k3 = {};
+        &format!("var wm = new WeakMap(); var k1 = {{}}, k2 = {{}}, k3 = {{}};
          wm.set(k1, 'http://localhost:5173/src/page.ts?t=1'.split('?')[0]);
          wm.set(k2, BigInt('123456789012345678901234567890') * 2n);
          wm.set(k3, Symbol('fresh ' + 'description'));
-         for (var i = 0; i < 2000; i++) { var junk = { s: 'junk' + i, get entries() { return i; } }; }",
+         for (var i = 0; i < {n}; i++) {{ var junk = {{ s: 'junk' + i, get entries() {{ return i; }} }}; }}"),
     );
     vm.collect_garbage();
-    run(&mut vm, "for (var i = 0; i < 2000; i++) { var more = { s: 'more' + i, get entries() { return i; } }; }");
+    run(&mut vm, &format!("for (var i = 0; i < {n}; i++) {{ var more = {{ s: 'more' + i, get entries() {{ return i; }} }}; }}"));
     vm.collect_garbage();
     let v = run(
         &mut vm,
@@ -296,10 +313,14 @@ fn weak_map_string_and_bigint_values_survive() {
 }
 
 /// A Miri-sized program: closures, a generator, an exception and a
-/// string concatenation, with a collection at every safe point.
+/// string concatenation, with a collection at every safe point (natively and
+/// in the full Miri run). Under the default Miri run every 64th safe point
+/// collects: each collection marks and sweeps the whole realm, which made
+/// this one test take 75 minutes under Miri.
 #[test]
 fn small_program_under_gc_stress() {
     let mut vm = engine(true);
+    vm.heap.stress_every = scaled(1, 64);
     let v = num(run(
         &mut vm,
         "function* g() { let s = ''; for (let i = 0; i < 3; i++) { s += i; yield () => s; } } var t = 0; for (const f of g()) t += f().length; try { null.x; } catch (e) { t += e instanceof TypeError ? 10 : 0; } t",
