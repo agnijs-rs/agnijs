@@ -236,7 +236,10 @@ pub struct AgnijsCallInfo {
     pub this_value: AgnijsValue,
     pub args: *const AgnijsValue,
     pub argc: usize,
-    /// Zero unless called with `new`.
+    /// Zero unless called with `new`. Host functions are not constructors
+    /// in ABI 1.0 (`new f()` throws a TypeError before calling), so this is
+    /// zero for now; wrap the function in a JavaScript class or function to
+    /// construct (see the C++ example).
     pub new_target: AgnijsValue,
 }
 
