@@ -64,7 +64,10 @@ mod table;
 mod types;
 
 pub use api::*;
-pub use host::{agnijs_sink_set_error, agnijs_sink_set_module, agnijs_sink_set_source_map, agnijs_sink_set_string};
+pub use host::{
+    agnijs_sink_set_error, agnijs_sink_set_module, agnijs_sink_set_source_map,
+    agnijs_sink_set_string,
+};
 pub use types::*;
 
 #[cfg(feature = "fault-injection")]

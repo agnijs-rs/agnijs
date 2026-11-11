@@ -217,7 +217,12 @@ impl Vm {
 
     fn line_starts(&mut self, source: &Rc<SourceText>) -> Rc<[u32]> {
         let w = Rc::downgrade(source);
-        if let Some(i) = self.stacks.lines.iter().position(|(s, _)| Weak::ptr_eq(s, &w)) {
+        if let Some(i) = self
+            .stacks
+            .lines
+            .iter()
+            .position(|(s, _)| Weak::ptr_eq(s, &w))
+        {
             let hit = self.stacks.lines.remove(i);
             let t = hit.1.clone();
             self.stacks.lines.push(hit);
@@ -335,9 +340,15 @@ impl Vm {
             if out.len() >= limit {
                 break;
             }
-            let Some(p) = self.async_result_promise(g) else { break };
-            let Some(next) = self.awaiting_generator(p) else { break };
-            let Class::Generator(d) = &self.heap.obj(next).class else { break };
+            let Some(p) = self.async_result_promise(g) else {
+                break;
+            };
+            let Some(next) = self.awaiting_generator(p) else {
+                break;
+            };
+            let Class::Generator(d) = &self.heap.obj(next).class else {
+                break;
+            };
             let Some(saved) = &d.saved else { break };
             out.push(CapturedFrame::of(&saved.frame, FRAME_ASYNC));
             gen = Some(next);
@@ -453,7 +464,9 @@ impl Vm {
         if !f.code.name.is_empty() {
             return f.code.name.to_string();
         }
-        let Some(c) = f.callee else { return String::new() };
+        let Some(c) = f.callee else {
+            return String::new();
+        };
         let key = PropKey::Str(self.names.name);
         match self.heap.get_own_property(c, key).and_then(|p| p.value()) {
             Some(Value::String(s)) => self.heap.str_to_string(s),
@@ -569,7 +582,11 @@ impl Vm {
                 let arr = self.new_array(sites.into_iter().map(Value::Object).collect());
                 self.root(Value::Object(arr));
                 self.stacks.preparing += 1;
-                let r = self.call_value(f, Value::Object(ctor), &[Value::Object(o), Value::Object(arr)]);
+                let r = self.call_value(
+                    f,
+                    Value::Object(ctor),
+                    &[Value::Object(o), Value::Object(arr)],
+                );
                 self.stacks.preparing -= 1;
                 self.pop_roots(mark);
                 // A throwing prepareStackTrace leaves the trace unformatted.
@@ -677,7 +694,10 @@ impl Vm {
                 text,
                 flags,
             };
-            let s = self.alloc(ObjectData::new(Some(proto), Class::CallSite(Box::new(data))));
+            let s = self.alloc(ObjectData::new(
+                Some(proto),
+                Class::CallSite(Box::new(data)),
+            ));
             self.root(Value::Object(s));
             out.push(s);
         }
@@ -728,7 +748,11 @@ impl Vm {
             .map(|f| {
                 let p = self.mapped_position(&f.code, f.pc);
                 StackFrame {
-                    function: if f.named { f.code.name.to_string() } else { String::new() },
+                    function: if f.named {
+                        f.code.name.to_string()
+                    } else {
+                        String::new()
+                    },
                     script: p.file,
                     line: p.line,
                     column: p.column,
@@ -741,7 +765,10 @@ impl Vm {
 /// Whether `code` is a function body (a module body runs as an async
 /// function, but is reported as top-level code).
 pub fn is_function_code(code: &CodeBlock) -> bool {
-    !matches!(code.kind, CodeKind::Script | CodeKind::Module | CodeKind::Eval)
+    !matches!(
+        code.kind,
+        CodeKind::Script | CodeKind::Module | CodeKind::Eval
+    )
 }
 
 // ---- Error.prototype.stack, Error.captureStackTrace ------------------------------------
@@ -818,8 +845,11 @@ pub fn capture_stack_trace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 pub fn install(vm: &mut Vm, error_ctor: ObjId, error_proto: ObjId) {
     vm.accessor(error_proto, "stack", stack_getter, Some(stack_setter));
     let key = PropKey::Str(vm.names.stackTraceLimit);
-    vm.heap
-        .add_own_property(error_ctor, key, Property::data(Value::Number(10.0), Attrs::ALL));
+    vm.heap.add_own_property(
+        error_ctor,
+        key,
+        Property::data(Value::Number(10.0), Attrs::ALL),
+    );
     vm.method(error_ctor, "captureStackTrace", 2, capture_stack_trace);
 }
 

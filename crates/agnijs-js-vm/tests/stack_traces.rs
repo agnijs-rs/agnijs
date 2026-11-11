@@ -155,7 +155,10 @@ fn a_host_source_map_rewrites_error_stack_positions() {
         "gen.js",
         "function boom() { throw new Error('m') }\ntry { boom(); } catch (e) { e.stack }",
     );
-    assert_eq!(out, "Error: m\n    at boom (src/orig.ts:10:4)\n    at src/orig.ts:20:1");
+    assert_eq!(
+        out,
+        "Error: m\n    at boom (src/orig.ts:10:4)\n    at src/orig.ts:20:1"
+    );
 }
 
 #[test]

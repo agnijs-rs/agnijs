@@ -300,7 +300,11 @@ fn a_host_supplied_source_map_reaches_the_client_and_maps_exceptions() {
     d.engine().set_source_map("gen.js", Some(HOST_MAP)).unwrap();
     assert!(d
         .engine()
-        .eval_script(realm, "gen.js", "function boom() { throw new Error('m') }\nboom();\n")
+        .eval_script(
+            realm,
+            "gen.js",
+            "function boom() { throw new Error('m') }\nboom();\n"
+        )
         .is_err());
     session.serve(&mut *d);
     client.join().unwrap();

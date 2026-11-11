@@ -516,21 +516,55 @@ const MAP: &str = r#"{"version":3,"sources":["orig.ts"],"sourceRoot":"src","name
 fn source_maps_rewrite_exception_and_error_stack_positions() {
     let e = engine();
     let name = "test.js";
-    assert_eq!(unsafe { agnijs_set_source_map(e, name.as_ptr().cast(), name.len(), MAP.as_ptr().cast(), MAP.len()) }, AGNIJS_OK);
+    assert_eq!(
+        unsafe {
+            agnijs_set_source_map(
+                e,
+                name.as_ptr().cast(),
+                name.len(),
+                MAP.as_ptr().cast(),
+                MAP.len(),
+            )
+        },
+        AGNIJS_OK
+    );
     let src = "function boom() { throw new Error('m') }\nboom();";
     let (st, _) = eval_status(e, src);
     assert_eq!(st, AGNIJS_EXCEPTION);
     let (_, _, stack) = take_exception(e);
-    assert_eq!(stack, "boom (src/orig.ts:10:4)\n<anonymous> (src/orig.ts:20:1)");
+    assert_eq!(
+        stack,
+        "boom (src/orig.ts:10:4)\n<anonymous> (src/orig.ts:20:1)"
+    );
     // Removed: positions are the generated ones again.
-    assert_eq!(unsafe { agnijs_set_source_map(e, name.as_ptr().cast(), name.len(), ptr::null(), 0) }, AGNIJS_OK);
+    assert_eq!(
+        unsafe { agnijs_set_source_map(e, name.as_ptr().cast(), name.len(), ptr::null(), 0) },
+        AGNIJS_OK
+    );
     let (st, _) = eval_status(e, src);
     assert_eq!(st, AGNIJS_EXCEPTION);
-    assert_eq!(take_exception(e).2, "boom (test.js:1:19)\n<anonymous> (test.js:2:1)");
+    assert_eq!(
+        take_exception(e).2,
+        "boom (test.js:1:19)\n<anonymous> (test.js:2:1)"
+    );
     // A map that does not decode is ignored, never an error.
     let bad = "{";
-    assert_eq!(unsafe { agnijs_set_source_map(e, name.as_ptr().cast(), name.len(), bad.as_ptr().cast(), bad.len()) }, AGNIJS_OK);
-    assert_eq!(eval_display(e, "new Error('x').stack"), "Error: x\n    at test.js:1:1");
+    assert_eq!(
+        unsafe {
+            agnijs_set_source_map(
+                e,
+                name.as_ptr().cast(),
+                name.len(),
+                bad.as_ptr().cast(),
+                bad.len(),
+            )
+        },
+        AGNIJS_OK
+    );
+    assert_eq!(
+        eval_display(e, "new Error('x').stack"),
+        "Error: x\n    at test.js:1:1"
+    );
     free_engine(e);
 }
 
@@ -539,15 +573,26 @@ fn a_load_hook_can_hand_over_a_source_map_with_the_module() {
     let e = module_engine();
     let r = realm(e);
     let mut p = 0;
-    assert_eq!(unsafe { agnijs_load_module(e, r, "./mapped.js".as_ptr().cast(), 11, &mut p) }, AGNIJS_OK, "{}", last_error());
+    assert_eq!(
+        unsafe { agnijs_load_module(e, r, "./mapped.js".as_ptr().cast(), 11, &mut p) },
+        AGNIJS_OK,
+        "{}",
+        last_error()
+    );
     unsafe { agnijs_run_jobs(e, r, ptr::null_mut()) };
     let (mut state, mut ns) = (0, 0);
     unsafe { agnijs_promise_state(e, r, p, &mut state, &mut ns) };
     assert_eq!(state, AGNIJS_PROMISE_FULFILLED, "{}", display(e, ns));
     let s = get(e, ns, "s");
-    assert_eq!(utf8(e, s), "Error: m\n    at boom (src/orig.ts:10:4)\n    at src/orig.ts:20:1");
+    assert_eq!(
+        utf8(e, s),
+        "Error: m\n    at boom (src/orig.ts:10:4)\n    at src/orig.ts:20:1"
+    );
     // Only a load sink takes a map.
-    assert_eq!(unsafe { agnijs_sink_set_source_map(12345, MAP.as_ptr().cast(), MAP.len()) }, AGNIJS_ERR_INVALID_HANDLE);
+    assert_eq!(
+        unsafe { agnijs_sink_set_source_map(12345, MAP.as_ptr().cast(), MAP.len()) },
+        AGNIJS_ERR_INVALID_HANDLE
+    );
     free_engine(e);
 }
 

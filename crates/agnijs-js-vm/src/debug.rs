@@ -823,16 +823,14 @@ impl Vm {
         } else {
             match &self.heap.obj(o).class {
                 Class::Array(a) => format!("{cn}({})", a.length),
-                Class::Error(_) => {
-                    match self.error_stack_text(o) {
-                        Some(s) => s,
-                        None => {
-                            let (name, message) = self.exception_name_message(Value::Object(o));
-                            if message.is_empty() {
-                                name
-                            } else {
-                                format!("{name}: {message}")
-                            }
+                Class::Error(_) => match self.error_stack_text(o) {
+                    Some(s) => s,
+                    None => {
+                        let (name, message) = self.exception_name_message(Value::Object(o));
+                        if message.is_empty() {
+                            name
+                        } else {
+                            format!("{name}: {message}")
                         }
                     }
                 }

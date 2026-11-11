@@ -193,7 +193,10 @@ fn set_suppressed(vm: &mut Vm, o: ObjId, error: Value, suppressed: Value) {
 /// DisposeResources creates when a disposal throws over an earlier error.
 pub fn new_suppressed_error(vm: &mut Vm, error: Value, suppressed: Value) -> Value {
     let proto = vm.intrinsic(Intrinsic::SuppressedErrorPrototype);
-    let o = vm.alloc(crate::object::ObjectData::new(Some(proto), Class::Error(None)));
+    let o = vm.alloc(crate::object::ObjectData::new(
+        Some(proto),
+        Class::Error(None),
+    ));
     vm.attach_error_stack(o);
     set_suppressed(vm, o, error, suppressed);
     Value::Object(o)

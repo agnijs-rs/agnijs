@@ -66,11 +66,23 @@ fn hostile_maps_are_rejected_without_panicking() {
     let many = vec![big; 4096].join(",");
     assert!(SourceMap::parse(&map(&many)).is_err());
     // A single value past the 32-bit range.
-    assert!(SourceMap::parse(&map("gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggB")).is_err());
-    assert!(SourceMap::parse(&map("AAAA,ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggB")).is_err());
+    assert!(SourceMap::parse(&map(
+        "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggB"
+    ))
+    .is_err());
+    assert!(SourceMap::parse(&map(
+        "AAAA,ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggB"
+    ))
+    .is_err());
     // Percent escapes cut by a multi-byte character.
-    assert!(SourceMap::from_data_url("data:application/json,%\u{e9}\u{e9}").unwrap().is_err());
-    assert!(SourceMap::from_data_url("data:application/json,%e\u{e9}").unwrap().is_err());
+    assert!(
+        SourceMap::from_data_url("data:application/json,%\u{e9}\u{e9}")
+            .unwrap()
+            .is_err()
+    );
+    assert!(SourceMap::from_data_url("data:application/json,%e\u{e9}")
+        .unwrap()
+        .is_err());
     // Deep JSON nesting.
     let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
     assert!(SourceMap::parse(&deep).is_err());
@@ -98,10 +110,13 @@ fn fuzzed_maps_never_panic() {
         seed ^= seed << 17;
         seed
     };
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=,;\"{}[]:-_%\\ \n";
+    const ALPHABET: &[u8] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=,;\"{}[]:-_%\\ \n";
     for round in 0..3000 {
         let mut bytes: Vec<u8> = if round % 3 == 0 {
-            (0..(next() % 200)).map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize]).collect()
+            (0..(next() % 200))
+                .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+                .collect()
         } else {
             MAP.as_bytes().to_vec()
         };

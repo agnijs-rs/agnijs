@@ -283,14 +283,22 @@ fn entry_points() -> Vec<(&'static str, Call)> {
         let mut d = ptr::null_mut();
         unsafe { agnijs_host_object_data(c.e, c.host, c.class, &mut d) }
     }));
-    v.push(("agnijs_sink_set_string", |_| unsafe { agnijs_sink_set_string(1, ptr::null(), 0) }));
-    v.push(("agnijs_sink_set_module", |_| unsafe { agnijs_sink_set_module(1, AGNIJS_MODULE_SOURCE, ptr::null(), 0) }));
-    v.push(("agnijs_sink_set_source_map", |_| unsafe { agnijs_sink_set_source_map(1, ptr::null(), 0) }));
+    v.push(("agnijs_sink_set_string", |_| unsafe {
+        agnijs_sink_set_string(1, ptr::null(), 0)
+    }));
+    v.push(("agnijs_sink_set_module", |_| unsafe {
+        agnijs_sink_set_module(1, AGNIJS_MODULE_SOURCE, ptr::null(), 0)
+    }));
+    v.push(("agnijs_sink_set_source_map", |_| unsafe {
+        agnijs_sink_set_source_map(1, ptr::null(), 0)
+    }));
     v.push(("agnijs_set_source_map", |c| {
         let (s, n) = k("m.js");
         unsafe { agnijs_set_source_map(c.e, s, n, ptr::null(), 0) }
     }));
-    v.push(("agnijs_sink_set_error", |_| unsafe { agnijs_sink_set_error(1, ptr::null(), 0) }));
+    v.push(("agnijs_sink_set_error", |_| unsafe {
+        agnijs_sink_set_error(1, ptr::null(), 0)
+    }));
     v.push(("agnijs_engine_free", |c| agnijs_engine_free(c.e)));
     v
 }
