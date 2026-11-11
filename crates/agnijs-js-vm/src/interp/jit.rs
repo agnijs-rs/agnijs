@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use agnijs_js_compiler::bytecode::{CodeBlock, Constant, IcSite, Instr, Tier};
 use agnijs_js_jit::{
-    Arith, Compiled, Exit, FrameHandle, FrameState, HeapView, JitValue, Resume, Runtime,
+    Arith, Compiled, DeoptReason, Exit, FrameHandle, FrameState, HeapView, JitValue, Resume,
+    Runtime, Speculation,
 };
 
 use super::{Args, Flow, RunOutcome};
@@ -98,8 +99,12 @@ fn hot_for(code: &CodeBlock) -> u32 {
 /// What the JIT has done in a VM.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct JitStats {
-    /// Blocks compiled.
+    /// Blocks compiled (a block recompiled after a guess failed counts
+    /// again).
     pub compiled: u32,
+    /// Compilations that guessed some register holds only numbers
+    /// (TASK-101.3.1).
+    pub speculated: u32,
     /// Blocks that reached the threshold and were not compilable.
     pub rejected: u32,
     /// Hot blocks left to the interpreter because compiled code would
@@ -382,7 +387,8 @@ impl Vm {
             }
             let code = self.frames[fi].code.clone();
             let pc = self.frames[fi].pc;
-            let Some(compiled) = self.jit_code(&code) else {
+            let base = self.frames[fi].base;
+            let Some(compiled) = self.jit_code(&code, base) else {
                 return idle;
             };
             if !compiled.is_entry(pc) {
@@ -402,7 +408,6 @@ impl Vm {
             self.jit.stats.entries += 1;
             self.jit.run_start = self.interrupt_counter;
             let acc = self.frames[fi].acc;
-            let base = self.frames[fi].base;
             let out = compiled.enter(
                 &mut JitRt {
                     vm: self,
@@ -482,12 +487,34 @@ impl Vm {
         calls * agnijs_js_jit::CALL_OUT_SHARE as u64 > body * edges
     }
 
-    /// The compiled code of `code`, compiling it if it has become hot.
-    fn jit_code<'c>(&mut self, code: &'c CodeBlock) -> Option<&'c Compiled<Value>> {
+    /// What to speculate about when compiling `code` for the frame whose
+    /// window starts at `base`: the registers its loops do inline
+    /// arithmetic on ([`agnijs_js_jit::number_candidates`]) that hold a
+    /// number now, or nothing yet (a local not assigned before the loop:
+    /// dead at the entry, so unguarded there), minus the guesses that have
+    /// failed before (`Tier::demoted`).
+    fn jit_guess(&self, code: &CodeBlock, tier: &Tier, base: usize) -> Speculation {
+        let mut numbers = agnijs_js_jit::number_candidates(code) & !tier.demoted.get();
+        let mut rest = numbers;
+        while rest != 0 {
+            let r = rest.trailing_zeros();
+            rest &= rest - 1;
+            match self.regs.get(base + r as usize) {
+                Some(Value::Number(_)) | Some(Value::Undefined) => {}
+                _ => numbers &= !(1u64 << r),
+            }
+        }
+        Speculation { numbers }
+    }
+
+    /// The compiled code of `code`, compiling it if it has become hot, for
+    /// the frame whose window starts at `base`. The caller holds the code
+    /// it runs: a guard failing during the run replaces the block's code.
+    fn jit_code(&mut self, code: &CodeBlock, base: usize) -> Option<Rc<Compiled<Value>>> {
         // A script body may have none yet: it is created on first use.
         let tier = &code.feedback(self.feedback_owner)?.tier;
         match tier.state.get() {
-            Tier::COMPILED => tier.code.get()?.downcast_ref(),
+            Tier::COMPILED => tier.code.borrow().clone()?.downcast().ok(),
             Tier::NEVER => None,
             _ => {
                 let h = tier.hotness.get().saturating_add(1);
@@ -512,15 +539,18 @@ impl Vm {
                         return None;
                     }
                 }
-                match Compiled::<Value>::compile_with(code, layout.as_ref()) {
+                let spec = self.jit_guess(code, tier, base);
+                match Compiled::<Value>::compile_speculating(code, layout.as_ref(), &spec) {
                     Ok(c) => {
                         let s = &mut self.jit.stats;
                         s.compiled += 1;
+                        s.speculated += u32::from(spec.numbers != 0);
                         s.code_bytes += c.code_size;
                         s.compile_time += c.compile_time;
                         tier.state.set(Tier::COMPILED);
-                        let _ = tier.code.set(Rc::new(c));
-                        tier.code.get()?.downcast_ref()
+                        let c = Rc::new(c);
+                        *tier.code.borrow_mut() = Some(c.clone());
+                        Some(c)
                     }
                     Err(_) => {
                         self.jit.stats.rejected += 1;
@@ -688,7 +718,12 @@ impl JitRt<'_> {
         // Already compiled: a callee still being counted towards its
         // threshold is counted by the tier loop, once.
         let compiled = match code.feedback_if(vm.feedback_owner) {
-            Some(f) if f.tier.state.get() == Tier::COMPILED => f.tier.code.get().and_then(|c| c.downcast_ref::<Compiled<Value>>()),
+            Some(f) if f.tier.state.get() == Tier::COMPILED => f
+                .tier
+                .code
+                .borrow()
+                .clone()
+                .and_then(|c| c.downcast::<Compiled<Value>>().ok()),
             _ => None,
         };
         let Some(compiled) = compiled else {
@@ -699,7 +734,7 @@ impl JitRt<'_> {
         }
         let c0 = vm.interrupt_counter;
         let outer_start = vm.jit.run_start;
-        let r = Self::run_callee(vm, callee, &code, compiled, pc);
+        let r = Self::run_callee(vm, callee, &code, &compiled, pc);
         // The caller's run does not count the callee's back-edges or the
         // polls made for it.
         vm.jit.run_start = outer_start.wrapping_add(vm.interrupt_counter.wrapping_sub(c0));
@@ -1001,6 +1036,39 @@ impl Runtime<Value> for JitRt<'_> {
             }
             top.materialized = true;
         }
+        if let Some(exit) = &state.exit {
+            if exit.reason == DeoptReason::Guard {
+                self.demote(exit.guard);
+            }
+        }
         self.vm.jit_write_state(self.fi, self.base, state);
+    }
+}
+
+/// A block whose guesses failed this often stops guessing.
+const MAX_DEOPTS: u32 = 4;
+
+impl JitRt<'_> {
+    /// A guess about register `guard` (`None`: any) failed: the block's
+    /// code is dropped and it is compiled again, without that guess, the
+    /// next time it is offered (its hotness is kept). The run that is in
+    /// the old code holds it until it returns.
+    fn demote(&mut self, guard: Option<u16>) {
+        let Some(f) = self.code.feedback_if(self.vm.feedback_owner) else {
+            return;
+        };
+        let tier = &f.tier;
+        let n = tier.deopts.get().saturating_add(1);
+        tier.deopts.set(n);
+        let mut demoted = tier.demoted.get();
+        match guard {
+            Some(r) if r < 64 && n < MAX_DEOPTS => demoted |= 1u64 << r,
+            _ => demoted = u64::MAX,
+        }
+        tier.demoted.set(demoted);
+        if tier.state.get() == Tier::COMPILED {
+            tier.state.set(Tier::COLD);
+            *tier.code.borrow_mut() = None;
+        }
     }
 }

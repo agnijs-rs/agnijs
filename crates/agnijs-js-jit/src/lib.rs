@@ -34,9 +34,12 @@ use std::time::Duration;
 use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind, IcSite, Instr};
 use agnijs_js_parser::ast::FunctionKind;
 
+mod analysis;
 #[cfg(jit_host)]
 mod codegen;
 mod exec;
+
+pub use analysis::number_candidates;
 pub mod handoff;
 
 pub use exec::FrameHandle;
@@ -480,15 +483,8 @@ fn named_site_cost(code: &CodeBlock, ic: u16) -> usize {
     cost
 }
 
-/// See [`codegen`]'s branch offsets; `None` on hosts without one.
 fn codegen_branch_offset(instr: &Instr) -> Option<i32> {
-    #[cfg(jit_host)]
-    return codegen::branch_offset(instr);
-    #[cfg(not(jit_host))]
-    {
-        let _ = instr;
-        None
-    }
+    analysis::branch_offset(instr)
 }
 
 /// Whether compiled code expands `instr` itself, at least for numbers

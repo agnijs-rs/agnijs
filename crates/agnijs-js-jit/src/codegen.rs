@@ -27,7 +27,7 @@
 //! guard calls the runtime's `slow` entry, which runs the instruction's
 //! generic semantics and returns the pc to continue at, or an exit code.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
 use agnijs_js_compiler::bytecode::{
@@ -45,6 +45,7 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 
+use crate::analysis::{access, branch_offset, choose_cache, liveness, written, Access};
 use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN};
 use crate::handoff::{Location, Point, PointKind, Points};
 use crate::layout::*;
@@ -57,175 +58,6 @@ pub(crate) struct Lowered {
     pub entries: Vec<u32>,
     /// The safe points, side exits and entry guards of the code.
     pub points: Points,
-}
-
-/// How many registers a block keeps in machine state at most.
-const MAX_CACHED: usize = 8;
-
-/// The registers an instruction's runtime path reads: a known few, or
-/// (a generic instruction, whose semantics the code generator does not
-/// decode) possibly any, and then possibly written too.
-enum Access {
-    Known(Vec<u16>),
-    Any,
-}
-
-fn access(instr: &Instr) -> Access {
-    use Instr::*;
-    Access::Known(match *instr {
-        Ldar(r) | Add(r) | Sub(r) | Mul(r) | Div(r) | Mod(r) | Exp(r) | Shl(r) | Shr(r)
-        | UShr(r) | BitAnd(r) | BitOr(r) | BitXor(r) | Eq(r) | Ne(r) | StrictEq(r)
-        | StrictNe(r) | Lt(r) | Le(r) | Gt(r) | Ge(r) => vec![r],
-        Mov { src, .. } => vec![src],
-        BinRR { a, b, .. } | JumpIfCmpRR { a, b, .. } | JumpIfNotCmpRR { a, b, .. } => vec![a, b],
-        BinRI { a, .. }
-        | JumpIfCmpRI { a, .. }
-        | JumpIfNotCmpRI { a, .. }
-        | JumpIfCmpRA { a, .. }
-        | JumpIfNotCmpRA { a, .. } => vec![a],
-        BinAR { b, .. } => vec![b],
-        JumpIfStrictEq { reg, .. } => vec![reg],
-        GetNamed { obj, .. } | SetNamed { obj, .. } => vec![obj],
-        GetKeyed { obj, key } | SetKeyed { obj, key, .. } => vec![obj, key],
-        Call {
-            callee,
-            this,
-            args,
-            argc,
-        } => {
-            let mut v = vec![callee, this];
-            v.extend((0..argc).map(|i| args + i));
-            v
-        }
-        Star(_) | BinAI { .. } | JumpIfCmpAI { .. } | JumpIfNotCmpAI { .. } | Inc | Dec
-        | ToNumeric | CheckTdz(_) | LdaUndefined | LdaNull | LdaTrue | LdaFalse | LdaEmpty
-        | LdaInt(_) | LdaConst(_) | LdaThis | Nop | Return | Jump(_) | JumpIfTrue(_)
-        | JumpIfFalse(_) | JumpIfNullish(_) | JumpIfNotNullish(_) | JumpIfUndefined(_)
-        | JumpIfNotUndefined(_) | JumpIfEmpty(_) | JumpIfNotEmpty(_) | JumpIfObject(_)
-        | LdaGlobal(_) | LdaEnv { .. } | StaEnv { .. } | LdaCallee => vec![],
-        _ => return Access::Any,
-    })
-}
-
-/// The register an instruction's inline expansion writes.
-fn written(instr: &Instr) -> Option<u16> {
-    match *instr {
-        Instr::Star(r) | Instr::Mov { dst: r, .. } => Some(r),
-        _ => None,
-    }
-}
-
-/// How deep in loops each instruction is (a back-edge's range is a loop).
-fn loop_depth(code: &CodeBlock) -> Vec<u8> {
-    let len = code.instrs.len();
-    let mut depth = vec![0u8; len];
-    for (pc, instr) in code.instrs.iter().enumerate() {
-        if let Some(off) = branch_offset(instr) {
-            if off <= 0 {
-                let t = (pc as i64 + off as i64).max(0) as usize;
-                for d in &mut depth[t..=pc] {
-                    *d = d.saturating_add(1);
-                }
-            }
-        }
-    }
-    depth
-}
-
-/// The registers to keep in machine state: those loops read or write by
-/// inline-expanded instructions, the most used first, the speculated ones
-/// before the rest. A block without loops caches nothing: its call outs
-/// would pay for the caching and nothing would gain.
-fn choose_cache(code: &CodeBlock, spec: &Speculation) -> Vec<(u16, bool)> {
-    let depth = loop_depth(code);
-    let mut score: BTreeMap<u16, u64> = BTreeMap::new();
-    for (pc, instr) in code.instrs.iter().enumerate() {
-        let w = match depth[pc] {
-            0 => continue,
-            1 => 8,
-            _ => 64,
-        };
-        let mut refs = match access(instr) {
-            Access::Known(r) => r,
-            Access::Any => Vec::new(),
-        };
-        refs.extend(written(instr));
-        if matches!(instr, Instr::Call { .. }) {
-            // Read by the runtime, not inline: caching them helps nothing.
-            refs.clear();
-        }
-        for r in refs {
-            *score.entry(r).or_default() += w;
-        }
-    }
-    let speculated = |r: u16| r < 64 && spec.numbers & (1 << r) != 0;
-    let mut regs: Vec<(u16, u64)> = score.into_iter().collect();
-    regs.sort_by(|a, b| {
-        speculated(b.0)
-            .cmp(&speculated(a.0))
-            .then(b.1.cmp(&a.1))
-            .then(a.0.cmp(&b.0))
-    });
-    regs.truncate(MAX_CACHED);
-    regs.into_iter().map(|(r, _)| (r, speculated(r))).collect()
-}
-
-/// The pcs an instruction may continue at.
-fn successors(code: &CodeBlock, pc: usize) -> Vec<usize> {
-    let instr = &code.instrs[pc];
-    match *instr {
-        Instr::Return => vec![],
-        Instr::Jump(off) => vec![(pc as i64 + off as i64) as usize],
-        _ => {
-            let mut s = vec![pc + 1];
-            if let Some(off) = branch_offset(instr) {
-                s.push((pc as i64 + off as i64) as usize);
-            }
-            s
-        }
-    }
-}
-
-/// For each pc, the cached registers (a bit per cache index) that may be
-/// read before written from there: what must hold its value when compiled
-/// code is entered or resumed at that pc. A generic instruction may read
-/// any register and is assumed to write none.
-fn liveness(code: &CodeBlock, index: &[Option<u8>], n: usize) -> Vec<u16> {
-    let len = code.instrs.len();
-    let all: u16 = if n >= 16 { u16::MAX } else { (1u16 << n) - 1 };
-    let bit = |r: u16| -> u16 {
-        index
-            .get(r as usize)
-            .copied()
-            .flatten()
-            .map_or(0, |i| 1 << i)
-    };
-    let mut live_in = vec![0u16; len + 1];
-    loop {
-        let mut changed = false;
-        for pc in (0..len).rev() {
-            let instr = &code.instrs[pc];
-            let mut out = 0;
-            for s in successors(code, pc) {
-                out |= live_in.get(s).copied().unwrap_or(0);
-            }
-            let new = match access(instr) {
-                Access::Any => all,
-                Access::Known(reads) => {
-                    let uses = reads.iter().fold(0, |m, &r| m | bit(r));
-                    let def = written(instr).map_or(0, bit);
-                    uses | (out & !def)
-                }
-            };
-            if new != live_in[pc] {
-                live_in[pc] = new;
-                changed = true;
-            }
-        }
-        if !changed {
-            return live_in;
-        }
-    }
 }
 
 /// The host code generator, configured once per process.
@@ -295,36 +127,6 @@ fn target(len: usize, pc: usize, off: i32) -> Result<usize, String> {
         return Err(format!("jump at {pc} leaves the block"));
     }
     Ok(t as usize)
-}
-
-/// The branch offset of an instruction that may branch, for the
-/// instructions whose taken edge can come back from the runtime.
-pub(crate) fn branch_offset(instr: &Instr) -> Option<i32> {
-    Some(match *instr {
-        Instr::Jump(o)
-        | Instr::JumpIfTrue(o)
-        | Instr::JumpIfFalse(o)
-        | Instr::JumpIfNullish(o)
-        | Instr::JumpIfNotNullish(o)
-        | Instr::JumpIfUndefined(o)
-        | Instr::JumpIfNotUndefined(o)
-        | Instr::JumpIfEmpty(o)
-        | Instr::JumpIfNotEmpty(o)
-        | Instr::JumpIfObject(o) => o,
-        Instr::JumpIfStrictEq { offset, .. }
-        | Instr::JumpIfCmpRR { offset, .. }
-        | Instr::JumpIfNotCmpRR { offset, .. }
-        | Instr::JumpIfCmpRI { offset, .. }
-        | Instr::JumpIfNotCmpRI { offset, .. }
-        | Instr::JumpIfCmpRA { offset, .. }
-        | Instr::JumpIfNotCmpRA { offset, .. }
-        | Instr::JumpIfCmpAI { offset, .. }
-        | Instr::JumpIfNotCmpAI { offset, .. } => offset,
-        Instr::IteratorStep { done, .. }
-        | Instr::IteratorResult { done }
-        | Instr::ForInNext { done, .. } => done,
-        _ => return None,
-    })
 }
 
 /// Whether the instruction never calls out of compiled code.

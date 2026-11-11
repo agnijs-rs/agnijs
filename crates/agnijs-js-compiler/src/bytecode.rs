@@ -16,6 +16,8 @@ use agnijs_js_parser::source::LoneSurrogate;
 use agnijs_js_parser::span::Span;
 #[cfg(feature = "tier")]
 use std::any::Any;
+#[cfg(feature = "tier")]
+use std::cell::RefCell;
 use std::cell::{Cell, OnceCell};
 use std::fmt;
 use std::rc::Rc;
@@ -1039,7 +1041,15 @@ pub struct Tier {
     pub hotness: Cell<u32>,
     /// [`Tier::COLD`], [`Tier::COMPILED`] or [`Tier::NEVER`].
     pub state: Cell<u8>,
-    pub code: OnceCell<Rc<dyn Any>>,
+    /// The compiled code, replaced when the block is recompiled after a
+    /// speculation failed; a run holds its own reference to the code it
+    /// runs, so the old code outlives any frame still in it.
+    pub code: RefCell<Option<Rc<dyn Any>>>,
+    /// Registers (below 64, a bit each) the VM no longer speculates about:
+    /// a guess about each failed once (TASK-101.3.1).
+    pub demoted: Cell<u64>,
+    /// How often the block's compiled code left through a failed guard.
+    pub deopts: Cell<u32>,
 }
 
 #[cfg(feature = "tier")]

@@ -228,3 +228,39 @@ Forced calls are now cheaper, but closures and calls-recursive are still about 7
 The interpreter does the same push and pop, but without the second layer around it. Winning here needs the frame push and the return in machine code, or a much lighter `Ctx` set up once per nest rather than once per call. The `Frame` representation (a `Vec` of frames holding `Rc`s) makes the first of these hard to do from Cranelift. For that reason mode `On` still compiles only blocks with a loop, and loop-free callees stay in the interpreter.
 
 The prototype became a four-byte `OptObj` in TASK-101.3.2. That change also left four bytes of padding in `ObjectData`, which made the feature-off interpreter 6% slower on prop-write-alloc (bisected; same-path builds). The padding is now an explicit zeroed field, which brings it back to 0.98 of the pre-JIT build. promise-chain was noise.
+
+## Addendum: deoptimization and GC maps (TASK-101.3.1)
+
+The title's "never speculates" no longer holds. The tier now keeps JS registers in machine state across call outs and guesses that some of them hold numbers; both need the two pieces the decision said it did not: a description of the machine state at every call out (for the collector and for a debugger) and a way to leave for the interpreter when a guess fails. The design is `docs/design/jit-deopt-and-gc-maps.md`, which this addendum summarises. Everything else stands: Cranelift's code generator alone, one entry per block, no stack scanning (J6), no code patching (J9), and the interpreter frame as the only frame format (J1).
+
+### Points: safe points, side exits and entry guards in one table
+
+The code generator emits a `Points` table per block. A point is one of:
+
+- a **safe point**, at every call out, with the pcs compiled code may continue at after it (`next`);
+- a **side exit**, where a guard fails, naming the guarded register;
+- an **entry guard**, at an entry pc, naming the register guarded there.
+
+Each point lists the registers whose current value is not in the register file: `(register, Location)`, where the location is a slot in the compiled frame's spill area, holding a boxed `Value` (`Spill`) or the bits of an unboxed number (`SpillNumber`). Before each call out machine code stores the point's id into `Ctx::point`; the spill area's address is in `Ctx::spill`, written once at entry. A `FrameHandle` (the `Ctx` pointer and the block's `Rc<Points>`) reads that state from Rust: the live heap values for the collector (`FrameHandle::live`) and the whole `FrameState` for a debugger or a deopt.
+
+### Frames the collector finds without scanning the stack
+
+`Runtime::frame_entered` and `frame_left` keep a list of the running compiled frames in the VM (`JitState::frames`, innermost last). The collector walks the list after the register file and traces each frame's listed values. A collection only ever happens inside a call out, where the point is set, so the state is always described. The birth-serial bound of nested runs (TASK-100.16) composes with this: it keeps Rust locals alive, the points keep machine state alive, and the contract test `a_nested_run_under_optimised_code_keeps_the_birth_serial_bound` runs both.
+
+### Materialisation and side exits
+
+Leaving compiled code anywhere but at a safe point's successor materialises the frame: the runtime reads the point's registers and writes them into the interpreter frame (`Runtime::materialize`, `Vm::jit_write_state`). That happens
+
+- in the call-out trampoline, when the runtime continues at a pc the point does not list (a throw caught in the same frame, a debugger's step, a fault) or exits;
+- in the deopt trampoline, when a guard fails: the exit's pc and accumulator are written too (`SideExit`) and the interpreter continues at the guarded instruction, which has not started;
+- when a debugger attaches (`Vm::jit_materialize_all`), for every frame on the list, so what it sees is current. A frame materialised this way is not written again when its call out returns, so edits the debugger made are kept.
+
+All of it is Rust reading through a raw pointer to a `Ctx` that lives on `exec::enter`'s stack; the only `unsafe` is still in `exec.rs`, and the handle's reads are plain enough to run under Miri (`exec::tests`). Fault and panic injection in the contract tests show a fault leaving the frame complete, and a panic in a call out unwinding through the machine frame and dropping the handle.
+
+### What the code generator does with it
+
+Up to eight registers that loops read or write inline are cached in Cranelift variables (tag and payload, or the unboxed number bits for a speculated one). At a call out, the registers the instruction reads are written back to the file; the other dirty ones are spilled and listed. After the call, every cached register is reloaded, because the runtime may have written any of them. At each entry a register speculated as a number is guarded only when it is live there (a liveness analysis over the cache); one that is written before read takes its payload as it is. A `Star` or `Mov` into a speculated register guards the stored tag.
+
+### The VM's guesses, and giving them up
+
+When a block is compiled the VM guesses that the registers its loops do arithmetic on (`number_candidates`) that hold a number, or nothing yet, in the live frame will only ever hold numbers. A guess that fails leaves through the side exit, the register is marked in the block's `Tier::demoted` and the block's code is dropped and compiled again without that guess the next time it is offered (its hotness is kept, so in mode `On` that is at once). After four failures a block stops guessing. The run that was in the old code holds its own `Rc` to it, so the replacement is safe at any point. `JitStats::speculated` and `deopts` count the guesses and the exits.

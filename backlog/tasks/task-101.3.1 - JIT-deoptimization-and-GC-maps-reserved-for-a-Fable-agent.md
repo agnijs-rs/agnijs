@@ -4,7 +4,7 @@ title: JIT deoptimization and GC maps (reserved for a Fable agent)
 status: In Progress
 assignee: []
 created_date: '2026-11-10T08:41:00Z'
-updated_date: '2026-11-11T04:34:00Z'
+updated_date: '2026-11-11T05:14:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -36,3 +36,9 @@ The baseline JIT (ADR 0020) never speculates and never holds a JS value outside 
 2. VM: Vm::jit_frames list traced by the collector; Deoptimizer: materialise writes Frame and regs, Guard demotes the register in Tier and recompiles (bounded); debugger attach materialises every live compiled frame; speculation chosen from the live frame's registers. VM tests (jit_deopt.rs): differential under GC stress, guard deopt, nested native callback, debugger.
 3. Gates: test262 default, --precompile, AGNIJS_JIT=force; intl402; GC-stress slice with jit; bench geomean with the feature off within 1%; ADR 0020 addendum and design doc update; task notes.
 <!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Step 1 pushed (1b17214 on main): JIT crate mechanism (points table, FrameHandle, deopt trampoline, call-out materialisation, register caching with liveness-guarded number speculation) and the VM's frame list, GC root walk, attach walk and materialize. The four contract tests pass un-ignored; fault and panic injection added; jit_differential green under GC stress. Remaining: VM-side speculation (choose numbers from the live frame, demote on Guard, recompile; Tier code slot must become replaceable), jit_deopt.rs VM tests, gates (test262 x3, intl402, GC-stress slice, bench off-feature), ADR 0020 addendum and design-doc update.
+<!-- SECTION:NOTES:END -->
