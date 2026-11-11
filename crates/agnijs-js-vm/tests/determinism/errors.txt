@@ -6,6 +6,6 @@ SyntaxError: JSON.parse: Expected property name at position 1
 RangeError: The number 1.5 cannot be converted to a BigInt because it is not an integer
 TypeError: Cannot convert a Symbol value to a string
 ReferenceError: x_not_defined is not defined
-undefined
+TypeError: deep|    at inner (errors.js:13:26)|    at outer (errors.js:14:20)|    at errors.js:15:7
 1
 7

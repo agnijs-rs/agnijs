@@ -386,8 +386,12 @@ impl ObjectData {
 impl Class {
     pub fn trace(&self, t: &mut Tracer) {
         match self {
+            Class::Error(s) => {
+                if let Some(s) = s {
+                    s.trace(t);
+                }
+            }
             Class::Ordinary
-            | Class::Error
             | Class::RawJSON
             | Class::Boolean(_)
             | Class::Number(_)
@@ -449,6 +453,7 @@ impl Class {
             }
             Class::FinalizationRegistry(f) => f.trace(t),
             Class::DisposableStack(d) => d.trace(t),
+            Class::CallSite(d) => d.trace(t),
             Class::ArrayBuffer(_) => {}
             Class::TypedArray(a) => t.obj(a.buffer),
             Class::DataView(d) => t.obj(d.buffer),

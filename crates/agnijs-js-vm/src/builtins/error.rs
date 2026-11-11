@@ -25,6 +25,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.define_raw_str(error_proto, "message", empty, Attrs::METHOD);
     vm.method(error_proto, "toString", 0, error_proto_to_string);
     vm.method(error_ctor, "isError", 1, error_is_error);
+    crate::stack_trace::install(vm, error_ctor, error_proto);
 
     for ty in [
         ErrorType::TypeError,
@@ -84,7 +85,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
 /// A proxy has none, whatever its target.
 fn error_is_error(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let is = match a.arg(0) {
-        Value::Object(o) => matches!(vm.heap.obj(o).class, Class::Error),
+        Value::Object(o) => matches!(vm.heap.obj(o).class, Class::Error(_)),
         _ => false,
     };
     Ok(Value::Bool(is))
@@ -107,7 +108,8 @@ fn make_error_object(
     } else {
         a.new_target
     };
-    let o = vm.ordinary_create_from_constructor(new_target, ty.prototype(), Class::Error)?;
+    let o = vm.ordinary_create_from_constructor(new_target, ty.prototype(), Class::Error(None))?;
+    vm.attach_error_stack(o);
     if !message.is_undefined() {
         let msg = vm.to_string(message)?;
         let key = PropKey::Str(vm.names.message);
@@ -191,7 +193,8 @@ fn set_suppressed(vm: &mut Vm, o: ObjId, error: Value, suppressed: Value) {
 /// DisposeResources creates when a disposal throws over an earlier error.
 pub fn new_suppressed_error(vm: &mut Vm, error: Value, suppressed: Value) -> Value {
     let proto = vm.intrinsic(Intrinsic::SuppressedErrorPrototype);
-    let o = vm.alloc(crate::object::ObjectData::new(Some(proto), Class::Error));
+    let o = vm.alloc(crate::object::ObjectData::new(Some(proto), Class::Error(None)));
+    vm.attach_error_stack(o);
     set_suppressed(vm, o, error, suppressed);
     Value::Object(o)
 }

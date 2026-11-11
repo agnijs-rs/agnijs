@@ -124,6 +124,8 @@ names! {
     cause = "cause",
     errors = "errors",
     stack = "stack",
+    stackTraceLimit = "stackTraceLimit",
+    prepareStackTrace = "prepareStackTrace",
     value = "value",
     done = "done",
     next = "next",
@@ -376,7 +378,9 @@ pub struct Vm {
     /// Orders async module evaluation (`[[AsyncEvaluation]]` order).
     pub async_order_counter: u64,
     /// Frames unwound by the fault in flight (innermost first).
-    pub throw_stack: Vec<agnijs_engine_api::StackFrame>,
+    pub throw_stack: Vec<crate::stack_trace::UnwoundFrame>,
+    /// Stack-trace state: host source maps, line tables (`crate::stack_trace`).
+    pub stacks: crate::stack_trace::StackState,
     pub throw_stack_value: Option<Value>,
     /// Host classes by id (`register_host_class`).
     pub host_classes: Vec<agnijs_engine_api::HostClassDef>,
@@ -513,6 +517,7 @@ impl Vm {
             rejection_events: Vec::new(),
             async_order_counter: 0,
             throw_stack: Vec::new(),
+            stacks: Default::default(),
             throw_stack_value: None,
             host_classes: Vec::new(),
             pending_finalizers: Vec::new(),
@@ -872,7 +877,8 @@ impl Vm {
     /// Create an error object of the given type in the current realm.
     pub fn make_error(&mut self, ty: ErrorType, message: &str) -> Value {
         let proto = self.intrinsic(ty.prototype());
-        let obj = self.alloc(ObjectData::new(Some(proto), Class::Error));
+        let obj = self.alloc(ObjectData::new(Some(proto), Class::Error(None)));
+        self.attach_error_stack(obj);
         let msg = self.str(message);
         let key = PropKey::Str(self.names.message);
         self.heap

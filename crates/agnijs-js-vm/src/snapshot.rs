@@ -286,7 +286,7 @@ fn class_code(c: &Class) -> u8 {
         Class::Function(_) => code::FUNCTION,
         Class::Native(_) => code::NATIVE,
         Class::Bound(_) => code::BOUND,
-        Class::Error => code::ERROR,
+        Class::Error(_) => code::ERROR,
         Class::Boolean(_) => code::BOOLEAN,
         Class::Number(_) => code::NUMBER,
         Class::String(_) => code::STRING,
@@ -330,6 +330,7 @@ fn unsupported_class(c: &Class) -> Option<&'static str> {
         Class::Intl(_) => "an Intl service object",
         Class::RawJSON => "a JSON.rawJSON object",
         Class::DisposableStack(_) => "a DisposableStack",
+        Class::CallSite(_) => "a CallSite",
         _ => return None,
     })
 }
@@ -1998,7 +1999,7 @@ fn read_object(
             }
             Class::Bound(Box::new(BoundData { target, this, args }))
         }
-        code::ERROR => Class::Error,
+        code::ERROR => Class::Error(None),
         code::BOOLEAN => Class::Boolean(r.bool()?),
         code::NUMBER => Class::Number(r.f64()?),
         code::STRING => Class::String(t.str(r.u32()?)?),

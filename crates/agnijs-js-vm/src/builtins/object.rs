@@ -471,7 +471,7 @@ pub fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             Class::Arguments(_) => "Arguments".into(),
             Class::Function(_) | Class::Native(_) | Class::Bound(_) => "Function".into(),
             Class::Proxy(p) if p.callable => "Function".into(),
-            Class::Error => "Error".into(),
+            Class::Error(_) => "Error".into(),
             Class::Boolean(_) => "Boolean".into(),
             Class::Number(_) => "Number".into(),
             Class::String(_) => "String".into(),

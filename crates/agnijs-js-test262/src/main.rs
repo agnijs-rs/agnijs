@@ -90,6 +90,13 @@ enum Cmd {
         /// `auto` (the default), `backtracking-only` or `linear-when-eligible`. Same baseline either way.
         #[arg(long, default_value = "auto")]
         regex_matcher: String,
+        /// Also run tests that use this feature although it is outside the
+        /// ES2025 cut (a proposal the engine implements, such as
+        /// `error-stack-accessor`). Repeatable. The run then differs from
+        /// the baseline's selection: pair it with `--filter` and
+        /// `--no-baseline`.
+        #[arg(long = "allow-feature")]
+        allow_features: Vec<String>,
     },
     /// Run one JS file against an engine with the test262 harness loaded
     /// (for debugging; not part of the conformance run).
@@ -193,6 +200,7 @@ fn main() -> Result<()> {
             precompile,
             snapshot,
             regex_matcher,
+            allow_features,
         } => run(RunArgs {
             engine,
             test262: test262.unwrap_or_else(default_test262_dir),
@@ -210,6 +218,7 @@ fn main() -> Result<()> {
             precompile,
             snapshot,
             regex_matcher: parse_regex_matcher(&regex_matcher)?,
+            allow_features,
         }),
     }
 }
@@ -271,6 +280,7 @@ struct RunArgs {
     precompile: bool,
     snapshot: bool,
     regex_matcher: RegexMatcher,
+    allow_features: Vec<String>,
 }
 
 fn parse_regex_matcher(name: &str) -> Result<RegexMatcher> {
@@ -338,7 +348,10 @@ fn run(args: RunArgs) -> Result<()> {
     let post = parse_name_list(&std::fs::read_to_string(
         crate_dir().join("post-es2025-features.txt"),
     )?);
-    let cut = FeatureCut::new(&features, &post);
+    let mut cut = FeatureCut::new(&features, &post);
+    for f in &args.allow_features {
+        cut.allow(f);
+    }
     for name in &cut.unknown_post_2025 {
         eprintln!(
             "warning: post-es2025-features.txt names {name:?}, which features.txt does not list"

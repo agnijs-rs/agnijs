@@ -781,7 +781,7 @@ impl Vm {
         let callable = self.heap.obj(o).is_callable();
         let subtype = match &self.heap.obj(o).class {
             Class::Array(_) => Some(Subtype::Array),
-            Class::Error => Some(Subtype::Error),
+            Class::Error(_) => Some(Subtype::Error),
             Class::Promise(_) => Some(Subtype::Promise),
             Class::RegExp(_) => Some(Subtype::RegExp),
             Class::Date(_) => Some(Subtype::Date),
@@ -821,7 +821,7 @@ impl Vm {
         } else {
             match &self.heap.obj(o).class {
                 Class::Array(a) => format!("{cn}({})", a.length),
-                Class::Error => {
+                Class::Error(_) => {
                     match self.lookup_data_property(o, PropKey::Str(self.names.stack)) {
                         Some(Value::String(s)) => self.heap.str_to_string(s),
                         _ => {

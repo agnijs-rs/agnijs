@@ -22,6 +22,7 @@ pub mod object;
 pub mod ops;
 pub mod realm;
 pub mod snapshot;
+pub mod stack_trace;
 pub mod string;
 pub mod symbol;
 pub mod value;

@@ -397,7 +397,9 @@ pub enum Class {
     Function(Box<FunctionData>),
     Native(Box<NativeData>),
     Bound(Box<BoundData>),
-    Error,
+    /// An object with [[ErrorData]]; the payload is its captured stack
+    /// trace (`crate::stack_trace`), absent when nothing was captured.
+    Error(Option<Box<crate::stack_trace::ErrorStack>>),
     Boolean(bool),
     Number(f64),
     String(StrId) = class_tag::STRING,
@@ -439,6 +441,8 @@ pub enum Class {
     /// A DisposableStack or AsyncDisposableStack, or the internal stack
     /// of a scope with `using` declarations.
     DisposableStack(Box<crate::builtins::disposable::DisposeData>),
+    /// A V8-style CallSite handed to `Error.prepareStackTrace`.
+    CallSite(Box<crate::stack_trace::CallSiteData>),
 }
 
 /// An iterator and its `next` method.
@@ -461,7 +465,7 @@ impl Class {
             self,
             Class::Ordinary
                 | Class::Array(_)
-                | Class::Error
+                | Class::Error(None)
                 | Class::Boolean(_)
                 | Class::Number(_)
                 | Class::String(_)

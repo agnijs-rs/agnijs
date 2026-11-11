@@ -4,6 +4,14 @@
 
 use serde_json::Value as Json;
 
+/// The largest map text decoded, in bytes. Hostile or runaway maps beyond it
+/// are rejected rather than parsed.
+pub const MAX_MAP_BYTES: usize = 64 << 20;
+/// The most generated lines a map may describe.
+pub const MAX_LINES: usize = 1 << 20;
+/// The most mapping segments a map may hold.
+pub const MAX_SEGMENTS: usize = 1 << 22;
+
 /// A decoded source map.
 #[derive(Clone, Debug)]
 pub struct SourceMap {
@@ -46,7 +54,14 @@ fn err<T>(m: impl Into<String>) -> Result<T, SourceMapError> {
 
 impl SourceMap {
     /// Decode the JSON text of a map.
+    ///
+    /// Decoding is bounded ([`MAX_MAP_BYTES`], [`MAX_LINES`],
+    /// [`MAX_SEGMENTS`]) and never panics: a malformed or hostile map is an
+    /// error.
     pub fn parse(json: &str) -> Result<SourceMap, SourceMapError> {
+        if json.len() > MAX_MAP_BYTES {
+            return err("map too large");
+        }
         let v: Json = serde_json::from_str(json).map_err(|e| SourceMapError(e.to_string()))?;
         if v.get("version").and_then(Json::as_u64) != Some(3) {
             return err("version is not 3");
@@ -176,8 +191,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
+            let hex = |c: u8| (c as char).to_digit(16);
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                out.push((h * 16 + l) as u8);
                 i += 3;
                 continue;
             }
@@ -194,35 +210,48 @@ fn decode_mappings(
     name_count: usize,
 ) -> Result<Vec<Vec<Segment>>, SourceMapError> {
     let mut lines = Vec::new();
+    let mut segments = 0usize;
+    // Every running value stays within u32: a sum outside it is an error,
+    // never an overflow.
+    let add = |acc: i64, d: i64| -> Result<i64, SourceMapError> {
+        match acc.checked_add(d) {
+            Some(v) if (0..=u32::MAX as i64).contains(&v) => Ok(v),
+            _ => err("mapping value out of range"),
+        }
+    };
     // Source, original line, original column and name are relative to the
     // previous segment across lines; the generated column resets per line.
     let (mut src, mut oline, mut ocol, mut name) = (0i64, 0i64, 0i64, 0i64);
     for line in text.split(';') {
+        if lines.len() >= MAX_LINES {
+            return err("too many generated lines");
+        }
         let mut segs = Vec::new();
         let mut col = 0i64;
         for seg in line.split(',') {
             if seg.is_empty() {
                 continue;
             }
+            segments += 1;
+            if segments > MAX_SEGMENTS {
+                return err("too many mapping segments");
+            }
             let fields = decode_vlq(seg)?;
             match fields.len() {
                 1 | 4 | 5 => {}
                 n => return err(format!("segment with {n} fields")),
             }
-            col += fields[0];
-            if col < 0 {
-                return err("negative generated column");
-            }
+            col = add(col, fields[0])?;
             let original = if fields.len() >= 4 {
-                src += fields[1];
-                oline += fields[2];
-                ocol += fields[3];
-                if src < 0 || src as usize >= source_count || oline < 0 || ocol < 0 {
+                src = add(src, fields[1])?;
+                oline = add(oline, fields[2])?;
+                ocol = add(ocol, fields[3])?;
+                if src as usize >= source_count {
                     return err("segment outside the sources");
                 }
                 let n = if fields.len() == 5 {
-                    name += fields[4];
-                    if name < 0 || name as usize >= name_count {
+                    name = add(name, fields[4])?;
+                    if name as usize >= name_count {
                         return err("name index out of range");
                     }
                     Some(name as u32)
@@ -253,7 +282,9 @@ fn decode_vlq(seg: &str) -> Result<Vec<i64>, SourceMapError> {
             return err(format!("bad VLQ digit {:?}", c as char));
         };
         let d = d as i64;
-        if shift > 60 {
+        // Values past 32 bits are rejected; this keeps every shift and sum
+        // far from i64 overflow.
+        if shift > 30 {
             return err("VLQ value too large");
         }
         value |= (d & 31) << shift;

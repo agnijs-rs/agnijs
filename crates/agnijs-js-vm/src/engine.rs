@@ -15,7 +15,7 @@ use crate::vm::{ErrorType, Fault, JsResult, Vm};
 use agnijs_engine_api::{
     self as api, CallContext, Engine, EngineInfo, Error, ErrorKind, Exception, Handle, HeapKind,
     HostClassDef, HostClassId, HostFunction, HostObject, JsBigInt, JsString, MemoryUsage,
-    PromiseState, PropertyKey, RealmId, StackFrame, TypeOf,
+    PromiseState, PropertyKey, RealmId, TypeOf,
 };
 use agnijs_js_compiler::bytecode::CodeBlock;
 use std::rc::Rc;
@@ -360,8 +360,9 @@ impl Vm {
             Fault::OutOfFuel => Error::OutOfFuel,
             Fault::Throw(v) => {
                 let (name, message) = self.exception_name_message(v);
-                let stack = std::mem::take(&mut self.throw_stack);
+                let unwound = std::mem::take(&mut self.throw_stack);
                 self.throw_stack_value = None;
+                let stack = self.resolve_unwound(unwound);
                 let value = self.to_api_value(v);
                 Error::Exception(Exception {
                     value,
@@ -414,19 +415,14 @@ impl Vm {
             self.throw_stack.clear();
             self.throw_stack_value = Some(*v);
         }
-        if self.throw_stack.len() >= 64 {
+        if self.throw_stack.len() >= crate::stack_trace::MAX_UNWOUND_FRAMES {
             return;
         }
-        let (line, column) = Vm::line_col(&frame.code, frame.pc);
-        let function = match frame.callee {
-            Some(_) => frame.code.name.to_string(),
-            None => String::new(),
-        };
-        self.throw_stack.push(StackFrame {
-            function,
-            script: frame.code.source.name.to_string(),
-            line,
-            column,
+        // Positions are resolved only if the throw reaches the host.
+        self.throw_stack.push(crate::stack_trace::UnwoundFrame {
+            code: frame.code.clone(),
+            pc: frame.pc.saturating_sub(1) as u32,
+            named: frame.callee.is_some(),
         });
     }
 

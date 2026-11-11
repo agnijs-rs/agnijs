@@ -930,7 +930,7 @@ impl<'a> Compiler<'a> {
     fn member(&mut self, m: &MemberExpression) -> CResult<()> {
         let mark = self.mark();
         let r = self.member_ref_in(m, false)?;
-        self.set_pos(m.span);
+        self.set_pos(call_site_span(m));
         self.emit_member_get(&r);
         self.free_to(mark);
         Ok(())
@@ -990,7 +990,7 @@ impl<'a> Compiler<'a> {
                     | MemberRef::Private { obj, .. } => *obj,
                     MemberRef::Super { this, .. } => *this,
                 };
-                self.set_pos(m.span);
+                self.set_pos(call_site_span(m));
                 self.emit_member_get(&r);
                 let f = self.alloc();
                 self.emit(Instr::Star(f));
@@ -1165,7 +1165,10 @@ impl<'a> Compiler<'a> {
             self.optional_exit();
         }
         let args = self.arguments(&c.arguments)?;
-        self.set_pos(c.span);
+        match c.callee.unparen() {
+            Expression::Member(m) => self.set_pos(call_site_span(m)),
+            _ => self.set_pos(c.span),
+        }
         let strict = self.fs_ref().strict;
         match (args, is_direct_eval) {
             (Ok((base, argc)), false) => self.emit(Instr::Call {
@@ -1693,4 +1696,15 @@ fn compound_op(op: AssignOp) -> BinaryOp {
 #[allow(dead_code)]
 pub(crate) fn number_key(n: f64) -> String {
     to_js_string(n)
+}
+
+/// Where a property read or a method call is reported (stack traces, the
+/// debugger): at the property name, as V8 reports it, so `a.b.c()` points
+/// at `c`. Computed keys keep the start of the member expression.
+fn call_site_span(m: &MemberExpression) -> Span {
+    match &m.property {
+        MemberProperty::Ident(i) => i.span,
+        MemberProperty::Private(p) => p.span,
+        MemberProperty::Computed(_) => m.span,
+    }
 }

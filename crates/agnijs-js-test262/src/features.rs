@@ -94,6 +94,11 @@ impl FeatureCut {
         Ok(())
     }
 
+    /// Admit one more feature (`test262 run --allow-feature`).
+    pub fn allow(&mut self, feature: &str) {
+        self.allowed.insert(feature.to_string());
+    }
+
     pub fn allows(&self, feature: &str) -> bool {
         self.allowed.contains(feature)
     }
