@@ -264,3 +264,44 @@ fn debugger_pause_interrupts_a_running_script() {
     session.serve(&mut *d);
     client.join().unwrap();
 }
+
+/// A map for `gen.js` placing it in `src/orig.ts`: generated 1:0 -> 1:0,
+/// 1:18 -> 10:3 and 2:0 -> 20:0 (all 0-based).
+const HOST_MAP: &str = r#"{"version":3,"sources":["orig.ts"],"sourceRoot":"src","names":[],"mappings":"AAAA,kBASG;AAUH"}"#;
+
+#[test]
+fn a_host_supplied_source_map_reaches_the_client_and_maps_exceptions() {
+    let server = CdpServer::listen("127.0.0.1:0", "test").unwrap();
+    let addr = server.local_addr();
+    let mut d = agnijs_js_vm::make_debuggee(TestHost::new());
+    let realm = d.engine().main_realm();
+    let session = Session::new(server, realm);
+    session.attach(&mut *d);
+    let client = thread::spawn(move || {
+        let mut c = Client::connect(addr);
+        c.call("Runtime.enable", json!({}));
+        c.call("Debugger.enable", json!({}));
+        c.call("Runtime.runIfWaitingForDebugger", json!({}));
+        let parsed = c.event("Debugger.scriptParsed");
+        assert_eq!(parsed["url"], "gen.js");
+        let url = parsed["sourceMapURL"].as_str().unwrap();
+        let b64 = url.strip_prefix("data:application/json;base64,").unwrap();
+        // The client gets the host's map text back unchanged.
+        let expected = ws::base64_encode(HOST_MAP.as_bytes());
+        assert_eq!(b64, expected);
+        let thrown = c.event("Runtime.exceptionThrown");
+        assert_eq!(
+            thrown["exceptionDetails"]["exception"]["description"],
+            "Error: m\n    at boom (src/orig.ts:10:4)\n    at <anonymous> (src/orig.ts:20:1)"
+        );
+        c.close();
+    });
+    assert!(session.wait_until_ready(&mut *d));
+    d.engine().set_source_map("gen.js", Some(HOST_MAP)).unwrap();
+    assert!(d
+        .engine()
+        .eval_script(realm, "gen.js", "function boom() { throw new Error('m') }\nboom();\n")
+        .is_err());
+    session.serve(&mut *d);
+    client.join().unwrap();
+}

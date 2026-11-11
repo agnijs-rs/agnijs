@@ -85,6 +85,8 @@ struct SinkState {
     kind: SinkKind,
     value: Option<SinkValue>,
     error: Option<String>,
+    /// A load sink's source map (`agnijs_sink_set_source_map`).
+    source_map: Option<String>,
 }
 
 thread_local! {
@@ -96,7 +98,7 @@ fn sink_open(kind: SinkKind) -> AgnijsSink {
     let id = NEXT_SINK.fetch_add(1, Ordering::Relaxed);
     let _ = SINKS.try_with(|s| {
         if let Ok(mut s) = s.try_borrow_mut() {
-            s.push(SinkState { id, kind, value: None, error: None });
+            s.push(SinkState { id, kind, value: None, error: None, source_map: None });
         }
     });
     id
@@ -178,6 +180,30 @@ pub unsafe extern "C" fn agnijs_sink_set_module(sink: AgnijsSink, kind: i32, dat
     })
 }
 
+/// Attach a Source Map (revision 3 JSON, UTF-8) to the module source a load
+/// hook answers with `AGNIJS_MODULE_SOURCE`, in either order: the map then
+/// rewrites the positions reported for that module (`Error.prototype.stack`,
+/// exceptions, the debugger), as `agnijs_set_source_map` would under its
+/// resolved specifier. Ignored for JSON and bytecode modules. The bytes are
+/// copied. ABI 1.2.
+///
+/// # Safety
+/// `map` must point at `len` readable bytes (or be NULL when `len` is 0).
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_sink_set_source_map(sink: AgnijsSink, map: *const c_char, len: usize) -> AgnijsStatus {
+    ffi("agnijs_sink_set_source_map", || {
+        // SAFETY: caller contract above.
+        let m = unsafe { ptrs::utf8(map, len, "map")? }.to_string();
+        with_sink(sink, |st| {
+            if st.kind != SinkKind::Load {
+                return Err(Fail::new(AGNIJS_ERR_INVALID_ARGUMENT, "only a load sink takes a source map"));
+            }
+            st.source_map = Some(m);
+            Ok(())
+        })
+    })
+}
+
 /// Give a failing hook's error message (UTF-8; invalid UTF-8 is replaced).
 ///
 /// # Safety
@@ -208,7 +234,13 @@ fn run_sink_hook(kind: SinkKind, what: &str, call: impl FnOnce(AgnijsSink) -> Ag
             None => format!("{what} hook failed with {}", status_name(status)),
         });
     }
-    state.value.ok_or_else(|| format!("{what} hook returned AGNIJS_OK without an answer"))
+    let value = state.value.ok_or_else(|| format!("{what} hook returned AGNIJS_OK without an answer"))?;
+    Ok(match (value, state.source_map) {
+        (SinkValue::Module(api::ModuleSource::Source(source)), Some(source_map)) => {
+            SinkValue::Module(api::ModuleSource::SourceWithMap { source, source_map })
+        }
+        (v, _) => v,
+    })
 }
 
 // ---- the Host ---------------------------------------------------------------------

@@ -68,6 +68,7 @@ impl ScriptRecord {
             end_line: (line_starts.len() - 1) as u32,
             end_column: text[last..].encode_utf16().count() as u32,
             source_map_url: dbg::source_mapping_url(text),
+            source_map: None,
         };
         ScriptRecord {
             info,
@@ -227,8 +228,9 @@ impl Vm {
                 d.breakpoints[i].sites.extend(sites);
             }
         }
-        let info = d.scripts[id.0 as usize].info.clone();
+        let mut info = d.scripts[id.0 as usize].info.clone();
         let client = d.client.clone();
+        info.source_map = self.source_map_text(&info.url);
         client.script_parsed(self, &info);
         Some(id)
     }
@@ -822,9 +824,9 @@ impl Vm {
             match &self.heap.obj(o).class {
                 Class::Array(a) => format!("{cn}({})", a.length),
                 Class::Error(_) => {
-                    match self.lookup_data_property(o, PropKey::Str(self.names.stack)) {
-                        Some(Value::String(s)) => self.heap.str_to_string(s),
-                        _ => {
+                    match self.error_stack_text(o) {
+                        Some(s) => s,
+                        None => {
                             let (name, message) = self.exception_name_message(Value::Object(o));
                             if message.is_empty() {
                                 name
@@ -1051,7 +1053,15 @@ impl Debuggee for Vm {
     fn scripts(&self) -> Vec<ScriptInfo> {
         self.debug
             .as_deref()
-            .map(|d| d.scripts.iter().map(|s| s.info.clone()).collect())
+            .map(|d| {
+                d.scripts
+                    .iter()
+                    .map(|s| ScriptInfo {
+                        source_map: self.source_map_text(&s.info.url),
+                        ..s.info.clone()
+                    })
+                    .collect()
+            })
             .unwrap_or_default()
     }
 

@@ -178,7 +178,8 @@ impl Loader for HostLoader {
         };
         let realm = realm_of(&shared, ctx);
         let module = match source {
-            ModuleSource::Source(text) => {
+            // QuickJS has no source maps: the map is dropped.
+            ModuleSource::Source(text) | ModuleSource::SourceWithMap { source: text, .. } => {
                 shared
                     .sources
                     .borrow_mut()

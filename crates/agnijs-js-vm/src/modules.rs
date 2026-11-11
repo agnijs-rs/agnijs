@@ -215,11 +215,20 @@ impl Vm {
             Ok(s) => s,
             Err(msg) => return self.type_error(&msg),
         };
+        // A map that comes with the source is registered under the
+        // resolved specifier, the module's script name, before it compiles.
+        let source = match source {
+            ModuleSource::SourceWithMap { source, source_map } => {
+                self.set_source_map(&resolved, Some(&source_map));
+                ModuleSource::Source(source)
+            }
+            other => other,
+        };
         let wants_json = attributes
             .iter()
             .any(|a| a.key == "type" && a.value == "json");
         let module = match source {
-            ModuleSource::Source(text) => {
+            ModuleSource::Source(text) | ModuleSource::SourceWithMap { source: text, .. } => {
                 if wants_json {
                     return self.type_error(&format!("Module '{resolved}' is not a JSON module"));
                 }

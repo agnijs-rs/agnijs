@@ -61,6 +61,10 @@ pub struct ScriptInfo {
     pub end_column: u32,
     /// The `//# sourceMappingURL=` comment's value, if the source has one.
     pub source_map_url: Option<String>,
+    /// The Source Map JSON the host registered for the script
+    /// (`Engine::set_source_map`, or a module loaded with its map). It takes
+    /// precedence over `source_map_url`.
+    pub source_map: Option<Rc<str>>,
 }
 
 /// A position in a script.

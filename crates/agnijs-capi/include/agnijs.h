@@ -27,7 +27,7 @@
 
 // ABI minor version: grows when functions, constants or trailing struct
 // fields are added.
-#define AGNIJS_ABI_VERSION_MINOR 1
+#define AGNIJS_ABI_VERSION_MINOR 2
 
 // `typeof` results from [`crate::agnijs_value_type`].
 #define AGNIJS_TYPE_UNDEFINED 0
@@ -540,6 +540,22 @@ AgnijsStatus agnijs_set_memory_limit(AgnijsEngine engine, size_t bytes);
 // and the interrupt hook bound them. ABI 1.1.
 AgnijsStatus agnijs_set_fuel(AgnijsEngine engine, uint64_t fuel);
 
+// Register the Source Map (revision 3 JSON, UTF-8) for the script or module
+// evaluated under `name`, or with `map` NULL remove it. The map rewrites
+// the positions reported for that script: `Error.prototype.stack`, the
+// frames of a taken exception and the debugger. It applies to every realm,
+// to code evaluated before or after the call; a map that does not decode is
+// ignored. ABI 1.2.
+//
+// # Safety
+// `name` must point at `name_len` readable bytes; `map`, when not NULL, at
+// `map_len`.
+AgnijsStatus agnijs_set_source_map(AgnijsEngine engine,
+                                   const char *name,
+                                   size_t name_len,
+                                   const char *map,
+                                   size_t map_len);
+
 // Remove the fuel budget. ABI 1.1.
 AgnijsStatus agnijs_clear_fuel(AgnijsEngine engine);
 
@@ -933,6 +949,17 @@ AgnijsStatus agnijs_sink_set_string(AgnijsSink sink, const char *text, size_t le
 // # Safety
 // `data` must point at `len` readable bytes (or be NULL when `len` is 0).
 AgnijsStatus agnijs_sink_set_module(AgnijsSink sink, int32_t kind, const uint8_t *data, size_t len);
+
+// Attach a Source Map (revision 3 JSON, UTF-8) to the module source a load
+// hook answers with `AGNIJS_MODULE_SOURCE`, in either order: the map then
+// rewrites the positions reported for that module (`Error.prototype.stack`,
+// exceptions, the debugger), as `agnijs_set_source_map` would under its
+// resolved specifier. Ignored for JSON and bytecode modules. The bytes are
+// copied. ABI 1.2.
+//
+// # Safety
+// `map` must point at `len` readable bytes (or be NULL when `len` is 0).
+AgnijsStatus agnijs_sink_set_source_map(AgnijsSink sink, const char *map, size_t len);
 
 // Give a failing hook's error message (UTF-8; invalid UTF-8 is replaced).
 //

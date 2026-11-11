@@ -21,6 +21,11 @@ pub struct ImportAttribute {
 pub enum ModuleSource {
     /// JavaScript module source text.
     Source(String),
+    /// JavaScript module source text generated from another language (a
+    /// TypeScript transpile, a bundle) with the Source Map that leads back
+    /// to the original: as [`ModuleSource::Source`], then as
+    /// [`Engine::set_source_map`] under the resolved specifier.
+    SourceWithMap { source: String, source_map: String },
     /// A JSON module: the engine parses it and exports the value as default.
     Json(String),
     /// Precompiled bytecode previously produced by [`Engine::compile_module`].

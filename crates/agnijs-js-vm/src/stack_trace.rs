@@ -68,6 +68,11 @@ pub struct CapturedFrame {
 }
 
 impl CapturedFrame {
+    /// A function frame, as opposed to script, module or eval code.
+    pub fn is_function(&self) -> bool {
+        self.callee.is_some() && is_function_code(&self.code)
+    }
+
     fn of(f: &Frame, flags: u8) -> CapturedFrame {
         let construct = if matches!(f.construct, ConstructKind::None) {
             0
@@ -435,7 +440,7 @@ impl Vm {
     /// Whether the frame is a method call: a function frame with a
     /// receiver other than undefined, null or a global object.
     fn is_method_call(&self, f: &CapturedFrame) -> bool {
-        f.callee.is_some()
+        f.is_function()
             && f.flags & FRAME_CONSTRUCT == 0
             && !matches!(f.code.kind, CodeKind::Arrow)
             && !matches!(f.this, Value::Undefined | Value::Null | Value::Empty)
@@ -462,7 +467,7 @@ impl Vm {
         if matches!(f.kind, FrameKind::Eval) {
             return "eval".into();
         }
-        if f.callee.is_none() {
+        if !f.is_function() {
             return String::new();
         }
         let name = self.frame_function_name(f);
@@ -637,7 +642,7 @@ impl Vm {
             };
             self.root(type_name);
             let name = self.frame_function_name(f);
-            let function_name = if f.callee.is_none() || name.is_empty() {
+            let function_name = if !f.is_function() || name.is_empty() {
                 Value::Null
             } else {
                 self.str(&name)
@@ -651,7 +656,7 @@ impl Vm {
             let file = self.str(&g.file);
             self.root(file);
             let mut flags = f.flags;
-            if f.callee.is_none() || (!method && f.flags & FRAME_CONSTRUCT == 0) {
+            if !f.is_function() || (!method && f.flags & FRAME_CONSTRUCT == 0) {
                 flags |= SITE_TOPLEVEL;
             }
             if matches!(f.kind, FrameKind::Eval) {
@@ -731,6 +736,12 @@ impl Vm {
             })
             .collect()
     }
+}
+
+/// Whether `code` is a function body (a module body runs as an async
+/// function, but is reported as top-level code).
+pub fn is_function_code(code: &CodeBlock) -> bool {
+    !matches!(code.kind, CodeKind::Script | CodeKind::Module | CodeKind::Eval)
 }
 
 // ---- Error.prototype.stack, Error.captureStackTrace ------------------------------------

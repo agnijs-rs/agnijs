@@ -497,6 +497,37 @@ pub extern "C" fn agnijs_set_fuel(engine: AgnijsEngine, fuel: u64) -> AgnijsStat
     ffi("agnijs_set_fuel", || engine_op(engine, |eng| eng_res(engine, eng.set_fuel(Some(fuel)))))
 }
 
+/// Register the Source Map (revision 3 JSON, UTF-8) for the script or module
+/// evaluated under `name`, or with `map` NULL remove it. The map rewrites
+/// the positions reported for that script: `Error.prototype.stack`, the
+/// frames of a taken exception and the debugger. It applies to every realm,
+/// to code evaluated before or after the call; a map that does not decode is
+/// ignored. ABI 1.2.
+///
+/// # Safety
+/// `name` must point at `name_len` readable bytes; `map`, when not NULL, at
+/// `map_len`.
+#[no_mangle]
+pub unsafe extern "C" fn agnijs_set_source_map(
+    engine: AgnijsEngine,
+    name: *const c_char,
+    name_len: usize,
+    map: *const c_char,
+    map_len: usize,
+) -> AgnijsStatus {
+    ffi("agnijs_set_source_map", || {
+        // SAFETY: caller contract above.
+        let name = unsafe { ptrs::utf8(name, name_len, "name")? };
+        let map = if map.is_null() {
+            None
+        } else {
+            // SAFETY: caller contract above.
+            Some(unsafe { ptrs::utf8(map, map_len, "map")? })
+        };
+        engine_op(engine, |eng| eng_res(engine, eng.set_source_map(name, map)))
+    })
+}
+
 /// Remove the fuel budget. ABI 1.1.
 #[no_mangle]
 pub extern "C" fn agnijs_clear_fuel(engine: AgnijsEngine) -> AgnijsStatus {

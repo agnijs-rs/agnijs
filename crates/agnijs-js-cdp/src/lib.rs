@@ -807,7 +807,15 @@ impl Session {
             "length": source.encode_utf16().count(),
             "scriptLanguage": "JavaScript",
         });
-        if let Some(m) = &s.source_map_url {
+        if let Some(m) = &s.source_map {
+            // A map the host handed over with the source: give the client
+            // the text itself, as an inline data URL.
+            let url = format!(
+                "data:application/json;base64,{}",
+                ws::base64_encode(m.as_bytes())
+            );
+            params["sourceMapURL"] = json!(url);
+        } else if let Some(m) = &s.source_map_url {
             params["sourceMapURL"] = json!(m);
         }
         self.event("Debugger.scriptParsed", params);
@@ -844,13 +852,17 @@ impl Session {
         })
     }
 
-    /// The source map of a script, loaded once.
+    /// The source map of a script, loaded once: the host-supplied map when
+    /// there is one, else the one its `sourceMappingURL` comment names.
     fn source_map(&self, d: &mut dyn Debuggee, script: ScriptId) -> Option<Rc<SourceMap>> {
         if let Some(m) = self.state.borrow().source_maps.get(&script) {
             return m.clone();
         }
         let info = d.scripts().into_iter().find(|s| s.id == script);
         let map = info.and_then(|info| {
+            if let Some(text) = &info.source_map {
+                return SourceMap::parse(text).ok();
+            }
             let url = info.source_map_url.as_deref()?;
             match SourceMap::from_data_url(url) {
                 Some(r) => r.ok(),

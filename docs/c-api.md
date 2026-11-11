@@ -120,6 +120,10 @@ Every callback is called as `extern "C-unwind"`.
 
 Free the three buffers and the value when you are done. The next API call that runs JavaScript replaces an exception you did not take.
 
+The stack text is `Error.stack` in the V8 format (`    at f (file:line:column)` lines, ADR 0024).
+
+**Source maps (ABI 1.2).** `agnijs_set_source_map(e, name, name_len, map, map_len)` registers a Source Map v3 for a script or module name. Positions in `Error.stack`, call sites and the exception's stack text then refer to the original source. Pass a NULL `map` to remove it. A module load hook can instead hand the map over with the module: call `agnijs_sink_set_source_map(sink, map, len)` alongside `agnijs_sink_set_string`. A map that does not decode is ignored, and positions stay generated; hostile maps never crash the engine.
+
 ## Memory, interrupts and the stack
 
 - **Memory limit.** `memory_limit` (or `agnijs_set_memory_limit`) caps the heap. Running past it ends the script with `AGNIJS_OUT_OF_MEMORY`, and the engine stays usable.

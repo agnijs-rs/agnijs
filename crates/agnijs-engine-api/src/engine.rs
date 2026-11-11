@@ -100,6 +100,20 @@ pub trait Engine {
     /// `name`, for the debugger and source-mapped exceptions.
     fn script_source(&mut self, realm: RealmId, name: &str) -> Option<String>;
 
+    /// Register the Source Map (revision 3 JSON text) for the script or
+    /// module evaluated under `script`, or with `None` remove it. The map
+    /// rewrites the positions the engine reports for that script: the frames
+    /// of `Error.prototype.stack`, of [`crate::Exception::stack`] and of the
+    /// debugger. It applies to every realm and to code evaluated before or
+    /// after the call (stacks already read keep their text). A map that does
+    /// not decode is ignored. A module loader can instead hand a map over
+    /// with [`crate::ModuleSource::SourceWithMap`]. Engines without source
+    /// maps return [`crate::Error::Unsupported`].
+    fn set_source_map(&mut self, script: &str, source_map: Option<&str>) -> Result<()> {
+        let _ = (script, source_map);
+        Err(crate::error::Error::Unsupported("source maps"))
+    }
+
     // ---- bytecode -----------------------------------------------------
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Vec<u8>>;

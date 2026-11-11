@@ -422,7 +422,7 @@ impl Vm {
         self.throw_stack.push(crate::stack_trace::UnwoundFrame {
             code: frame.code.clone(),
             pc: frame.pc.saturating_sub(1) as u32,
-            named: frame.callee.is_some(),
+            named: frame.callee.is_some() && crate::stack_trace::is_function_code(&frame.code),
         });
     }
 
@@ -599,6 +599,11 @@ impl Engine for Vm {
 
     fn script_source(&mut self, _realm: RealmId, name: &str) -> Option<String> {
         self.scripts.get(name).map(|s| s.code.source.text.to_string())
+    }
+
+    fn set_source_map(&mut self, script: &str, source_map: Option<&str>) -> api::Result<()> {
+        Vm::set_source_map(self, script, source_map);
+        Ok(())
     }
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {

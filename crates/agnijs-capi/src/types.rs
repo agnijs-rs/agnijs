@@ -10,7 +10,7 @@ use std::ffi::{c_char, c_void};
 pub const AGNIJS_ABI_VERSION_MAJOR: u32 = 1;
 /// ABI minor version: grows when functions, constants or trailing struct
 /// fields are added.
-pub const AGNIJS_ABI_VERSION_MINOR: u32 = 1;
+pub const AGNIJS_ABI_VERSION_MINOR: u32 = 2;
 
 /// The result of every function that can fail. Zero is success, positive
 /// values are outcomes of running JavaScript, negative values are errors in

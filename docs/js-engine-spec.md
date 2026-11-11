@@ -95,6 +95,8 @@ The engine crate itself contains no host globals beyond the ECMAScript standard 
 - A debugger interface in the engine: source positions per bytecode offset, breakpoints, stepping, frame and scope inspection, async stacks, script source.
 - A separate adapter to the Chrome DevTools Protocol in its own crate, independent of any embedder.
 - First version covers: console, source-mapped exceptions, breakpoints, stepping and `evaluate`. Profiler and heap profiler later.
+- `Error.prototype.stack` uses V8's format, with `Error.stackTraceLimit`, `Error.captureStackTrace`, `Error.prepareStackTrace` call sites and async frames across `await`. Frames are captured as code and instruction index when an error is created, and formatted when `stack` is first read (ADR 0024).
+- Source maps come from the host (`Engine::set_source_map`, `ModuleSource::SourceWithMap`) and apply to `Error.stack`, host exceptions and the debugger. The engine never fetches a map.
 - The interim engine has no inspector; interim debugging is handled by the dev-loop work (TASK-99.13), not here.
 
 ## 10. Crate layout
