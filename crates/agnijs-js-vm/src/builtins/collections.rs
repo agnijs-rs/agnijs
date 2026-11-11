@@ -235,7 +235,7 @@ pub fn process_weak(vm: &mut Vm, weak: &[ObjId]) {
 // ---- keys --------------------------------------------------------------------------------
 
 /// The SameValueZero identity of `v`.
-fn map_key(vm: &mut Vm, v: Value) -> MapKey {
+pub(crate) fn map_key(vm: &mut Vm, v: Value) -> MapKey {
     match v {
         Value::Undefined | Value::Empty => MapKey::Undefined,
         Value::Null => MapKey::Null,

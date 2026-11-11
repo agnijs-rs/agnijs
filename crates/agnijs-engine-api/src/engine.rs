@@ -107,6 +107,22 @@ pub trait Engine {
     /// Evaluate bytecode from [`Engine::compile_script`].
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> Result<Value>;
 
+    // ---- snapshots ----------------------------------------------------
+
+    /// A snapshot of `realm` after initialisation (its built-ins plus the
+    /// bootstrap scripts the host ran in it), which the engine's crate
+    /// restores into a new engine (for AgniJS,
+    /// `agnijs_js_vm::make_engine_from_snapshot`), so startup is a load
+    /// instead of a re-run. Taken between calls, with no jobs pending.
+    /// State a snapshot cannot carry (host objects and functions, pending
+    /// work, generators, modules) fails with
+    /// [`crate::Error::SnapshotUnsupported`]; handles are not part of it.
+    /// Engines without snapshots return [`crate::Error::Unsupported`].
+    fn snapshot(&mut self, realm: RealmId) -> Result<Vec<u8>> {
+        let _ = realm;
+        Err(crate::error::Error::Unsupported("snapshots"))
+    }
+
     // ---- limits and collection ---------------------------------------
 
     /// Cap the heap; allocations beyond it fail with an exception or

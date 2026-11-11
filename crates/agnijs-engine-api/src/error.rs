@@ -56,6 +56,10 @@ pub enum Error {
     BytecodeCorrupt(String),
     /// The engine does not provide this optional capability.
     Unsupported(&'static str),
+    /// A realm holds state a snapshot cannot carry ([`crate::Engine::snapshot`]):
+    /// host objects and functions, pending jobs, generators, modules and the
+    /// other cases the message names.
+    SnapshotUnsupported(String),
     /// The host hook failed (module resolution or loading).
     Host(String),
     /// An engine-internal failure that is not a JS exception.
@@ -101,6 +105,7 @@ impl fmt::Display for Error {
             }
             Error::BytecodeCorrupt(m) => write!(f, "bytecode corrupt: {m}"),
             Error::Unsupported(what) => write!(f, "unsupported by this engine: {what}"),
+            Error::SnapshotUnsupported(m) => write!(f, "cannot snapshot the realm: {m}"),
             Error::Host(m) => write!(f, "host error: {m}"),
             Error::Internal(m) => write!(f, "engine internal error: {m}"),
         }

@@ -194,6 +194,30 @@ pub struct Realm {
 }
 
 impl Realm {
+    /// A realm rebuilt from a snapshot (`crate::snapshot`), its
+    /// intrinsics already validated (one per [`Intrinsic`]).
+    pub(crate) fn restored(
+        id: RealmId,
+        global: ObjId,
+        global_env: EnvId,
+        intrinsics: Vec<ObjId>,
+        intl_fallback: SymId,
+    ) -> Realm {
+        debug_assert_eq!(intrinsics.len(), Intrinsic::COUNT);
+        Realm {
+            id,
+            global,
+            global_env,
+            global_lexicals: IndexMap::new(),
+            epoch: 0,
+            intrinsics,
+            template_cache: HashMap::new(),
+            script_names: Vec::new(),
+            var_names: hashbrown::HashSet::new(),
+            intl_fallback,
+        }
+    }
+
     #[inline]
     pub fn intrinsic(&self, i: Intrinsic) -> ObjId {
         self.intrinsics[i as usize]

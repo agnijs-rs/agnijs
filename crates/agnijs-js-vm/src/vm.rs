@@ -443,6 +443,15 @@ fn next_feedback_owner() -> u32 {
 
 impl Vm {
     pub fn new(host: Rc<dyn Host>) -> Vm {
+        let mut vm = Vm::bare(host);
+        let main = vm.create_realm();
+        vm.current_realm = main;
+        vm
+    }
+
+    /// A VM with its atoms and well-known symbols but no realm yet: what a
+    /// snapshot is restored into (`crate::snapshot`).
+    pub(crate) fn bare(host: Rc<dyn Host>) -> Vm {
         let mut heap = Heap::new();
         heap.shapes.push(crate::object::Shape::root());
         let names = Names::new(&mut heap);
@@ -455,7 +464,7 @@ impl Vm {
                 agnijs_js_regex::MatcherMode::LinearWhenEligible
             }
         };
-        let mut vm = Vm {
+        Vm {
             heap,
             realms: Vec::new(),
             frames: Vec::new(),
@@ -508,10 +517,7 @@ impl Vm {
             instr_count: 0,
             #[cfg(feature = "jit")]
             jit: crate::interp::jit::JitState::from_env(),
-        };
-        let main = vm.create_realm();
-        vm.current_realm = main;
-        vm
+        }
     }
 
     // ---- realms --------------------------------------------------------------

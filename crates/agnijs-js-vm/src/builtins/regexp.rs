@@ -110,7 +110,7 @@ pub(crate) fn flag_bits(f: &Flags) -> u8 {
 /// RegExp objects with the same source and flags (regex literals in a loop
 /// body create a fresh object per evaluation; the matcher is immutable, so
 /// one compilation serves them all).
-fn compile(vm: &mut Vm, pattern: StrId, flags: StrId) -> JsResult<(Rc<Regex>, Flags)> {
+pub(crate) fn compile(vm: &mut Vm, pattern: StrId, flags: StrId) -> JsResult<(Rc<Regex>, Flags)> {
     // A valid flags string has at most eight units; a longer one is parsed
     // from a copy, for the same error.
     let parsed = {

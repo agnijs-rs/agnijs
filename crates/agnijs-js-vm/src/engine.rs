@@ -346,6 +346,7 @@ impl Vm {
             )),
             Error::BytecodeCorrupt(m) => self.throw_type(&format!("corrupt bytecode: {m}")),
             Error::Unsupported(m) => self.throw_type(m),
+            Error::SnapshotUnsupported(m) => self.throw_type(&format!("cannot snapshot the realm: {m}")),
             Error::Host(m) | Error::Internal(m) => self.throw(ErrorType::Error, &m),
         }
     }
@@ -653,6 +654,10 @@ impl Engine for Vm {
                 Ok(self.to_api_value(Value::Object(p)))
             }
         }
+    }
+
+    fn snapshot(&mut self, realm: RealmId) -> api::Result<Vec<u8>> {
+        self.write_snapshot(realm)
     }
 
     fn set_memory_limit(&mut self, bytes: Option<usize>) {
@@ -1008,6 +1013,15 @@ pub fn make_engine(host: Rc<dyn api::Host>) -> Box<dyn Engine> {
     let mut vm = Vm::new(host);
     Vm::create_realm(&mut vm);
     Box::new(vm)
+}
+
+/// Construct an engine from a snapshot written by [`Engine::snapshot`]:
+/// one realm, the main one, holding the snapshot's realm. The bytes are
+/// untrusted: a snapshot from another engine build is
+/// [`api::Error::BytecodeMismatch`], damaged bytes are
+/// [`api::Error::BytecodeCorrupt`].
+pub fn make_engine_from_snapshot(host: Rc<dyn api::Host>, bytes: &[u8]) -> api::Result<Box<dyn Engine>> {
+    Ok(Box::new(crate::snapshot::restore(host, bytes)?))
 }
 
 impl Vm {

@@ -422,7 +422,7 @@ pub fn engine_error(e: AgnijsEngine, err: api::Error) -> Fail {
         api::Error::ForeignHandle => AGNIJS_ERR_WRONG_ENGINE,
         api::Error::UnknownRealm => AGNIJS_ERR_INVALID_REALM,
         api::Error::BytecodeMismatch { .. } | api::Error::BytecodeCorrupt(_) => AGNIJS_ERR_BYTECODE,
-        api::Error::Unsupported(_) => AGNIJS_ERR_UNSUPPORTED,
+        api::Error::Unsupported(_) | api::Error::SnapshotUnsupported(_) => AGNIJS_ERR_UNSUPPORTED,
         api::Error::Host(_) => AGNIJS_ERR_HOST,
         api::Error::Internal(_) => AGNIJS_ERR_ENGINE,
     };

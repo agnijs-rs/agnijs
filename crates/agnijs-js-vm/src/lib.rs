@@ -21,13 +21,14 @@ pub mod modules;
 pub mod object;
 pub mod ops;
 pub mod realm;
+pub mod snapshot;
 pub mod string;
 pub mod symbol;
 pub mod value;
 pub mod vm;
 
 pub use debug::make_debuggee;
-pub use engine::make_engine;
+pub use engine::{make_engine, make_engine_from_snapshot};
 pub use vm::Vm;
 
 #[cfg(test)]
