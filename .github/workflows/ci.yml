@@ -59,6 +59,12 @@ jobs:
         run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs
       - name: test262 against the AgniJS engine baseline, every script and module run from bytecode
         run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --precompile
+      - name: test262 against the AgniJS engine baseline, every test realm restored from a snapshot
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --snapshot
+      - name: host-driven tests on engines restored from a snapshot
+        run: cargo test -p agnijs-js-vm --test host_driven
+        env:
+          AGNIJS_TEST_SNAPSHOT: "1"
       - name: test262 intl402 against the AgniJS intl402 baseline (reported separately)
         run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-intl402
 
