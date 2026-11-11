@@ -101,6 +101,9 @@ fn main() -> Result<()> {
             let mut results = Vec::new();
             for w in &chosen {
                 for engine in &engines {
+                    if !engine.supports(w) {
+                        continue;
+                    }
                     eprint!("{:<20} {:<8} ", w.name, engine.name());
                     let out = Command::new(&exe)
                         .args(["child", "--engine", engine.name(), "--workload", w.name])

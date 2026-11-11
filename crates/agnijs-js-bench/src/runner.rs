@@ -52,6 +52,20 @@ impl EngineKind {
             _ => agnijs_js_vm::make_engine(host),
         }
     }
+
+    /// Whether this engine can run `w` (snapshots are AgniJS only).
+    pub fn supports(self, w: &Workload) -> bool {
+        !(self == EngineKind::QuickJs && matches!(w.kind, Kind::SnapshotStartup | Kind::BundleSnapshot))
+    }
+
+    /// An engine restored from a snapshot written by [`Engine::snapshot`].
+    fn restore(self, bytes: &[u8]) -> Result<Box<dyn Engine>> {
+        let host: Rc<dyn Host> = Rc::new(BenchHost { regex: RegexMatcher::Auto });
+        match self {
+            EngineKind::QuickJs => Err(anyhow!("QuickJS-NG has no snapshots")),
+            _ => agnijs_js_vm::make_engine_from_snapshot(host, bytes).map_err(js),
+        }
+    }
 }
 
 /// A host with every hook at its default: workloads use only the standard
@@ -143,6 +157,63 @@ pub fn run(kind: EngineKind, w: &Workload, cfg: &RunConfig) -> Result<Measuremen
                 last = engine.eval_script(realm, "check.js", check).map_err(js)?;
             }
             checksum = stringify(engine.as_mut(), realm, &last)?;
+        }
+        Kind::SnapshotStartup => {
+            let bytes = {
+                let mut e = kind.make();
+                let realm = e.main_realm();
+                e.snapshot(realm).map_err(js)?
+            };
+            let mut last = String::new();
+            for i in 0..total {
+                let start = Instant::now();
+                let mut e = kind.restore(&bytes)?;
+                let realm = e.main_realm();
+                let v = e.eval_script(realm, "startup.js", "1 + 1").map_err(js)?;
+                record(i, start);
+                last = stringify(e.as_mut(), realm, &v)?;
+            }
+            checksum = last;
+            engine = kind.restore(&bytes)?;
+        }
+        Kind::BundleCold | Kind::BundleSnapshot => {
+            let source = generated_source();
+            let (bytecode, snapshot) = {
+                let mut e = kind.make();
+                let realm = e.main_realm();
+                let b = e.compile_script(realm, "bundle.js", &source).map_err(js)?;
+                let s = if w.kind == Kind::BundleSnapshot {
+                    e.eval_bytecode(realm, &b).map_err(js)?;
+                    Some(e.snapshot(realm).map_err(js)?)
+                } else {
+                    None
+                };
+                (b, s)
+            };
+            let mut last = String::new();
+            let mut kept = None;
+            for i in 0..total {
+                let start = Instant::now();
+                let mut e = match &snapshot {
+                    Some(s) => kind.restore(s)?,
+                    None => {
+                        let mut e = kind.make();
+                        let realm = e.main_realm();
+                        e.eval_bytecode(realm, &bytecode).map_err(js)?;
+                        e
+                    }
+                };
+                let realm = e.main_realm();
+                let v = e.eval_script(realm, "first-call.js", "f_7(1, 2) + acc").map_err(js)?;
+                record(i, start);
+                last = stringify(e.as_mut(), realm, &v)?;
+                kept = Some(e);
+            }
+            checksum = last;
+            engine = match kept {
+                Some(e) => e,
+                None => kind.make(),
+            };
         }
         Kind::CompileSource | Kind::BytecodeLoad => {
             engine = kind.make();

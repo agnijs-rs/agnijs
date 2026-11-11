@@ -12,7 +12,7 @@ fn every_workload_computes_the_same_checksum_on_every_engine() {
     let mut mismatches = Vec::new();
     for w in registry() {
         let mut sums = Vec::new();
-        for engine in EngineKind::ALL {
+        for engine in EngineKind::ALL.into_iter().filter(|e| e.supports(&w)) {
             let m = run(engine, &w, &cfg).unwrap_or_else(|e| panic!("{} on {}: {e:#}", w.name, engine.name()));
             assert_eq!(m.samples_ns.len(), 2, "{} on {}", w.name, engine.name());
             assert!(!m.checksum.is_empty() && m.checksum != "undefined", "{} on {}: checksum {:?}", w.name, engine.name(), m.checksum);

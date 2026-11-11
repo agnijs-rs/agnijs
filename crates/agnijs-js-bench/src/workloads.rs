@@ -70,6 +70,18 @@ pub enum Kind {
     /// [`generated_source`] is compiled to bytecode once; each iteration
     /// loads that bytecode and runs it.
     BytecodeLoad,
+    /// A snapshot of a fresh main realm is written once; each iteration
+    /// restores an engine from it and evaluates a trivial script (the
+    /// snapshot counterpart of `Startup`). AgniJS only.
+    SnapshotStartup,
+    /// The cold path of a bundle start: each iteration creates an engine,
+    /// runs [`generated_source`] from precompiled bytecode and makes a
+    /// first call into it.
+    BundleCold,
+    /// The same start from a snapshot of a realm that already ran the
+    /// bundle: each iteration restores the engine and makes the first
+    /// call. AgniJS only.
+    BundleSnapshot,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -488,6 +500,24 @@ function bench() { result = 0; loop(scaled(20000)); }"#,
             category: Category::Startup,
             description: "Create an engine with its main realm and run a trivial script",
             kind: Kind::Startup,
+        },
+        Workload {
+            name: "snapshot-startup",
+            category: Category::Startup,
+            description: "Restore an engine from a snapshot of a fresh realm and run a trivial script",
+            kind: Kind::SnapshotStartup,
+        },
+        Workload {
+            name: "bundle-cold",
+            category: Category::Startup,
+            description: "Create an engine, run a ~100 KB bundle from bytecode and call into it",
+            kind: Kind::BundleCold,
+        },
+        Workload {
+            name: "bundle-snapshot",
+            category: Category::Startup,
+            description: "Restore an engine from a snapshot taken after the bundle ran and call into it",
+            kind: Kind::BundleSnapshot,
         },
     ]
 }
