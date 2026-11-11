@@ -81,6 +81,11 @@ enum Cmd {
         /// exclusions and baseline. Engines with a bytecode format only.
         #[arg(long)]
         precompile: bool,
+        /// Restore every test realm from a snapshot of a realm that ran the
+        /// base harness (TASK-101.2), against the same exclusions and
+        /// baseline. AgniJS only.
+        #[arg(long)]
+        snapshot: bool,
         /// The engine's regular-expression matcher policy (`Host::regex_matcher`):
         /// `auto` (the default), `backtracking-only` or `linear-when-eligible`. Same baseline either way.
         #[arg(long, default_value = "auto")]
@@ -186,6 +191,7 @@ fn main() -> Result<()> {
             only_intl402,
             verbose,
             precompile,
+            snapshot,
             regex_matcher,
         } => run(RunArgs {
             engine,
@@ -202,6 +208,7 @@ fn main() -> Result<()> {
             only_intl402,
             verbose,
             precompile,
+            snapshot,
             regex_matcher: parse_regex_matcher(&regex_matcher)?,
         }),
     }
@@ -262,6 +269,7 @@ struct RunArgs {
     only_intl402: bool,
     verbose: bool,
     precompile: bool,
+    snapshot: bool,
     regex_matcher: RegexMatcher,
 }
 
@@ -317,7 +325,11 @@ fn run(args: RunArgs) -> Result<()> {
         eprintln!("warning: checkout is at {commit}, PIN says {pinned}");
     }
 
+    if args.snapshot && (args.engine != "agnijs" || args.precompile || args.regex_matcher != RegexMatcher::Auto) {
+        bail!("--snapshot needs the agnijs engine, without --precompile or --regex-matcher");
+    }
     let factory = match (factory_for(&args.engine, args.regex_matcher)?, args.precompile) {
+        _ if args.snapshot => Mode::Snapshot,
         (Mode::Engine(f), true) => Mode::Precompiled(f),
         (_, true) => bail!("--precompile needs an engine that runs code"),
         (mode, false) => mode,

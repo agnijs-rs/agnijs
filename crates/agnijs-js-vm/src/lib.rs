@@ -35,3 +35,19 @@ pub use vm::Vm;
 mod conformance {
     agnijs_engine_api::conformance_tests!(|host| crate::make_engine(host));
 }
+
+/// The conformance kit again, every engine restored from a snapshot of a
+/// fresh realm (TASK-101.2).
+#[cfg(test)]
+mod conformance_from_snapshot {
+    fn fresh_snapshot() -> Vec<u8> {
+        thread_local! {
+            static BYTES: Vec<u8> = {
+                let mut vm = crate::Vm::new(agnijs_engine_api::conformance::TestHost::new());
+                vm.write_snapshot(agnijs_engine_api::RealmId(0)).expect("snapshot")
+            };
+        }
+        BYTES.with(|b| b.clone())
+    }
+    agnijs_engine_api::conformance_tests!(|host| crate::make_engine_from_snapshot(host, &fresh_snapshot()).expect("restore"));
+}

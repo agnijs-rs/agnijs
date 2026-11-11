@@ -8,9 +8,19 @@ use agnijs_engine_api::{CallContext, Engine, Error, PromiseState, RealmId, Value
 use std::cell::RefCell;
 use std::rc::Rc;
 
+/// A fresh engine, or with `AGNIJS_TEST_SNAPSHOT=1` one restored from a
+/// snapshot of a fresh realm (TASK-101.2), so the suite also checks
+/// snapshot-created realms.
 fn engine() -> (Rc<TestHost>, Box<dyn Engine>, RealmId) {
     let host = TestHost::new();
-    let e = agnijs_js_vm::make_engine(host.clone());
+    let e = if std::env::var_os("AGNIJS_TEST_SNAPSHOT").is_some_and(|v| v == "1") {
+        let mut seed = agnijs_js_vm::make_engine(TestHost::new());
+        let realm = seed.main_realm();
+        let bytes = seed.snapshot(realm).expect("snapshot");
+        agnijs_js_vm::make_engine_from_snapshot(host.clone(), &bytes).expect("restore")
+    } else {
+        agnijs_js_vm::make_engine(host.clone())
+    };
     let realm = e.main_realm();
     (host, e, realm)
 }

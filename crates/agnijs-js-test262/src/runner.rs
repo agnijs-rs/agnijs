@@ -33,6 +33,19 @@ pub enum Mode {
     /// Parse and compile to bytecode without running (checks the compiler
     /// against every in-scope test).
     CompileOnly,
+    /// Every realm a test runs in is restored from an AgniJS snapshot
+    /// (TASK-101.2) of a realm that already ran the base harness
+    /// (`assert.js` and `sta.js`, plus `doneprintHandle.js` for async
+    /// tests; nothing for raw tests). `$262` and the test's includes are
+    /// added after the restore.
+    Snapshot,
+}
+
+/// Where a test's engine comes from.
+#[derive(Clone, Copy)]
+enum Start<'a> {
+    Factory(&'a Factory),
+    Snapshot,
 }
 
 /// Harness files by name (`assert.js`, ...).
@@ -154,9 +167,10 @@ pub fn run_test(
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Vec<RunResult> {
-    let (factory, precompile) = match mode {
-        Mode::Engine(f) => (f, false),
-        Mode::Precompiled(f) => (f, true),
+    let (start, precompile) = match mode {
+        Mode::Engine(f) => (Start::Factory(f), false),
+        Mode::Precompiled(f) => (Start::Factory(f), true),
+        Mode::Snapshot => (Start::Snapshot, false),
         Mode::ParseOnly => return parse_test(case, harness, false),
         Mode::CompileOnly => return parse_test(case, harness, true),
     };
@@ -164,20 +178,20 @@ pub fn run_test(
     if m.is_module() || m.is_raw() {
         return vec![RunResult {
             strict: None,
-            outcome: run_guarded(case, false, factory, precompile, harness, timeout),
+            outcome: run_guarded(case, false, start, precompile, harness, timeout),
         }];
     }
     let mut runs = Vec::new();
     if !m.has_flag("onlyStrict") {
         runs.push(RunResult {
             strict: Some(false),
-            outcome: run_guarded(case, false, factory, precompile, harness, timeout),
+            outcome: run_guarded(case, false, start, precompile, harness, timeout),
         });
     }
     if !m.has_flag("noStrict") {
         runs.push(RunResult {
             strict: Some(true),
-            outcome: run_guarded(case, true, factory, precompile, harness, timeout),
+            outcome: run_guarded(case, true, start, precompile, harness, timeout),
         });
     }
     runs
@@ -188,13 +202,13 @@ pub fn run_test(
 fn run_guarded(
     case: &TestCase,
     strict: bool,
-    factory: &Factory,
+    start: Start,
     precompile: bool,
     harness: &HarnessFiles,
     timeout: Duration,
 ) -> Outcome {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_once(case, strict, factory, precompile, harness, timeout)
+        run_once(case, strict, start, precompile, harness, timeout)
     })) {
         Ok(o) => o,
         Err(p) => {
@@ -326,10 +340,59 @@ fn compile_once(case: &TestCase, strict: bool, harness: &HarnessFiles) -> Outcom
     }
 }
 
+/// The harness files every test of this kind runs before its includes.
+fn base_harness(meta: &Metadata) -> Vec<&'static str> {
+    if meta.is_raw() {
+        return Vec::new();
+    }
+    let mut files = vec!["assert.js", "sta.js"];
+    if meta.is_async() {
+        files.push("doneprintHandle.js");
+    }
+    files
+}
+
+thread_local! {
+    /// Snapshots of a realm that ran a base harness, by its file count
+    /// (0 raw, 2 sync, 3 async), taken once per runner thread.
+    static SNAPSHOTS: RefCell<HashMap<usize, Rc<Vec<u8>>>> = RefCell::new(HashMap::new());
+}
+
+/// An AgniJS engine restored from the snapshot of a realm that ran `base`.
+fn engine_from_snapshot(
+    host: Rc<dyn Host>,
+    base: &[&str],
+    harness: &HarnessFiles,
+) -> std::result::Result<Box<dyn Engine>, String> {
+    let cached = SNAPSHOTS.with(|s| s.borrow().get(&base.len()).cloned());
+    let bytes = match cached {
+        Some(b) => b,
+        None => {
+            let builder = Rc::new(Test262Host {
+                prints: RefCell::new(Vec::new()),
+                precompile: false,
+                deadline: Instant::now() + Duration::from_secs(600),
+                root: PathBuf::new(),
+            });
+            let mut e = agnijs_js_vm::make_engine(builder);
+            let realm = e.main_realm();
+            for f in base {
+                let src = harness.get(*f).ok_or_else(|| format!("missing harness file {f}"))?;
+                e.eval_script(realm, &format!("harness/{f}"), src)
+                    .map_err(|err| format!("harness {f} failed: {err}"))?;
+            }
+            let b = Rc::new(e.snapshot(realm).map_err(|err| err.to_string())?);
+            SNAPSHOTS.with(|s| s.borrow_mut().insert(base.len(), b.clone()));
+            b
+        }
+    };
+    agnijs_js_vm::make_engine_from_snapshot(host, &bytes).map_err(|err| err.to_string())
+}
+
 fn run_once(
     case: &TestCase,
     strict: bool,
-    factory: &Factory,
+    start: Start,
     precompile: bool,
     harness: &HarnessFiles,
     timeout: Duration,
@@ -344,17 +407,21 @@ fn run_once(
             .map(Path::to_path_buf)
             .unwrap_or_default(),
     });
-    let mut engine = factory(host.clone());
+    let meta = &case.meta;
+    let base = base_harness(meta);
+    let (mut engine, preloaded) = match start {
+        Start::Factory(factory) => (factory(host.clone()), false),
+        Start::Snapshot => match engine_from_snapshot(host.clone(), &base, harness) {
+            Ok(e) => (e, true),
+            Err(e) => return Outcome::Fail(format!("snapshot: {e}")),
+        },
+    };
     let realm = engine.main_realm();
     if let Err(e) = install_262(&mut *engine, realm, &host) {
         return Outcome::Fail(format!("installing $262: {e}"));
     }
-    let meta = &case.meta;
     if !meta.is_raw() {
-        let mut files: Vec<&str> = vec!["assert.js", "sta.js"];
-        if meta.is_async() {
-            files.push("doneprintHandle.js");
-        }
+        let mut files: Vec<&str> = if preloaded { Vec::new() } else { base };
         files.extend(meta.includes.iter().map(String::as_str));
         for f in files {
             let Some(src) = harness.get(f) else {
