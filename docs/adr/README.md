@@ -20,3 +20,4 @@ Crate names in these records use the current `agnijs-*` names; where a record sa
 - [20. The baseline JIT generates code with Cranelift's code generator alone, never speculates, and leaves compiled code for every call](0020-baseline-jit-on-cranelift-codegen-with-no-speculation.md)
 - [21. The C API is an id-based, versioned ABI over the engine interface that never panics or aborts its host](0021-c-api-is-an-id-based-abi-that-never-panics.md)
 - [22. A realm snapshot is validated data: natives go by registry index, code through the bytecode serializer, and what cannot be written is refused](0022-realm-snapshots-are-validated-data-with-natives-by-registry-index.md)
+- [23. Node-style module resolution is an optional crate in the workspace, and the engine core knows nothing of it](0023-node-style-module-resolution-is-an-optional-crate-outside-the-engine.md)

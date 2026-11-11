@@ -14,6 +14,7 @@ members = [
     "crates/agnijs-js-bench",
     "crates/agnijs-js-jit",
     "crates/agnijs-capi",
+    "crates/agnijs-js-resolve",
 ]
 
 [workspace.package]
@@ -39,6 +40,8 @@ agnijs-js-debugger = { path = "crates/agnijs-js-debugger" }
 agnijs-js-cdp = { path = "crates/agnijs-js-cdp" }
 # The baseline JIT: optional, behind agnijs-js-vm's `jit` feature (ADR 0020).
 agnijs-js-jit = { path = "crates/agnijs-js-jit" }
+# Optional Node-style resolver for embedders; no engine crate depends on it (ADR 0023).
+agnijs-js-resolve = { path = "crates/agnijs-js-resolve" }
 rquickjs = { version = "0.14", features = ["loader", "array-buffer", "classes", "properties"] }
 regress = { version = "0.12", features = ["utf16"] }
 serde = { version = "1", features = ["derive"] }

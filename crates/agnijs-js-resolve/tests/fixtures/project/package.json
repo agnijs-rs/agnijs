@@ -1,0 +1,13 @@
+{
+  "name": "app",
+  "imports": {
+    "#util": "./src/util.js",
+    "#internal/*": "./src/internal/*.js",
+    "#dep": "dep-main",
+    "#bad": "../outside.js"
+  },
+  "exports": {
+    ".": "./src/main.js",
+    "./feature": "./src/feature.js"
+  }
+}

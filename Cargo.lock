@@ -128,6 +128,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "agnijs-js-resolve"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-js-vm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agnijs-js-test262"
 version = "0.1.0"
 dependencies = [
