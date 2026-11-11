@@ -402,16 +402,14 @@ impl Vm {
 
                 // ---- bindings ----
                 Instr::LdaEnv { depth, slot } => {
-                    let e = self.env_at(fi, depth);
-                    match self.heap.env(e).as_decl() {
-                        Some(d) => acc = d.slots[slot as usize],
+                    match self.env_slot(fi, depth, slot) {
+                        Some(v) => acc = v,
                         None => slow!(instr),
                     }
                 }
                 Instr::StaEnv { depth, slot } => {
-                    let e = self.env_at(fi, depth);
-                    match self.heap.env_mut(e).as_decl_mut() {
-                        Some(d) => d.slots[slot as usize] = acc,
+                    match self.env_slot_mut(fi, depth, slot) {
+                        Some(s) => *s = acc,
                         None => slow!(instr),
                     }
                 }
@@ -822,19 +820,41 @@ impl Vm {
     }
 
     /// The environment `depth` levels out from the frame's innermost one.
+    /// `None` when the chain is shorter than `depth`: bytecode paired with
+    /// an environment it was not compiled for (a damaged snapshot), which
+    /// the slow path turns into an exception instead of a panic.
     #[inline]
-    pub(crate) fn env_at(&self, fi: usize, depth: u16) -> EnvId {
-        let mut e = self.frames[fi]
-            .env
-            .expect("environment access with no environment");
+    pub(crate) fn env_at(&self, fi: usize, depth: u16) -> Option<EnvId> {
+        let mut e = self.frames[fi].env?;
         for _ in 0..depth {
-            e = self
-                .heap
-                .env(e)
-                .parent()
-                .expect("environment depth out of range");
+            e = self.heap.env(e).parent()?;
         }
-        e
+        Some(e)
+    }
+
+    /// The declarative binding `slot` of the environment `depth` levels
+    /// out, if the environment has it.
+    #[inline]
+    pub(crate) fn env_slot(&self, fi: usize, depth: u16, slot: u16) -> Option<Value> {
+        let e = self.env_at(fi, depth)?;
+        self.heap.env(e).as_decl()?.slots.get(slot as usize).copied()
+    }
+
+    #[inline]
+    pub(crate) fn env_slot_mut(&mut self, fi: usize, depth: u16, slot: u16) -> Option<&mut Value> {
+        let e = self.env_at(fi, depth)?;
+        self.heap.env_mut(e).as_decl_mut()?.slots.get_mut(slot as usize)
+    }
+
+    /// The exception for an environment access the chain cannot satisfy.
+    #[cold]
+    pub(crate) fn env_mismatch(&mut self, code: &CodeBlock, fi: usize, depth: u16, slot: u16) -> Fault {
+        let msg = format!(
+            "internal error: {} reads environment slot {slot} at depth {depth} (pc {}), which its environment does not have",
+            code.name,
+            self.frames[fi].pc.saturating_sub(1)
+        );
+        self.throw(crate::vm::ErrorType::Error, &msg)
     }
 
     /// Run `code` as a script in the current realm.

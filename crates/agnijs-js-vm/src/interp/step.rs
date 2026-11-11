@@ -214,24 +214,17 @@ impl Vm {
                 f.env_depth += 1;
             }
             Instr::LdaEnv { depth, slot } => {
-                let e = self.env_at(fi, depth);
-                let v = match self.heap.env(e).as_decl() {
-                    Some(d) => d.slots[slot as usize],
-                    None => panic!(
-                        "LdaEnv on a non-declarative environment in {} ({:?}) at pc {} (depth {depth}, slot {slot})",
-                        code.name, code.kind, self.frames[fi].pc - 1
-                    ),
+                let Some(v) = self.env_slot(fi, depth, slot) else {
+                    return Err(self.env_mismatch(code, fi, depth, slot));
                 };
                 set_acc!(v);
             }
             Instr::StaEnv { depth, slot } => {
-                let e = self.env_at(fi, depth);
                 let v = acc!();
-                self.heap
-                    .env_mut(e)
-                    .as_decl_mut()
-                    .expect("StaEnv on a non-declarative environment")
-                    .slots[slot as usize] = v;
+                match self.env_slot_mut(fi, depth, slot) {
+                    Some(s) => *s = v,
+                    None => return Err(self.env_mismatch(code, fi, depth, slot)),
+                }
             }
             Instr::CheckTdz(name) => {
                 if acc!().is_empty() {

@@ -499,13 +499,10 @@ impl Vm {
             Instr::LdaGlobal(name) => self.load_global_cached(code, name),
             Instr::StaGlobal { name, .. } => self.store_global_cached(code, name, acc).then_some(acc),
             Instr::LdaEnv { depth, slot } => {
-                let e = self.env_at(fi, depth);
-                self.heap.env(e).as_decl().map(|d| d.slots[slot as usize])
+                self.env_slot(fi, depth, slot)
             }
             Instr::StaEnv { depth, slot } => {
-                let e = self.env_at(fi, depth);
-                let d = self.heap.env_mut(e).as_decl_mut()?;
-                d.slots[slot as usize] = acc;
+                *self.env_slot_mut(fi, depth, slot)? = acc;
                 Some(acc)
             }
             Instr::LdaThis => Some(self.frames[fi].this),
@@ -804,13 +801,11 @@ impl Runtime<Value> for JitRt<'_> {
         let hit = match self.code.instrs[pc as usize] {
             Instr::LdaGlobal(name) => vm.load_global_cached(self.code, name),
             Instr::LdaEnv { depth, slot } => {
-                let e = vm.env_at(self.fi, depth);
-                vm.heap.env(e).as_decl().map(|d| d.slots[slot as usize])
+                vm.env_slot(self.fi, depth, slot)
             }
             Instr::StaEnv { depth, slot } => {
-                let e = vm.env_at(self.fi, depth);
-                vm.heap.env_mut(e).as_decl_mut().map(|d| {
-                    d.slots[slot as usize] = acc;
+                vm.env_slot_mut(self.fi, depth, slot).map(|s| {
+                    *s = acc;
                     acc
                 })
             }

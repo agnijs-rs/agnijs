@@ -2335,3 +2335,83 @@ fn validate(vm: &Vm, t: &Tables, reg: &Registry) -> Result<(), Error> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agnijs_engine_api::Engine;
+
+    /// A closure handed an environment without the bindings its code
+    /// reads (what a damaged snapshot can pair) throws instead of
+    /// panicking, on the fast path, the slow path and after a collection.
+    #[test]
+    fn code_over_the_wrong_environment_throws() {
+        let mut vm = Vm::new(Rc::new(NullHost));
+        let realm = vm.main_realm();
+        vm.eval_script(realm, "a.js", "var f = (() => { let a = 1, b = 2; return () => a + b; })();")
+            .unwrap();
+        let bytes = vm.write_snapshot(realm).unwrap();
+        let mut vm = restore(Rc::new(NullHost), &bytes).unwrap();
+        let realm = vm.main_realm();
+        let global = vm.realm_of(realm).global;
+        let key = PropKey::Str(vm.heap.atom_units(Units::One(b"f")));
+        let Some(Value::Object(f)) = vm.heap.get_own_property(global, key).and_then(|p| p.value()) else {
+            panic!("f")
+        };
+        let empty = vm.heap.alloc_env(Environment::synthetic(0, None, false));
+        vm.heap.obj_mut(f).function_mut().unwrap().env = Some(empty);
+        for _ in 0..3 {
+            let err = vm.eval_script(realm, "b.js", "f()").unwrap_err();
+            assert!(err.to_string().contains("environment"), "{err}");
+        }
+    }
+}
+
+/// Helpers for fuzzing the loader past its checksum. Not a stable API.
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    fn body_start(bytes: &[u8]) -> Option<usize> {
+        let tag = format_tag();
+        let header = 4 + tag.len() + 1;
+        (bytes.len() >= header + 16).then_some(header + 16)
+    }
+
+    /// Recompute the checksum after editing the body, so a mutation
+    /// reaches the decoder instead of the checksum test.
+    pub fn reseal(bytes: &mut [u8]) {
+        let Some(start) = body_start(bytes) else { return };
+        let sum = checksum(&bytes[start..]);
+        bytes[start - 8..start].copy_from_slice(&sum.to_le_bytes());
+    }
+
+    /// The byte range holding the encoded code trees, whose contents the
+    /// bytecode trust model (ADR 0010) governs.
+    pub fn code_span(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+        let start = body_start(bytes)?;
+        let mut r = Reader { b: &bytes[start..], pos: 0 };
+        let walk = |r: &mut Reader| -> Result<std::ops::Range<usize>, Error> {
+            let strings = r.count(5)?;
+            let bigints = r.count(4)?;
+            let roots = r.count(4)?;
+            r.take(12)?;
+            for _ in 0..strings {
+                let flags = r.u8()?;
+                let n = r.count(1)?;
+                r.take(if flags & 2 != 0 { n * 2 } else { n })?;
+            }
+            for _ in 0..bigints {
+                let n = r.count(1)?;
+                r.take(n)?;
+            }
+            let from = r.pos;
+            for _ in 0..roots {
+                let n = r.count(1)?;
+                r.take(n)?;
+            }
+            Ok(from..r.pos)
+        };
+        walk(&mut r).ok().map(|s| s.start + start..s.end + start)
+    }
+}
