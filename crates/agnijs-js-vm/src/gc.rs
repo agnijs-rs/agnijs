@@ -388,6 +388,7 @@ impl Class {
         match self {
             Class::Ordinary
             | Class::Error
+            | Class::RawJSON
             | Class::Boolean(_)
             | Class::Number(_)
             | Class::Date(_)

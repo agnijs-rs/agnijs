@@ -433,6 +433,9 @@ pub enum Class {
     /// An ECMA-402 service object (`Intl.NumberFormat` and friends).
     #[cfg(feature = "intl")]
     Intl(Box<crate::builtins::intl::IntlData>),
+    /// A `JSON.rawJSON` object ([[IsRawJSON]]); its text is the frozen
+    /// `rawJSON` property.
+    RawJSON,
 }
 
 /// An iterator and its `next` method.
@@ -466,6 +469,7 @@ impl Class {
                 | Class::StringIterator { .. }
                 | Class::Date(_)
                 | Class::WeakRef(_)
+                | Class::RawJSON
         )
     }
 

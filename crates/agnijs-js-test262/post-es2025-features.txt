@@ -5,7 +5,6 @@
 #
 # ES2026 (17th edition)
 explicit-resource-management
-json-parse-with-source
 #
 # Reached Stage 4 after ES2026 was frozen, or unclear edition; treated as
 # post-2025 until a maintainer confirms otherwise.

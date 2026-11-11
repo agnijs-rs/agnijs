@@ -11,7 +11,9 @@ use agnijs_js_parser::number::{format_js_number, NUMBER_BUF_LEN};
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let json = vm.new_object();
     vm.realm_mut().set_intrinsic(Intrinsic::JSON, json);
+    vm.method(json, "isRawJSON", 1, json_is_raw_json);
     vm.method(json, "parse", 2, json_parse);
+    vm.method(json, "rawJSON", 1, json_raw_json);
     vm.method(json, "stringify", 3, json_stringify);
     super::to_string_tag(vm, json, "JSON");
     let global = vm.realm_of(realm).global;
@@ -57,12 +59,20 @@ impl Unit for u16 {
 }
 
 fn parse_units<T: Unit>(vm: &mut Vm, units: &[T]) -> JsResult<Value> {
+    Ok(parse_units_tracked(vm, units, false)?.0)
+}
+
+/// Parse, also building the JSON Parse Record tree (the source text of
+/// each primitive) when `track` is set, for a reviver's `context`.
+fn parse_units_tracked<T: Unit>(vm: &mut Vm, units: &[T], track: bool) -> JsResult<(Value, Option<Rec>)> {
     let mut p = Parser {
         units,
         pos: 0,
         depth: 0,
         items: Vec::new(),
         scratch: Vec::new(),
+        track,
+        recs: Vec::new(),
     };
     p.skip_ws();
     let v = p.parse_value(vm)?;
@@ -70,7 +80,24 @@ fn parse_units<T: Unit>(vm: &mut Vm, units: &[T]) -> JsResult<Value> {
     if p.pos != units.len() {
         return p.fail(vm, "Unexpected token after JSON value");
     }
-    Ok(v)
+    Ok((v, p.recs.pop()))
+}
+
+/// A JSON Parse Record: the value a node parsed to and, for a primitive,
+/// its source text; for an array or object, the records of its elements
+/// or (last definition of each) entries.
+enum Rec {
+    Prim(Value, Value),
+    Array(Value, Vec<Rec>),
+    Object(Value, Vec<(PropKey, Rec)>),
+}
+
+impl Rec {
+    fn value(&self) -> Value {
+        match self {
+            Rec::Prim(v, _) | Rec::Array(v, _) | Rec::Object(v, _) => *v,
+        }
+    }
 }
 
 struct Parser<'a, T: Unit> {
@@ -82,6 +109,10 @@ struct Parser<'a, T: Unit> {
     items: Vec<Value>,
     /// The content of the current string when it has escapes.
     scratch: Vec<u16>,
+    /// Whether to build parse records (JSON.parse with a reviver).
+    track: bool,
+    /// The records of the values parsed so far, innermost last.
+    recs: Vec<Rec>,
 }
 
 const MAX_JSON_DEPTH: u32 = 5000;
@@ -126,6 +157,20 @@ impl<'a, T: Unit> Parser<'a, T> {
 
     fn parse_value(&mut self, vm: &mut Vm) -> JsResult<Value> {
         vm.check_stack()?;
+        if !self.track {
+            return self.parse_value_inner(vm);
+        }
+        let start = self.pos;
+        let is_composite = matches!(self.peek(), Some(0x7B) | Some(0x5B));
+        let v = self.parse_value_inner(vm)?;
+        if !is_composite {
+            let src = vm.heap.alloc_str_units(T::units(&self.units[start..self.pos]));
+            self.recs.push(Rec::Prim(v, Value::String(src)));
+        }
+        Ok(v)
+    }
+
+    fn parse_value_inner(&mut self, vm: &mut Vm) -> JsResult<Value> {
         match self.peek() {
             None => self.fail(vm, "Unexpected end of JSON input"),
             Some(0x7B) => self.parse_object(vm),
@@ -344,9 +389,16 @@ impl<'a, T: Unit> Parser<'a, T> {
             }
         }
         let items: Vec<Value> = self.items.drain(first..).collect();
+        let n = items.len();
         vm.pop_roots(mark);
         self.depth -= 1;
-        Ok(Value::Object(vm.new_array(items)))
+        let v = Value::Object(vm.new_array(items));
+        if self.track {
+            let at = self.recs.len() - n;
+            let elements = self.recs.split_off(at);
+            self.recs.push(Rec::Array(v, elements));
+        }
+        Ok(v)
     }
 
     fn parse_object(&mut self, vm: &mut Vm) -> JsResult<Value> {
@@ -356,6 +408,7 @@ impl<'a, T: Unit> Parser<'a, T> {
             return Err(vm.throw_range("Maximum call stack size exceeded"));
         }
         let obj = vm.new_object();
+        let mut entries: Vec<(PropKey, Rec)> = Vec::new();
         let mark = vm.root_mark();
         vm.root(Value::Object(obj));
         self.skip_ws();
@@ -376,6 +429,13 @@ impl<'a, T: Unit> Parser<'a, T> {
                 self.skip_ws();
                 let v = self.parse_value(vm)?;
                 vm.create_data_property(obj, key, v)?;
+                if self.track {
+                    let r = self.recs.pop().expect("a parsed value has a record");
+                    match entries.iter_mut().find(|(k, _)| *k == key) {
+                        Some(e) => e.1 = r,
+                        None => entries.push((key, r)),
+                    }
+                }
                 self.skip_ws();
                 match self.peek() {
                     Some(0x2C) => {
@@ -391,45 +451,65 @@ impl<'a, T: Unit> Parser<'a, T> {
         }
         vm.pop_roots(mark);
         self.depth -= 1;
+        if self.track {
+            self.recs.push(Rec::Object(Value::Object(obj), entries));
+        }
         Ok(Value::Object(obj))
     }
 }
 
 fn json_parse(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let text = vm.to_string(a.arg(0))?;
+    let reviver = a.arg(1);
+    let track = vm.is_callable(reviver);
     // A copy of the text in its own storage width: the parser allocates
     // into the heap while it reads.
-    let unfiltered = match vm.heap.units(text) {
+    let (unfiltered, rec) = match vm.heap.units(text) {
         Units::One(b) => {
             let b = b.to_vec();
-            parse_units(vm, &b)?
+            parse_units_tracked(vm, &b, track)?
         }
         Units::Two(u) => {
             let u = u.to_vec();
-            parse_units(vm, &u)?
+            parse_units_tracked(vm, &u, track)?
         }
     };
-    let reviver = a.arg(1);
-    if vm.is_callable(reviver) {
+    if track {
         let root = vm.new_object();
         let key = PropKey::Str(vm.names.empty);
         vm.create_data_property_or_throw(root, key, unfiltered)?;
-        return internalize(vm, root, key, reviver);
+        return internalize(vm, root, key, reviver, rec.as_ref());
     }
     Ok(unfiltered)
 }
 
-/// InternalizeJSONProperty(holder, name, reviver).
-fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value) -> JsResult<Value> {
+/// InternalizeJSONProperty(holder, name, reviver, parseRecord). The
+/// record describes the value as parsed; once the value at `name` is no
+/// longer that value (a reviver replaced it), it and its children get no
+/// source text.
+fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value, rec: Option<&Rec>) -> JsResult<Value> {
     vm.check_stack()?;
     let val = vm.get(holder, name)?;
+    let context = vm.new_object();
+    let rec = match rec {
+        Some(r) if vm.same_value(r.value(), val) => Some(r),
+        _ => None,
+    };
+    if let Some(Rec::Prim(_, src)) = rec {
+        let key = PropKey::Str(vm.atom("source"));
+        vm.create_data_property_or_throw(context, key, *src)?;
+    }
     if let Value::Object(o) = val {
         if vm.is_array(val)? {
+            let elements: &[Rec] = match rec {
+                Some(Rec::Array(_, e)) => e,
+                _ => &[],
+            };
             let len = vm.length_of_array_like(o)?;
             let mut i = 0.0;
             while i < len {
                 let k = vm.number_key(i);
-                let new_el = internalize(vm, o, k, reviver)?;
+                let new_el = internalize(vm, o, k, reviver, elements.get(i as usize))?;
                 if new_el.is_undefined() {
                     vm.delete_property(o, k)?;
                 } else {
@@ -438,9 +518,14 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value) -> JsR
                 i += 1.0;
             }
         } else {
+            let entries: &[(PropKey, Rec)] = match rec {
+                Some(Rec::Object(_, e)) => e,
+                _ => &[],
+            };
             let keys = vm.enumerable_own_keys(o)?;
             for k in keys {
-                let new_el = internalize(vm, o, k, reviver)?;
+                let entry = entries.iter().find(|(ek, _)| *ek == k).map(|(_, r)| r);
+                let new_el = internalize(vm, o, k, reviver, entry)?;
                 if new_el.is_undefined() {
                     vm.delete_property(o, k)?;
                 } else {
@@ -450,7 +535,41 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value) -> JsR
         }
     }
     let name_v = vm.key_to_value(name);
-    vm.call_value(reviver, Value::Object(holder), &[name_v, val])
+    vm.call_value(reviver, Value::Object(holder), &[name_v, val, Value::Object(context)])
+}
+
+/// JSON.rawJSON(text): a frozen null-prototype object whose `rawJSON` is
+/// the text of a JSON primitive, which JSON.stringify emits verbatim.
+fn json_raw_json(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let s = vm.to_string(a.arg(0))?;
+    let units: Vec<u16> = vm.heap.units(s).iter().collect();
+    let edge_ws = |c: u16| matches!(c, 0x09 | 0x0A | 0x0D | 0x20);
+    match (units.first(), units.last()) {
+        (None, _) => return vm.syntax_error("JSON.rawJSON: empty text"),
+        (Some(&f), Some(&l)) if edge_ws(f) || edge_ws(l) => {
+            return vm.syntax_error("JSON.rawJSON: the text starts or ends with whitespace")
+        }
+        (Some(0x7B) | Some(0x5B), _) => {
+            return vm.syntax_error("JSON.rawJSON: the text must be a JSON primitive, not an object or array")
+        }
+        _ => {}
+    }
+    parse_units(vm, &units)?;
+    let o = vm.new_object_with_proto(None);
+    vm.heap.obj_mut(o).class = Class::RawJSON;
+    let key = PropKey::Str(vm.atom("rawJSON"));
+    vm.create_data_property_or_throw(o, key, Value::String(s))?;
+    vm.set_integrity_level(o, true)?;
+    Ok(Value::Object(o))
+}
+
+/// JSON.isRawJSON(O).
+fn json_is_raw_json(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let is = match a.arg(0) {
+        Value::Object(o) => matches!(vm.heap.obj(o).class, Class::RawJSON),
+        _ => false,
+    };
+    Ok(Value::Bool(is))
 }
 
 // ---- stringify -----------------------------------------------------------------------
@@ -560,6 +679,13 @@ fn serialize_property(
         value = vm.call_value(rep, Value::Object(holder), &[k, value])?;
     }
     if let Value::Object(o) = value {
+        if matches!(vm.heap.obj(o).class, Class::RawJSON) {
+            let key = PropKey::Str(vm.atom("rawJSON"));
+            if let Value::String(s) = vm.get(o, key)? {
+                out.push_units(&vm.heap.units(s));
+            }
+            return Ok(true);
+        }
         let unwrapped = match vm.heap.obj(o).class {
             Class::Number(_) => Some(Value::Number(vm.to_number(value)?)),
             Class::String(_) => Some(Value::String(vm.to_string(value)?)),
