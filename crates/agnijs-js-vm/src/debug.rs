@@ -1022,6 +1022,10 @@ impl Debuggee for Vm {
         }));
         self.debug_hot = true;
         self.refresh_attention();
+        // Frames in compiled code continue in the interpreter (ADR 0019
+        // J9): complete them first, so the debugger sees every register.
+        #[cfg(feature = "jit")]
+        self.jit_materialize_all();
         // Scripts the engine still holds become known now, oldest first.
         let mut known: Vec<(Rc<CodeBlock>, ScriptKind, RealmId)> = self
             .scripts

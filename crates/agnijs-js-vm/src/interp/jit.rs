@@ -28,7 +28,9 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use agnijs_js_compiler::bytecode::{CodeBlock, Constant, IcSite, Instr, Tier};
-use agnijs_js_jit::{Arith, Compiled, Exit, HeapView, JitValue, Resume, Runtime};
+use agnijs_js_jit::{
+    Arith, Compiled, Exit, FrameHandle, FrameState, HeapView, JitValue, Resume, Runtime,
+};
 
 use super::{Args, Flow, RunOutcome};
 use crate::value::Value;
@@ -114,6 +116,9 @@ pub struct JitStats {
     pub direct_calls: u64,
     /// Loop back-edges taken by compiled code.
     pub back_edges: u64,
+    /// Side exits: compiled code left for the interpreter before an
+    /// instruction because a guard failed (TASK-101.3.1).
+    pub deopts: u64,
     /// Calls from compiled code into the runtime ([`Runtime::slow`] and
     /// [`Runtime::poll`]): what compiled code could not do inline.
     pub calls_out: u64,
@@ -137,6 +142,22 @@ pub(crate) struct JitState {
     /// Compiled callees running inside a call out of their callers'
     /// compiled code ([`JitRt::enter_callee`]), bounded by [`MAX_NEST`].
     nest: u32,
+    /// The compiled frames that exist, innermost last (TASK-101.3.1): the
+    /// collector traces what each holds outside the register file through
+    /// its handle, and a debugger attaching writes it into the interpreter
+    /// frame. Every one has an interpreter frame at `fi`.
+    pub(crate) frames: Vec<JitFrame>,
+}
+
+/// One running compiled frame ([`JitState::frames`]).
+pub(crate) struct JitFrame {
+    pub(crate) handle: FrameHandle<Value>,
+    pub(crate) fi: usize,
+    pub(crate) base: usize,
+    /// Its state has been written into the interpreter frame already (a
+    /// debugger attached while it waited in a call out), so the call out's
+    /// own materialisation on leaving must not undo what was written since.
+    pub(crate) materialized: bool,
 }
 
 /// How deep compiled code may nest on the native stack through direct
@@ -178,6 +199,7 @@ impl JitState {
             judge: Judge::default(),
             run_start: 0,
             nest: 0,
+            frames: Vec::new(),
         };
         s.set_mode(mode);
         s
@@ -213,6 +235,43 @@ impl Vm {
     /// Choose when compiled code runs (overrides `AGNIJS_JIT`).
     pub fn set_jit_mode(&mut self, mode: JitMode) {
         self.jit.set_mode(mode);
+    }
+
+    /// Write `state` into the interpreter frame `fi` (window at `base`):
+    /// the registers compiled code held outside the register file, and
+    /// for a side exit the pc and accumulator to continue at. A frame that
+    /// is gone (the run ended, an unwind popped it) takes nothing.
+    pub(crate) fn jit_write_state(&mut self, fi: usize, base: usize, state: FrameState<Value>) {
+        if self.frames.len() <= fi || self.frames[fi].base != base {
+            return;
+        }
+        for (r, v) in state.regs {
+            if let Some(slot) = self.regs.get_mut(base + r as usize) {
+                *slot = v;
+            }
+        }
+        if let Some(exit) = state.exit {
+            let f = &mut self.frames[fi];
+            f.pc = exit.pc as usize;
+            f.acc = exit.acc;
+            self.jit.stats.deopts += 1;
+        }
+    }
+
+    /// Every compiled frame's state, written into its interpreter frame:
+    /// what a debugger attaching does before it looks at the frames (ADR
+    /// 0019 J9). Compiled code is not entered again while it is attached,
+    /// and leaves at its next call out.
+    pub(crate) fn jit_materialize_all(&mut self) {
+        for i in 0..self.jit.frames.len() {
+            let jf = &mut self.jit.frames[i];
+            if jf.materialized {
+                continue;
+            }
+            jf.materialized = true;
+            let (fi, base, state) = (jf.fi, jf.base, jf.handle.state());
+            self.jit_write_state(fi, base, state);
+        }
     }
 
     pub fn jit_mode(&self) -> JitMode {
@@ -917,5 +976,31 @@ impl Runtime<Value> for JitRt<'_> {
             Arith::Mod => crate::convert::js_fmod(a, b),
             Arith::Exp => crate::convert::js_pow(a, b),
         }
+    }
+
+    fn frame_entered(&mut self, frame: FrameHandle<Value>) {
+        self.vm.jit.frames.push(JitFrame {
+            handle: frame,
+            fi: self.fi,
+            base: self.base,
+            materialized: false,
+        });
+    }
+
+    fn frame_left(&mut self) {
+        let left = self.vm.jit.frames.pop();
+        debug_assert!(left.is_some_and(|f| f.fi == self.fi), "compiled frames left out of order");
+    }
+
+    fn materialize(&mut self, state: FrameState<Value>) {
+        if let Some(top) = self.vm.jit.frames.last_mut() {
+            if top.fi == self.fi && top.materialized && state.exit.is_none() {
+                // Written by `jit_materialize_all` already, possibly
+                // changed by the debugger since.
+                return;
+            }
+            top.materialized = true;
+        }
+        self.vm.jit_write_state(self.fi, self.base, state);
     }
 }

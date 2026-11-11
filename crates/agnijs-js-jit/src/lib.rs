@@ -8,24 +8,27 @@
 //! at a time, to the interpreter's generic semantics through
 //! [`Runtime::slow`], with the frame written back first (ADR 0019 J1, J3).
 //!
-//! Compiled code never holds a JavaScript value anywhere the collector
-//! cannot see across a call out of it: the accumulator is flushed to the
-//! frame and the register file stays in memory, so collections under
-//! compiled code find their roots in the frame stack as they do under the
-//! interpreter, and nothing needs a GC map yet. It never speculates: every
-//! inline fast path is guarded, and a failed guard runs the instruction's
-//! generic semantics instead, so nothing needs deoptimization yet either.
-//! Control leaves compiled code only at instruction boundaries where the
-//! frame is already the interpreter's ([`Exit`]). Both reserved pieces,
-//! deoptimization and GC maps, are specified in [`handoff`].
+//! Since TASK-101.3.1 compiled code keeps the function's hottest registers
+//! in machine state across call outs and may hold some of them unboxed as
+//! numbers on a guess ([`Speculation`]). So the frame in memory is not
+//! always complete while machine code runs, and two pieces make that safe
+//! ([`handoff`]): at every call out the registers held outside the file are
+//! spilled into the compiled frame and described by a point the runtime
+//! can read through a [`FrameHandle`] (the GC map: a collection traces the
+//! spilled heap values, and nothing scans the native stack), and a guard
+//! that finds a guess wrong leaves for the interpreter through a side exit
+//! that materialises the frame first ([`Runtime::materialize`]). Control
+//! leaves compiled code only at instruction boundaries where the frame has
+//! been made the interpreter's ([`Exit`]).
 //!
 //! Everything here is safe code except [`exec`]-memory handling, the entry
-//! trampoline and the helper trampolines, which live in one small module
-//! (ADR 0019 J10).
+//! trampoline, the helper trampolines and the frame handle's reads of the
+//! spill area, which live in one small module (ADR 0019 J10).
 
 #![deny(unsafe_code)]
 
 use std::marker::PhantomData;
+use std::rc::Rc;
 use std::time::Duration;
 
 use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind, IcSite, Instr};
@@ -35,6 +38,25 @@ use agnijs_js_parser::ast::FunctionKind;
 mod codegen;
 mod exec;
 pub mod handoff;
+
+pub use exec::FrameHandle;
+pub use handoff::{DeoptReason, FrameState, Location, Point, PointKind, Points, SideExit};
+
+/// What the runtime guesses about a block for the code generator to build
+/// on (TASK-101.3.1). A wrong guess costs a side exit ([`PointKind::Exit`])
+/// and, as the runtime decides, a recompilation without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Speculation {
+    /// Bit `r` set: register `r` (below 64) holds a number for the whole
+    /// run, so compiled code keeps it unboxed and reads it without a tag
+    /// test. A store of anything else into it, or entering compiled code
+    /// while it holds anything else, is a guard failure.
+    pub numbers: u64,
+}
+
+impl Speculation {
+    pub const NONE: Speculation = Speculation { numbers: 0 };
+}
 
 /// The layout of a value as compiled code reads and writes it in the
 /// register file and the accumulator: sixteen bytes, a one-byte tag at
@@ -277,6 +299,35 @@ pub trait Runtime<V: JitValue> {
     /// block runs, as a block's feedback does.
     fn ic_table(&mut self) -> &[IcSite] {
         &[]
+    }
+
+    /// Compiled code is about to run for the top frame: keep `frame` on the
+    /// runtime's list of compiled frames until [`Runtime::frame_left`], so
+    /// that a collection under it can trace the heap values the frame holds
+    /// outside the register file ([`FrameHandle::live`]) and a debugger can
+    /// write them into the interpreter frame ([`FrameHandle::state`]). The
+    /// handle reads the compiled frame only while it is on the list, which
+    /// is exactly while the machine frame exists. A runtime that keeps no
+    /// list must not be given code compiled with a [`Speculation`] or run
+    /// under a collector; the baseline contract still holds for the rest.
+    fn frame_entered(&mut self, frame: FrameHandle<V>) {
+        let _ = frame;
+    }
+
+    /// The machine frame given to [`Runtime::frame_entered`] is gone.
+    fn frame_left(&mut self) {}
+
+    /// Write `state` into the interpreter frame: every listed register,
+    /// and for a side exit the pc and the accumulator. Called before
+    /// compiled code is left for any reason but a return (an exit from a
+    /// call out, a guard failure, an entry guard), so that the frame the
+    /// interpreter reloads is complete. Materialising allocates nothing.
+    /// The default writes the registers only.
+    fn materialize(&mut self, state: FrameState<V>) {
+        let regs = self.registers();
+        for (r, v) in state.regs {
+            regs[r as usize] = v;
+        }
     }
 }
 
@@ -549,6 +600,9 @@ pub struct Compiled<V> {
     needs_ic: usize,
     /// Has an `LdaThis`: entered only with [`Runtime::this_value`].
     needs_this: bool,
+    /// The safe points, side exits and entry guards ([`handoff`]), shared
+    /// with the frame handles of running frames.
+    points: Rc<Points>,
     /// Size of the machine code in bytes.
     pub code_size: usize,
     /// Time spent generating it.
@@ -565,6 +619,15 @@ impl<V: JitValue> Compiled<V> {
     /// Compile `code`, with the inline-cache hit paths when the runtime
     /// describes its heap (`heap`); see [`HeapLayout`].
     pub fn compile_with(code: &CodeBlock, heap: Option<&HeapLayout>) -> Result<Self, Ineligible> {
+        Self::compile_speculating(code, heap, &Speculation::NONE)
+    }
+
+    /// [`Compiled::compile_with`], building on the runtime's guesses.
+    pub fn compile_speculating(
+        code: &CodeBlock,
+        heap: Option<&HeapLayout>,
+        spec: &Speculation,
+    ) -> Result<Self, Ineligible> {
         eligible(code)?;
         if !available() {
             return Err(Ineligible::Unavailable);
@@ -572,13 +635,14 @@ impl<V: JitValue> Compiled<V> {
         if !exec::layout_matches::<V>() {
             return Err(Ineligible::Layout);
         }
-        Self::generate(code, heap)
+        Self::generate(code, heap, spec)
     }
 
     #[cfg(jit_host)]
-    fn generate(code: &CodeBlock, heap: Option<&HeapLayout>) -> Result<Self, Ineligible> {
+    fn generate(code: &CodeBlock, heap: Option<&HeapLayout>, spec: &Speculation) -> Result<Self, Ineligible> {
         let start = std::time::Instant::now();
-        let lowered = codegen::compile(code, &exec::offsets::<V>(), heap).map_err(Ineligible::Compile)?;
+        let lowered =
+            codegen::compile(code, &exec::offsets::<V>(), heap, spec).map_err(Ineligible::Compile)?;
         let mem = exec::ExecMemory::new(&lowered.bytes).ok_or(Ineligible::Unavailable)?;
         let mut entry = vec![false; code.instrs.len()].into_boxed_slice();
         for &pc in &lowered.entries {
@@ -591,6 +655,7 @@ impl<V: JitValue> Compiled<V> {
             needs_heap: heap.is_some(),
             needs_ic: if heap.is_some() { code.ic_count as usize } else { 0 },
             needs_this: code.instrs.iter().any(|i| matches!(i, Instr::LdaThis)),
+            points: Rc::new(lowered.points),
             code_size: lowered.bytes.len(),
             compile_time: start.elapsed(),
             _value: PhantomData,
@@ -598,8 +663,13 @@ impl<V: JitValue> Compiled<V> {
     }
 
     #[cfg(not(jit_host))]
-    fn generate(_code: &CodeBlock, _heap: Option<&HeapLayout>) -> Result<Self, Ineligible> {
+    fn generate(_code: &CodeBlock, _heap: Option<&HeapLayout>, _spec: &Speculation) -> Result<Self, Ineligible> {
         Err(Ineligible::Unavailable)
+    }
+
+    /// The code's safe points, side exits and entry guards.
+    pub fn points(&self) -> &Points {
+        &self.points
     }
 
     /// Whether compiled code can start at `pc`: the function's start, a
@@ -622,6 +692,7 @@ impl<V: JitValue> Compiled<V> {
         }
         exec::enter(
             &self.mem,
+            &self.points,
             exec::Needs {
                 registers: self.registers,
                 heap: self.needs_heap,

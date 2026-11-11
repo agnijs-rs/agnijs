@@ -689,6 +689,12 @@ impl Vm {
             f.trace(&mut t);
         }
         t.values(&vm.regs);
+        // What compiled frames hold outside the register file, through
+        // their handles (the GC maps, TASK-101.3.1): never the native stack.
+        #[cfg(feature = "jit")]
+        for jf in &vm.jit.frames {
+            jf.handle.live(&mut |v| t.value(v));
+        }
         t.values(&vm.roots);
         t.values(&vm.keep_alive);
         if let Some(d) = &vm.debug {

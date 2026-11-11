@@ -27,17 +27,34 @@
 //! * No panic crosses machine code: each trampoline catches it, parks the
 //!   payload in the `Ctx`, and returns `EXIT_PANIC`; `enter` resumes the
 //!   unwind once machine code has returned.
+//! * The registers compiled code holds outside the register file are
+//!   read only through a [`FrameHandle`], only while the machine frame
+//!   exists (between [`Runtime::frame_entered`] and
+//!   [`Runtime::frame_left`], while machine code waits in a call out), and
+//!   only at the point whose index machine code stored in the `Ctx` along
+//!   with its spill area's address before the call; the code generator
+//!   wrote every listed slot before that store. While Rust runs, nothing
+//!   here holds a reference into the `Ctx`: every access is through raw
+//!   pointers derived from the one `enter` made, so the handle's reads and
+//!   the trampoline's writes never overlap a live reference.
 #![allow(unsafe_code)]
 
 use std::any::Any;
 use std::ffi::c_void;
 use std::mem::{align_of, offset_of, size_of};
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
+use std::ptr;
+use std::rc::Rc;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use agnijs_js_compiler::bytecode::IcSite;
 
+use crate::handoff::{DeoptReason, FrameState, Location, Point, PointKind, Points, SideExit};
 use crate::{layout, ExecMemoryKind, Exit, HeapView, JitValue, Outcome, Resume, Runtime, VecLayout};
+
+/// No point: compiled code has not stored one since it was entered (it
+/// has not called out yet).
+pub(crate) const NO_POINT: u32 = u32::MAX;
 
 /// Exit codes machine code returns; anything below `EXIT_BASE` is a pc the
 /// runtime reported that compiled code has no successor block for.
@@ -86,6 +103,14 @@ pub(crate) struct Ctx<V> {
     /// The block's inline-cache sites ([`Runtime::ic_table`]), fixed for the
     /// run.
     ic: *const IcSite,
+    /// The side-exit helper: materialises the frame at a point and leaves
+    /// for the interpreter.
+    deopt: SlowFn<V>,
+    /// The [`Point`] machine code is at, stored before every call out and
+    /// side exit ([`NO_POINT`] until the first).
+    point: u32,
+    /// The compiled frame's spill area, where the point's registers are.
+    spill: *mut u8,
     /// The accumulator, whenever control is outside machine code.
     acc: V,
     /// The frame's `this` ([`Runtime::this_value`]), fixed for the run;
@@ -95,6 +120,8 @@ pub(crate) struct Ctx<V> {
     registers: usize,
     /// Whether the code reads the heap (`objects` must be live).
     heap: bool,
+    /// The code's points, which outlive the run (`enter` borrows them).
+    points: *const Points,
     panic: Option<Box<dyn Any + Send>>,
 }
 
@@ -113,6 +140,9 @@ pub(crate) struct Offsets {
     pub proto_epoch: i32,
     pub objects: i32,
     pub ic: i32,
+    pub deopt: i32,
+    pub point: i32,
+    pub spill: i32,
     pub acc: i32,
 }
 
@@ -131,8 +161,78 @@ pub(crate) fn offsets<V>() -> Offsets {
         proto_epoch: offset_of!(Ctx<V>, proto_epoch) as i32,
         objects: offset_of!(Ctx<V>, objects) as i32,
         ic: offset_of!(Ctx<V>, ic) as i32,
+        deopt: offset_of!(Ctx<V>, deopt) as i32,
+        point: offset_of!(Ctx<V>, point) as i32,
+        spill: offset_of!(Ctx<V>, spill) as i32,
         acc: offset_of!(Ctx<V>, acc) as i32,
     }
+}
+
+// ---- frame handles ---------------------------------------------------------
+
+/// The runtime's view of one compiled frame while its machine code waits
+/// in a call out: the JIT's equivalent of an interpreter `Frame`, kept on
+/// a list the runtime owns ([`Runtime::frame_entered`]) so that the
+/// collector finds every compiled frame without scanning the native stack
+/// (ADR 0019 J6). It reads the point machine code stored last and the
+/// registers that point lists in the frame's spill area.
+pub struct FrameHandle<V> {
+    ctx: *const Ctx<V>,
+    points: Rc<Points>,
+}
+
+#[cfg(test)]
+impl<V: JitValue> FrameHandle<V> {
+    /// A handle over a context Rust built, for the tests of the reads
+    /// above (which Miri can run: no machine code is involved).
+    pub(crate) fn over(ctx: *const Ctx<V>, points: Rc<Points>) -> FrameHandle<V> {
+        FrameHandle { ctx, points }
+    }
+}
+
+#[cfg(test)]
+impl<V: JitValue> Ctx<V> {
+    /// A context as `enter` would build for a run that has stored `point`
+    /// with its spill area at `spill`, for the tests of the handle.
+    pub(crate) fn for_test(point: u32, spill: *mut u8, points: *const Points) -> Ctx<V> {
+        Ctx {
+            regs: ptr::null_mut(),
+            rt: ptr::null_mut(),
+            slow: never_called::<V>,
+            call: never_called::<V>,
+            fast: never_called::<V>,
+            poll: never_polled::<V>,
+            arith: never_arith,
+            pc: 0,
+            counter: 0,
+            attend: 0,
+            proto_epoch: 0,
+            objects: ptr::null_mut(),
+            ic: ptr::null(),
+            deopt: never_called::<V>,
+            point,
+            spill,
+            acc: V::undefined(),
+            this: V::undefined(),
+            registers: 0,
+            heap: false,
+            points,
+            panic: None,
+        }
+    }
+}
+
+#[cfg(test)]
+extern "C" fn never_called<V>(_: *mut Ctx<V>, _: u32) -> u32 {
+    unreachable!()
+}
+#[cfg(test)]
+extern "C" fn never_polled<V>(_: *mut Ctx<V>, _: u32, _: u32) -> u32 {
+    unreachable!()
+}
+#[cfg(test)]
+extern "C" fn never_arith(_: u32, _: f64, _: f64) -> f64 {
+    unreachable!()
 }
 
 /// What code needs from the runtime to be entered.
@@ -503,6 +603,7 @@ fn probe() -> bool {
 #[inline]
 pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
     mem: &ExecMemory,
+    points: &Rc<Points>,
     needs: Needs,
     rt: &mut R,
     pc: u32,
@@ -545,10 +646,9 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
     let regs = window.as_mut_ptr();
     let counter = rt.interrupt_counter();
     let attend = rt.safe_point_due() as u32;
-    let rt_ptr: *mut R = rt;
     let mut ctx = Ctx {
         regs,
-        rt: rt_ptr as *mut c_void,
+        rt: ptr::null_mut(),
         slow: slow_trampoline::<V, R>,
         call: call_trampoline::<V, R>,
         fast: fast_trampoline::<V, R>,
@@ -560,26 +660,47 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         proto_epoch: view.proto_epoch,
         objects: view.objects,
         ic,
+        deopt: deopt_trampoline::<V, R>,
+        point: NO_POINT,
+        spill: ptr::null_mut(),
         acc,
         this,
         registers: needs.registers,
         heap: needs.heap,
+        points: Rc::as_ptr(points),
         panic: None,
     };
+    // From here until machine code has returned, `ctx` is used only
+    // through this pointer (the handle, the trampolines, the reads below),
+    // so that no reference into it is live while another path writes it.
+    let ctx_ptr: *mut Ctx<V> = &mut ctx;
+    rt.frame_entered(FrameHandle {
+        ctx: ctx_ptr,
+        points: points.clone(),
+    });
+    let rt_ptr: *mut R = rt;
+    // SAFETY: `ctx` is a live local nothing else refers to.
+    unsafe { (*ctx_ptr).rt = rt_ptr as *mut c_void };
     // SAFETY: `mem` holds code generated by `codegen::compile` for this
     // `V` with the offsets of this `Ctx<V>`, and `ctx` satisfies the
     // module's obligations: it outlives the call, its window is large
     // enough, its inline-cache table has every site the code reads and
     // stays put while the block runs (the `Runtime::ic_table` contract),
     // its heap view is the runtime's current one (`Runtime::heap`, the
-    // `HeapLayout` contract), and `rt` is used only through `rt_ptr` until
-    // the call ends.
+    // `HeapLayout` contract), its points are the ones the code was
+    // generated with (they outlive the run), and `rt` is used only through
+    // `rt_ptr` until the call ends.
     let code: extern "C" fn(*mut Ctx<V>) -> u32 = unsafe { std::mem::transmute(mem.ptr) };
-    let r = code(&mut ctx);
+    let r = code(ctx_ptr);
     // SAFETY: machine code has returned; `rt_ptr` is the live `&mut R`.
     let rt = unsafe { &mut *rt_ptr };
-    rt.set_interrupt_counter(ctx.counter);
-    if let Some(payload) = ctx.panic.take() {
+    // The machine frame is gone: the handle must not be read again.
+    rt.frame_left();
+    // SAFETY: machine code has returned and nothing refers to `ctx`.
+    let (counter, panic, pc, acc) =
+        unsafe { ((*ctx_ptr).counter, (*ctx_ptr).panic.take(), (*ctx_ptr).pc, (*ctx_ptr).acc) };
+    rt.set_interrupt_counter(counter);
+    if let Some(payload) = panic {
         resume_unwind(payload);
     }
     let exit = match r {
@@ -589,10 +710,96 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
         EXIT_DONE => Exit::Done,
         _ => Exit::Interp,
     };
-    Outcome {
+    Outcome { exit, pc, acc }
+}
+
+// ---- the frame's state, read from the spill area ----------------------------
+
+/// The registers point `id` of `points` lists, read from the spill area
+/// of `ctx` (boxed values whole, numbers boxed by `V::number`).
+///
+/// SAFETY: `ctx` must be the context of a machine frame that exists and
+/// has stored `id` (or `id` is the point it is about to leave at), with no
+/// reference into it live (module docs).
+unsafe fn read_regs<V: JitValue>(ctx: *const Ctx<V>, points: &Points, id: u32) -> Vec<(u16, V)> {
+    let Some(point) = points.at(id) else {
+        return Vec::new();
+    };
+    let spill = (*ctx).spill;
+    point
+        .regs
+        .iter()
+        .map(|&(r, loc)| {
+            let v = match loc {
+                // SAFETY: the code generator wrote a value of `V`'s layout
+                // at the listed offset before storing the point.
+                Location::Spill(off) => ptr::read(spill.offset(off as isize) as *const V),
+                Location::SpillNumber(off) => {
+                    V::number(f64::from_bits(ptr::read(spill.offset(off as isize) as *const u64)))
+                }
+            };
+            (r, v)
+        })
+        .collect()
+}
+
+/// [`FrameState`] of the frame of `ctx` at point `id`.
+///
+/// SAFETY: as [`read_regs`].
+unsafe fn state_at<V: JitValue>(
+    ctx: *const Ctx<V>,
+    points: &Points,
+    id: u32,
+    exit: Option<SideExit<V>>,
+) -> FrameState<V> {
+    FrameState {
+        point: id,
+        regs: read_regs(ctx, points, id),
         exit,
-        pc: ctx.pc,
-        acc: ctx.acc,
+    }
+}
+
+impl<V: JitValue> FrameHandle<V> {
+    /// The point the frame is at, if it has stored one.
+    pub fn point(&self) -> Option<&Point> {
+        // SAFETY: the handle is read only while it is on the runtime's
+        // list (module docs), when the `Ctx` on `enter`'s stack is live and
+        // no reference into it exists.
+        let p = unsafe { (*self.ctx).point };
+        self.points.at(p)
+    }
+
+    /// The bytecode pc of the point.
+    pub fn pc(&self) -> Option<u32> {
+        self.point().map(|p| p.pc)
+    }
+
+    /// Every value the frame holds outside the register file that may be
+    /// a heap value, for the collector.
+    pub fn live(&self, f: &mut dyn FnMut(V)) {
+        // SAFETY: as in `point`.
+        let id = unsafe { (*self.ctx).point };
+        let Some(point) = self.points.at(id) else { return };
+        // SAFETY: as in `point`.
+        let spill = unsafe { (*self.ctx).spill };
+        for &(_, loc) in &point.regs {
+            if let Location::Spill(off) = loc {
+                // SAFETY: the code generator wrote a value of `V`'s layout
+                // at the listed offset before storing the point.
+                f(unsafe { ptr::read(spill.offset(off as isize) as *const V) });
+            }
+        }
+    }
+
+    /// What to write into the interpreter frame now: the listed registers'
+    /// values (and nothing to resume, since the frame is at a safe point
+    /// whose instruction the runtime is running).
+    pub fn state(&self) -> FrameState<V> {
+        // SAFETY: as in `point`.
+        unsafe {
+            let id = (*self.ctx).point;
+            state_at(self.ctx, &self.points, id, None)
+        }
     }
 }
 
@@ -607,24 +814,55 @@ fn exit_code(e: Exit) -> u32 {
 }
 
 /// Run `f` against the runtime of `ctx` and translate its answer for
-/// machine code.
+/// machine code. The code stored the point it calls from; when the runtime
+/// leaves compiled code, or continues it at a pc the point has no
+/// successor for, the frame is materialised first ([`Runtime::materialize`])
+/// so the interpreter finds it complete.
 fn call_out<V: JitValue, R: Runtime<V>>(
     ctx: *mut Ctx<V>,
     f: impl FnOnce(&mut R, V) -> Resume<V>,
 ) -> u32 {
-    // SAFETY: machine code passes the `Ctx` `enter` gave it, which is live
-    // and not otherwise borrowed while machine code waits in this call.
-    let ctx = unsafe { &mut *ctx };
-    // SAFETY: `ctx.rt` is the `&mut R` given to `enter`, which uses it only
-    // through this pointer until machine code returns.
-    let rt = unsafe { &mut *(ctx.rt as *mut R) };
-    let acc = ctx.acc;
-    let counter = ctx.counter;
-    let registers = ctx.registers;
-    let heap = ctx.heap;
+    // SAFETY: machine code passes the `Ctx` `enter` gave it, which is live;
+    // nothing holds a reference into it while machine code runs or waits
+    // here (module docs), so it is read and written through the pointer.
+    let (rt_ptr, acc, counter, registers, heap, point, points) = unsafe {
+        let c = ctx as *const Ctx<V>;
+        (
+            (*c).rt as *mut R,
+            (*c).acc,
+            (*c).counter,
+            (*c).registers,
+            (*c).heap,
+            (*c).point,
+            (*c).points,
+        )
+    };
     let r = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: `ctx.rt` is the `&mut R` given to `enter`, which uses it
+        // only through this pointer until machine code returns.
+        let rt = unsafe { &mut *rt_ptr };
         rt.set_interrupt_counter(counter);
         let resume = f(rt, acc);
+        // SAFETY: the points outlive the run (`enter` borrows them).
+        let points = unsafe { &*points };
+        let resume = match resume {
+            Resume::Next { pc, acc } if !continues_at(points, point, pc) => {
+                // SAFETY: as above; the runtime holds no reference into the
+                // context either (it only ever sees handles).
+                unsafe {
+                    rt.materialize(state_at(ctx, points, point, None));
+                    (*ctx).pc = pc;
+                    (*ctx).acc = acc;
+                }
+                Resume::Exit(Exit::Interp)
+            }
+            Resume::Exit(e) => {
+                // SAFETY: as above.
+                unsafe { rt.materialize(state_at(ctx, points, point, None)) };
+                Resume::Exit(e)
+            }
+            next => next,
+        };
         let counter = rt.interrupt_counter();
         let attend = rt.safe_point_due() as u32;
         let window = match resume {
@@ -643,25 +881,83 @@ fn call_out<V: JitValue, R: Runtime<V>>(
         };
         (resume, counter, attend, window)
     }));
-    match r {
-        Ok((resume, counter, attend, window)) => {
-            ctx.counter = counter;
-            ctx.attend = attend;
-            match resume {
-                Resume::Next { pc, acc } => {
-                    ctx.acc = acc;
-                    if let Some((w, view)) = window {
-                        ctx.regs = w;
-                        ctx.objects = view.objects;
-                        ctx.proto_epoch = view.proto_epoch;
+    // SAFETY: as at the top: the runtime has returned, so nothing but this
+    // function sees the context until machine code resumes.
+    unsafe {
+        match r {
+            Ok((resume, counter, attend, window)) => {
+                (*ctx).counter = counter;
+                (*ctx).attend = attend;
+                match resume {
+                    Resume::Next { pc, acc } => {
+                        (*ctx).acc = acc;
+                        if let Some((w, view)) = window {
+                            (*ctx).regs = w;
+                            (*ctx).objects = view.objects;
+                            (*ctx).proto_epoch = view.proto_epoch;
+                        }
+                        pc
                     }
-                    pc
+                    Resume::Exit(e) => exit_code(e),
                 }
-                Resume::Exit(e) => exit_code(e),
+            }
+            Err(payload) => {
+                (*ctx).panic = Some(payload);
+                EXIT_PANIC
             }
         }
+    }
+}
+
+/// Whether compiled code at point `id` continues at `pc`.
+fn continues_at(points: &Points, id: u32, pc: u32) -> bool {
+    match points.at(id).map(|p| &p.kind) {
+        Some(PointKind::SafePoint { next }) => next.contains(&pc),
+        // Code compiled without points (none cached, nothing dirty):
+        // whatever the runtime says, as the baseline did.
+        None => true,
+        Some(_) => false,
+    }
+}
+
+/// The side-exit helper: compiled code at point `point` (an exit or an
+/// entry guard) found a guard false. The frame is materialised with the
+/// exit's pc and accumulator, and machine code returns [`EXIT_INTERP`].
+extern "C" fn deopt_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, point: u32) -> u32 {
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: as in `call_out`.
+        let (rt_ptr, acc, points) = unsafe { ((*ctx).rt as *mut R, (*ctx).acc, &*(*ctx).points) };
+        let p = points.at(point).unwrap_or_else(|| {
+            panic!("compiled code left at a point it has no description of ({point})")
+        });
+        let guard = match p.kind {
+            PointKind::Exit { guard } => guard,
+            PointKind::Entry { guard } => Some(guard),
+            PointKind::SafePoint { .. } => None,
+        };
+        // SAFETY: as in `call_out`.
+        unsafe {
+            (*ctx).point = point;
+            (*ctx).pc = p.pc;
+            let state = state_at(
+                ctx,
+                points,
+                point,
+                Some(SideExit {
+                    pc: p.pc,
+                    acc,
+                    reason: DeoptReason::Guard,
+                    guard,
+                }),
+            );
+            (*rt_ptr).materialize(state);
+        }
+    }));
+    match r {
+        Ok(()) => EXIT_INTERP,
         Err(payload) => {
-            ctx.panic = Some(payload);
+            // SAFETY: as in `call_out`.
+            unsafe { (*ctx).panic = Some(payload) };
             EXIT_PANIC
         }
     }
@@ -678,14 +974,14 @@ extern "C" fn call_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: 
 extern "C" fn fast_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
     {
         // SAFETY: as in `call_out`.
-        let c = unsafe { &mut *ctx };
+        let (rt_ptr, acc) = unsafe { ((*ctx).rt as *mut R, (*ctx).acc) };
         // SAFETY: as in `call_out`.
-        let rt = unsafe { &mut *(c.rt as *mut R) };
-        let acc = c.acc;
+        let rt = unsafe { &mut *rt_ptr };
         // A hit changes nothing compiled code caches: no allocation, no
         // poll, no safe point (`Runtime::fast`).
         if let Ok(Some(v)) = catch_unwind(AssertUnwindSafe(|| rt.fast(pc, acc))) {
-            c.acc = v;
+            // SAFETY: as in `call_out`.
+            unsafe { (*ctx).acc = v };
             return pc + 1;
         }
     }
@@ -709,4 +1005,109 @@ extern "C" fn arith_trampoline<V: JitValue, R: Runtime<V>>(op: u32, a: f64, b: f
     // panic; should one implementation do so anyway, the panic must not
     // cross machine code, and the result is NaN.
     catch_unwind(|| R::arith(op, a, b)).unwrap_or(f64::NAN)
+}
+
+#[cfg(test)]
+mod tests {
+    //! The handle's reads over a context and spill area Rust built: no
+    //! machine code runs, so Miri can check them (docs/miri-local.md).
+
+    use super::*;
+
+    #[repr(C, u8)]
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    #[allow(dead_code)]
+    enum Val {
+        Undefined = 0,
+        Null = 1,
+        Bool(bool) = 2,
+        Number(f64) = 3,
+        Obj(u32) = 7,
+        Empty = 8,
+    }
+
+    impl JitValue for Val {
+        fn undefined() -> Self {
+            Val::Undefined
+        }
+        fn null() -> Self {
+            Val::Null
+        }
+        fn boolean(b: bool) -> Self {
+            Val::Bool(b)
+        }
+        fn number(n: f64) -> Self {
+            Val::Number(n)
+        }
+        fn empty() -> Self {
+            Val::Empty
+        }
+    }
+
+    fn points() -> Rc<Points> {
+        Rc::new(Points {
+            points: vec![
+                Point {
+                    pc: 3,
+                    kind: PointKind::SafePoint { next: vec![4] },
+                    regs: vec![(2, Location::Spill(0)), (5, Location::SpillNumber(16))],
+                },
+                Point {
+                    pc: 7,
+                    kind: PointKind::Exit { guard: Some(5) },
+                    regs: vec![(5, Location::SpillNumber(16))],
+                },
+            ],
+        })
+    }
+
+    /// A spill area as compiled code fills it: a boxed object at 0, the
+    /// bits of a number at 16.
+    #[repr(C, align(16))]
+    struct Spill([u8; 32]);
+
+    fn spill() -> Spill {
+        let mut s = Spill([0; 32]);
+        // SAFETY: a `Val` fits at offset 0 of the aligned buffer.
+        unsafe { ptr::write(s.0.as_mut_ptr() as *mut Val, Val::Obj(42)) };
+        s.0[16..24].copy_from_slice(&2.5f64.to_bits().to_le_bytes());
+        s
+    }
+
+    #[test]
+    fn a_handle_reads_the_registers_its_point_lists() {
+        let points = points();
+        let mut spill = spill();
+        let ctx = Ctx::<Val>::for_test(0, spill.0.as_mut_ptr(), Rc::as_ptr(&points));
+        let h = FrameHandle::over(&ctx, points.clone());
+        assert_eq!(h.pc(), Some(3));
+        let mut live = Vec::new();
+        h.live(&mut |v| live.push(v));
+        assert_eq!(live, vec![Val::Obj(42)], "numbers are never heap values");
+        let st = h.state();
+        assert_eq!(st.point, 0);
+        assert_eq!(st.regs, vec![(2, Val::Obj(42)), (5, Val::Number(2.5))]);
+        assert_eq!(st.exit, None);
+    }
+
+    #[test]
+    fn a_handle_before_the_first_point_holds_nothing() {
+        let points = points();
+        let ctx = Ctx::<Val>::for_test(NO_POINT, ptr::null_mut(), Rc::as_ptr(&points));
+        let h = FrameHandle::over(&ctx, points.clone());
+        assert_eq!(h.pc(), None);
+        let mut n = 0;
+        h.live(&mut |_| n += 1);
+        assert_eq!(n, 0);
+        assert_eq!(h.state().regs, vec![]);
+    }
+
+    #[test]
+    fn a_point_continues_only_at_its_successors() {
+        let points = points();
+        assert!(continues_at(&points, 0, 4));
+        assert!(!continues_at(&points, 0, 5));
+        assert!(!continues_at(&points, 1, 8), "an exit continues nowhere");
+        assert!(continues_at(&points, NO_POINT, 9), "no point: as the baseline");
+    }
 }

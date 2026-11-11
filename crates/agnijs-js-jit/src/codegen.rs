@@ -7,14 +7,27 @@
 //! block that loads the register window and the accumulator from the
 //! context. Each instruction is a block; the accumulator lives in two
 //! 64-bit variables (tag word, payload word) between instructions and is
-//! flushed to the context before any call out. Registers are read and
-//! written in the register file itself, never cached.
+//! flushed to the context before any call out.
 //!
-//! Fast paths are guarded by tag tests and never speculate: a failed guard
-//! calls the runtime's `slow` entry, which runs the instruction's generic
-//! semantics and returns the pc to continue at, or an exit code.
+//! Registers are read and written in the register file itself, except the
+//! few a block's loops use most ([`choose_cache`]), which live in
+//! variables across instructions and call outs (TASK-101.3.1). Before a
+//! call out, the cached registers the instruction reads are written back
+//! to the file and the other dirty ones to the compiled frame's spill
+//! area, listed in a [`Point`] the runtime reads through the frame's
+//! handle (the GC map); after it, the registers the runtime may have
+//! written are reloaded. A register the runtime speculated to hold a
+//! number ([`Speculation`]) is cached unboxed: a store of anything else
+//! into it, or entering compiled code while it holds anything else and is
+//! read before written, is a guard failure, which materialises the frame
+//! through the deopt helper and leaves for the interpreter before the
+//! guarded instruction (a [`PointKind::Exit`]).
+//!
+//! Other fast paths are guarded by tag tests and never speculate: a failed
+//! guard calls the runtime's `slow` entry, which runs the instruction's
+//! generic semantics and returns the pc to continue at, or an exit code.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 
 use agnijs_js_compiler::bytecode::{
@@ -24,8 +37,8 @@ use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I32, I64, I64X2};
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, Type, UserFuncName,
-    Value as Ir,
+    AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, StackSlot,
+    StackSlotData, StackSlotKind, Type, UserFuncName, Value as Ir,
 };
 use cranelift_codegen::isa::OwnedTargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
@@ -33,14 +46,186 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 
 use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN};
+use crate::handoff::{Location, Point, PointKind, Points};
 use crate::layout::*;
-use crate::{Arith, HeapLayout};
+use crate::{Arith, HeapLayout, Speculation};
 
 /// What [`compile`] produces.
 pub(crate) struct Lowered {
     pub bytes: Vec<u8>,
     /// The pcs compiled code can be entered at, ascending.
     pub entries: Vec<u32>,
+    /// The safe points, side exits and entry guards of the code.
+    pub points: Points,
+}
+
+/// How many registers a block keeps in machine state at most.
+const MAX_CACHED: usize = 8;
+
+/// The registers an instruction's runtime path reads: a known few, or
+/// (a generic instruction, whose semantics the code generator does not
+/// decode) possibly any, and then possibly written too.
+enum Access {
+    Known(Vec<u16>),
+    Any,
+}
+
+fn access(instr: &Instr) -> Access {
+    use Instr::*;
+    Access::Known(match *instr {
+        Ldar(r) | Add(r) | Sub(r) | Mul(r) | Div(r) | Mod(r) | Exp(r) | Shl(r) | Shr(r)
+        | UShr(r) | BitAnd(r) | BitOr(r) | BitXor(r) | Eq(r) | Ne(r) | StrictEq(r)
+        | StrictNe(r) | Lt(r) | Le(r) | Gt(r) | Ge(r) => vec![r],
+        Mov { src, .. } => vec![src],
+        BinRR { a, b, .. } | JumpIfCmpRR { a, b, .. } | JumpIfNotCmpRR { a, b, .. } => vec![a, b],
+        BinRI { a, .. }
+        | JumpIfCmpRI { a, .. }
+        | JumpIfNotCmpRI { a, .. }
+        | JumpIfCmpRA { a, .. }
+        | JumpIfNotCmpRA { a, .. } => vec![a],
+        BinAR { b, .. } => vec![b],
+        JumpIfStrictEq { reg, .. } => vec![reg],
+        GetNamed { obj, .. } | SetNamed { obj, .. } => vec![obj],
+        GetKeyed { obj, key } | SetKeyed { obj, key, .. } => vec![obj, key],
+        Call {
+            callee,
+            this,
+            args,
+            argc,
+        } => {
+            let mut v = vec![callee, this];
+            v.extend((0..argc).map(|i| args + i));
+            v
+        }
+        Star(_) | BinAI { .. } | JumpIfCmpAI { .. } | JumpIfNotCmpAI { .. } | Inc | Dec
+        | ToNumeric | CheckTdz(_) | LdaUndefined | LdaNull | LdaTrue | LdaFalse | LdaEmpty
+        | LdaInt(_) | LdaConst(_) | LdaThis | Nop | Return | Jump(_) | JumpIfTrue(_)
+        | JumpIfFalse(_) | JumpIfNullish(_) | JumpIfNotNullish(_) | JumpIfUndefined(_)
+        | JumpIfNotUndefined(_) | JumpIfEmpty(_) | JumpIfNotEmpty(_) | JumpIfObject(_)
+        | LdaGlobal(_) | LdaEnv { .. } | StaEnv { .. } | LdaCallee => vec![],
+        _ => return Access::Any,
+    })
+}
+
+/// The register an instruction's inline expansion writes.
+fn written(instr: &Instr) -> Option<u16> {
+    match *instr {
+        Instr::Star(r) | Instr::Mov { dst: r, .. } => Some(r),
+        _ => None,
+    }
+}
+
+/// How deep in loops each instruction is (a back-edge's range is a loop).
+fn loop_depth(code: &CodeBlock) -> Vec<u8> {
+    let len = code.instrs.len();
+    let mut depth = vec![0u8; len];
+    for (pc, instr) in code.instrs.iter().enumerate() {
+        if let Some(off) = branch_offset(instr) {
+            if off <= 0 {
+                let t = (pc as i64 + off as i64).max(0) as usize;
+                for d in &mut depth[t..=pc] {
+                    *d = d.saturating_add(1);
+                }
+            }
+        }
+    }
+    depth
+}
+
+/// The registers to keep in machine state: those loops read or write by
+/// inline-expanded instructions, the most used first, the speculated ones
+/// before the rest. A block without loops caches nothing: its call outs
+/// would pay for the caching and nothing would gain.
+fn choose_cache(code: &CodeBlock, spec: &Speculation) -> Vec<(u16, bool)> {
+    let depth = loop_depth(code);
+    let mut score: BTreeMap<u16, u64> = BTreeMap::new();
+    for (pc, instr) in code.instrs.iter().enumerate() {
+        let w = match depth[pc] {
+            0 => continue,
+            1 => 8,
+            _ => 64,
+        };
+        let mut refs = match access(instr) {
+            Access::Known(r) => r,
+            Access::Any => Vec::new(),
+        };
+        refs.extend(written(instr));
+        if matches!(instr, Instr::Call { .. }) {
+            // Read by the runtime, not inline: caching them helps nothing.
+            refs.clear();
+        }
+        for r in refs {
+            *score.entry(r).or_default() += w;
+        }
+    }
+    let speculated = |r: u16| r < 64 && spec.numbers & (1 << r) != 0;
+    let mut regs: Vec<(u16, u64)> = score.into_iter().collect();
+    regs.sort_by(|a, b| {
+        speculated(b.0)
+            .cmp(&speculated(a.0))
+            .then(b.1.cmp(&a.1))
+            .then(a.0.cmp(&b.0))
+    });
+    regs.truncate(MAX_CACHED);
+    regs.into_iter().map(|(r, _)| (r, speculated(r))).collect()
+}
+
+/// The pcs an instruction may continue at.
+fn successors(code: &CodeBlock, pc: usize) -> Vec<usize> {
+    let instr = &code.instrs[pc];
+    match *instr {
+        Instr::Return => vec![],
+        Instr::Jump(off) => vec![(pc as i64 + off as i64) as usize],
+        _ => {
+            let mut s = vec![pc + 1];
+            if let Some(off) = branch_offset(instr) {
+                s.push((pc as i64 + off as i64) as usize);
+            }
+            s
+        }
+    }
+}
+
+/// For each pc, the cached registers (a bit per cache index) that may be
+/// read before written from there: what must hold its value when compiled
+/// code is entered or resumed at that pc. A generic instruction may read
+/// any register and is assumed to write none.
+fn liveness(code: &CodeBlock, index: &[Option<u8>], n: usize) -> Vec<u16> {
+    let len = code.instrs.len();
+    let all: u16 = if n >= 16 { u16::MAX } else { (1u16 << n) - 1 };
+    let bit = |r: u16| -> u16 {
+        index
+            .get(r as usize)
+            .copied()
+            .flatten()
+            .map_or(0, |i| 1 << i)
+    };
+    let mut live_in = vec![0u16; len + 1];
+    loop {
+        let mut changed = false;
+        for pc in (0..len).rev() {
+            let instr = &code.instrs[pc];
+            let mut out = 0;
+            for s in successors(code, pc) {
+                out |= live_in.get(s).copied().unwrap_or(0);
+            }
+            let new = match access(instr) {
+                Access::Any => all,
+                Access::Known(reads) => {
+                    let uses = reads.iter().fold(0, |m, &r| m | bit(r));
+                    let def = written(instr).map_or(0, bit);
+                    uses | (out & !def)
+                }
+            };
+            if new != live_in[pc] {
+                live_in[pc] = new;
+                changed = true;
+            }
+        }
+        if !changed {
+            return live_in;
+        }
+    }
 }
 
 /// The host code generator, configured once per process.
@@ -220,11 +405,21 @@ pub(crate) fn compile(
     code: &CodeBlock,
     off: &Offsets,
     heap: Option<&HeapLayout>,
+    spec: &Speculation,
 ) -> Result<Lowered, String> {
     let isa = isa()?;
     let ptr = isa.pointer_type();
     let cc = isa.default_call_conv();
     let entries = entries(code)?;
+    let chosen = choose_cache(code, spec);
+    let mut index = vec![None; code.register_count as usize];
+    for (i, &(r, _)) in chosen.iter().enumerate() {
+        match index.get_mut(r as usize) {
+            Some(slot) => *slot = Some(i as u8),
+            None => return Err(format!("register {r} is outside the block's window")),
+        }
+    }
+    let live_in = liveness(code, &index, chosen.len());
 
     let mut sig = Signature::new(cc);
     sig.params.push(AbiParam::new(ptr));
@@ -243,6 +438,7 @@ pub(crate) fn compile(
 
     let mut func = Function::with_name_signature(UserFuncName::default(), sig);
     let mut fctx = FunctionBuilderContext::new();
+    let points_out;
     {
         let mut b = FunctionBuilder::new(&mut func, &mut fctx);
         let slow_sig = b.import_signature(slow_sig);
@@ -251,6 +447,28 @@ pub(crate) fn compile(
         let regs = b.declare_var(ptr);
         let tag = b.declare_var(I64);
         let pay = b.declare_var(I64);
+        let cached: Vec<Cached> = chosen
+            .iter()
+            .map(|&(reg, number)| Cached {
+                reg,
+                repr: if number {
+                    Repr::Number(b.declare_var(I64))
+                } else {
+                    Repr::Boxed {
+                        tag: b.declare_var(I64),
+                        pay: b.declare_var(I64),
+                    }
+                },
+                dirty: code.instrs.iter().any(|i| written(i) == Some(reg)),
+            })
+            .collect();
+        let spill = (!cached.is_empty()).then(|| {
+            b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                (cached.len() * SIZE) as u32,
+                4,
+            ))
+        });
 
         let entry = b.create_block();
         b.append_block_params_for_function_params(entry);
@@ -273,6 +491,11 @@ pub(crate) fn compile(
             regs,
             tag,
             pay,
+            cached,
+            index,
+            live_in,
+            spill,
+            points: Vec::new(),
             blocks,
             resume,
             slow_sig,
@@ -281,6 +504,12 @@ pub(crate) fn compile(
             heap: heap.copied(),
             unroll: ic_unroll(code),
         };
+        if let Some(ss) = lower.spill {
+            // The spill area's address, fixed for the frame, where the
+            // runtime finds the registers a point lists.
+            let a = lower.b.ins().stack_addr(ptr, ss, 0);
+            lower.b.ins().store(flags(), a, ctx, off.spill);
+        }
         lower.dispatch(&entries);
         for (pc, &instr) in code.instrs.iter().enumerate() {
             let blk = lower.blocks[pc];
@@ -293,11 +522,14 @@ pub(crate) fn compile(
         lower.b.ins().return_(&[v]);
         lower.b.seal_all_blocks();
         lower.b.finalize(isa.frontend_config());
+        points_out = lower.points;
     }
+    let points = Points { points: points_out };
     let bytes = emit(func)?;
     Ok(Lowered {
         bytes,
         entries: entries.into_iter().collect(),
+        points,
     })
 }
 
@@ -316,6 +548,25 @@ struct Val {
     pay: Ir,
 }
 
+/// How a cached register is held.
+#[derive(Clone, Copy)]
+enum Repr {
+    /// Tag word and payload word, as in the register file.
+    Boxed { tag: Variable, pay: Variable },
+    /// The bits of an `f64`: the register was speculated to hold a number.
+    Number(Variable),
+}
+
+/// A register kept in machine state.
+#[derive(Clone, Copy)]
+struct Cached {
+    reg: u16,
+    repr: Repr,
+    /// Written by some inline-expanded instruction, so possibly newer in
+    /// machine state than in the register file.
+    dirty: bool,
+}
+
 struct Lower<'a, 'c> {
     b: FunctionBuilder<'a>,
     code: &'c CodeBlock,
@@ -325,6 +576,16 @@ struct Lower<'a, 'c> {
     regs: Variable,
     tag: Variable,
     pay: Variable,
+    /// The registers held in machine state, by cache index.
+    cached: Vec<Cached>,
+    /// The cache index of each register of the window.
+    index: Vec<Option<u8>>,
+    /// Per pc, the cached registers live on entry ([`liveness`]).
+    live_in: Vec<u16>,
+    /// The spill area: [`SIZE`] bytes per cache index.
+    spill: Option<StackSlot>,
+    /// The points emitted so far; a point's id is its index.
+    points: Vec<Point>,
     blocks: Vec<Block>,
     resume: Vec<Option<Block>>,
     slow_sig: SigRef,
@@ -358,6 +619,8 @@ impl Lower<'_, '_> {
             let blk = self.resume[e as usize].unwrap();
             self.b.switch_to_block(blk);
             self.reload();
+            // Entered from the interpreter: the register file is complete.
+            self.load_cached(e as usize, PointKind::Entry { guard: 0 });
             let next = self.blocks[e as usize];
             self.b.ins().jump(next, &[]);
         }
@@ -379,9 +642,149 @@ impl Lower<'_, '_> {
         self.store_value(self.ctx, self.off.acc, t, p);
     }
 
+    // ---- cached registers ---------------------------------------------------
+
+    fn cached(&self, r: u16) -> Option<Cached> {
+        let i = self.index.get(r as usize).copied().flatten()?;
+        Some(self.cached[i as usize])
+    }
+
+    fn live_at(&self, pc: usize, i: usize) -> bool {
+        self.live_in.get(pc).is_some_and(|m| m & (1 << i) != 0)
+    }
+
+    /// Load every cached register from the register file, to continue at
+    /// `pc`. A speculated register is guarded when it is live there: a
+    /// non-number leaves through a point of `kind` (its guard being the
+    /// register) at `pc`, nothing being dirty. One dead there is written
+    /// before read, so its payload is taken as it is (a non-number's shows
+    /// as a number only in a debugger's view of a variable not yet
+    /// assigned).
+    fn load_cached(&mut self, pc: usize, kind: PointKind) {
+        for i in 0..self.cached.len() {
+            let c = self.cached[i];
+            let (t, p) = self.load_file(c.reg);
+            match c.repr {
+                Repr::Boxed { tag, pay } => {
+                    self.b.def_var(tag, t);
+                    self.b.def_var(pay, p);
+                }
+                Repr::Number(bits) => {
+                    if self.live_at(pc, i) {
+                        let kind = if matches!(kind, PointKind::Entry { .. }) {
+                            PointKind::Entry { guard: c.reg }
+                        } else {
+                            PointKind::Exit { guard: Some(c.reg) }
+                        };
+                        let ok = self.is_tag(t, TAG_NUMBER);
+                        let (yes, no) = self.guard(ok);
+                        self.b.set_cold_block(no);
+                        self.b.switch_to_block(no);
+                        self.leave_at(pc, kind, false);
+                        self.b.switch_to_block(yes);
+                    }
+                    self.b.def_var(bits, p);
+                }
+            }
+        }
+    }
+
+    /// The spill slot's address for cache index `i`.
+    fn spill_addr(&mut self, i: usize) -> (Ir, i32) {
+        let ss = self.spill.expect("a spill area for cached registers");
+        let a = self.b.ins().stack_addr(self.ptr, ss, 0);
+        (a, (i * SIZE) as i32)
+    }
+
+    /// A point at `pc`, with `dirty` when cached registers may be newer in
+    /// machine state than in the register file: write every dirty one the
+    /// instruction `reads` back to the file and spill the rest, listing
+    /// them (dead ones too: the frame the interpreter gets is complete, as
+    /// a debugger expects it); store the point's id in the context.
+    /// Returns the id.
+    fn point(&mut self, pc: usize, kind: PointKind, dirty: Option<&Access>) -> u32 {
+        let mut regs = Vec::new();
+        for i in 0..self.cached.len() {
+            let c = self.cached[i];
+            let Some(reads) = dirty else { break };
+            if !c.dirty {
+                continue;
+            }
+            let read = match reads {
+                Access::Any => true,
+                Access::Known(list) => list.contains(&c.reg),
+            };
+            if read {
+                self.write_back(c);
+                continue;
+            }
+            let (base, off) = self.spill_addr(i);
+            match c.repr {
+                Repr::Boxed { tag, pay } => {
+                    let t = self.b.use_var(tag);
+                    let p = self.b.use_var(pay);
+                    self.store_value(base, off, t, p);
+                    regs.push((c.reg, Location::Spill(off)));
+                }
+                Repr::Number(bits) => {
+                    let v = self.b.use_var(bits);
+                    self.b.ins().store(flags(), v, base, off);
+                    regs.push((c.reg, Location::SpillNumber(off)));
+                }
+            }
+        }
+        let id = self.points.len() as u32;
+        self.points.push(Point {
+            pc: pc as u32,
+            kind,
+            regs,
+        });
+        let v = self.b.ins().iconst(I32, id as i64);
+        self.b.ins().store(flags(), v, self.ctx, self.off.point);
+        id
+    }
+
+    /// Write a cached register's value to the register file.
+    fn write_back(&mut self, c: Cached) {
+        let (t, p) = match c.repr {
+            Repr::Boxed { tag, pay } => (self.b.use_var(tag), self.b.use_var(pay)),
+            Repr::Number(bits) => {
+                let t = self.b.ins().iconst(I64, TAG_NUMBER as i64);
+                (t, self.b.use_var(bits))
+            }
+        };
+        self.store_file(c.reg, t, p);
+    }
+
+    /// Leave for the interpreter at `pc` through a point of `kind` (a
+    /// side exit or an entry guard), in the current block: the dirty
+    /// registers live at `pc` are spilled and listed (none, when
+    /// `dirty` is false), the frame is materialised by the runtime's
+    /// deopt helper and machine code returns what it says.
+    fn leave_at(&mut self, pc: usize, kind: PointKind, dirty: bool) {
+        self.flush_acc();
+        let none = Access::Known(Vec::new());
+        let id = self.point(pc, kind, dirty.then_some(&none));
+        let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.deopt);
+        let a = self.b.ins().iconst(I32, id as i64);
+        let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
+        let r = self.b.inst_results(call)[0];
+        self.b.ins().return_(&[r]);
+    }
+
+    /// Reload after the runtime ran the instruction at `pc` and continues
+    /// at `to`: a generic instruction may have written any register, so
+    /// every cached one is reloaded (speculated ones guarded, a failure
+    /// leaving at `to` with nothing dirty); a known one wrote none.
+    fn reload_cached(&mut self, pc: usize, to: usize) {
+        if let Access::Any = access(&self.code.instrs[pc]) {
+            self.load_cached(to, PointKind::Exit { guard: None });
+        }
+    }
+
     // ---- values -----------------------------------------------------------
 
-    fn load_reg(&mut self, r: u16) -> (Ir, Ir) {
+    fn load_file(&mut self, r: u16) -> (Ir, Ir) {
         let regs = self.b.use_var(self.regs);
         let o = r as i32 * SIZE as i32;
         let t = self.b.ins().load(I64, flags(), regs, o + TAG_OFFSET as i32);
@@ -389,10 +792,72 @@ impl Lower<'_, '_> {
         (t, p)
     }
 
-    fn store_reg(&mut self, r: u16, t: Ir, p: Ir) {
+    fn store_file(&mut self, r: u16, t: Ir, p: Ir) {
         let regs = self.b.use_var(self.regs);
         let o = r as i32 * SIZE as i32;
         self.store_value(regs, o, t, p);
+    }
+
+    fn load_reg(&mut self, r: u16) -> (Ir, Ir) {
+        let v = self.read_reg(r);
+        let t = match v.tag {
+            Some(t) => t,
+            None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
+        };
+        (t, v.pay)
+    }
+
+    /// Register `r` as a [`Val`]: without a tag when it is a speculated
+    /// number, which its readers then need not test.
+    fn read_reg(&mut self, r: u16) -> Val {
+        match self.cached(r).map(|c| c.repr) {
+            Some(Repr::Boxed { tag, pay }) => Val {
+                tag: Some(self.b.use_var(tag)),
+                pay: self.b.use_var(pay),
+            },
+            Some(Repr::Number(bits)) => Val {
+                tag: None,
+                pay: self.b.use_var(bits),
+            },
+            None => {
+                let (t, p) = self.load_file(r);
+                Val { tag: Some(t), pay: p }
+            }
+        }
+    }
+
+    /// `r = v` by the instruction at `pc`: into a speculated register only
+    /// a number goes; anything else is the guard failure that leaves at
+    /// `pc`, before the instruction.
+    fn store_reg(&mut self, pc: usize, r: u16, v: Val) {
+        match self.cached(r).map(|c| c.repr) {
+            Some(Repr::Boxed { tag, pay }) => {
+                let t = match v.tag {
+                    Some(t) => t,
+                    None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
+                };
+                self.b.def_var(tag, t);
+                self.b.def_var(pay, v.pay);
+            }
+            Some(Repr::Number(bits)) => {
+                if let Some(t) = v.tag {
+                    let ok = self.is_tag(t, TAG_NUMBER);
+                    let (yes, no) = self.guard(ok);
+                    self.b.set_cold_block(no);
+                    self.b.switch_to_block(no);
+                    self.leave_at(pc, PointKind::Exit { guard: Some(r) }, true);
+                    self.b.switch_to_block(yes);
+                }
+                self.b.def_var(bits, v.pay);
+            }
+            None => {
+                let t = match v.tag {
+                    Some(t) => t,
+                    None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
+                };
+                self.store_file(r, t, v.pay);
+            }
+        }
     }
 
     /// Store a value with one 16-byte store: Rust reads values whole, and
@@ -439,10 +904,7 @@ impl Lower<'_, '_> {
                 let (t, p) = self.acc();
                 Val { tag: Some(t), pay: p }
             }
-            Src::Reg(r) => {
-                let (t, p) = self.load_reg(r);
-                Val { tag: Some(t), pay: p }
-            }
+            Src::Reg(r) => self.read_reg(r),
             Src::Imm(i) => Val {
                 tag: None,
                 pay: self.b.ins().iconst(I64, (i as f64).to_bits() as i64),
@@ -513,12 +975,15 @@ impl Lower<'_, '_> {
         self.b.ins().brif(due, poll, &[], blk, &[]);
         self.b.switch_to_block(poll);
         self.flush_acc();
+        // A poll reads and writes no register, but may collect.
+        let none = Access::Known(Vec::new());
+        self.point(pc, PointKind::SafePoint { next: vec![to as u32] }, Some(&none));
         let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.poll);
         let a = self.b.ins().iconst(I32, pc as i64);
         let t = self.b.ins().iconst(I32, to as i64);
         let call = self.b.ins().call_indirect(self.poll_sig, f, &[self.ctx, a, t]);
         let r = self.b.inst_results(call)[0];
-        self.continue_at(r, &[to]);
+        self.continue_at(r, pc, &[to]);
     }
 
     /// Branch on `cond`: the jump at `pc` to `to` when true, else on.
@@ -539,26 +1004,36 @@ impl Lower<'_, '_> {
     /// [`Lower::slow`] through the runtime entry at `entry` in the context.
     fn call_out(&mut self, entry: i32, pc: usize, to: Option<usize>) {
         self.flush_acc();
+        let mut succ = vec![pc + 1];
+        succ.extend(to);
+        let reads = access(&self.code.instrs[pc]);
+        let next = succ.iter().map(|&s| s as u32).collect();
+        self.point(pc, PointKind::SafePoint { next }, Some(&reads));
         let f = self.b.ins().load(self.ptr, flags(), self.ctx, entry);
         let a = self.b.ins().iconst(I32, pc as i64);
         let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
         let r = self.b.inst_results(call)[0];
-        let mut succ = vec![pc + 1];
-        succ.extend(to);
-        self.continue_at(r, &succ);
+        self.continue_at(r, pc, &succ);
     }
 
-    /// After a call out returned `r`: the resume block of whichever
-    /// successor it names, else return `r` (an exit code, or a pc compiled
-    /// code has no successor for, where the interpreter continues).
-    fn continue_at(&mut self, r: Ir, succ: &[usize]) {
+    /// After a call out from the instruction at `pc` returned `r`: reload
+    /// the context and whatever the runtime may have written, and continue
+    /// at whichever successor `r` names; else return `r` (an exit code: the
+    /// runtime materialised the frame for any pc it had no successor for).
+    fn continue_at(&mut self, r: Ir, pc: usize, succ: &[usize]) {
         for &s in succ {
-            let Some(Some(blk)) = self.resume.get(s).copied() else {
+            if s >= self.blocks.len() - 1 {
                 continue;
-            };
+            }
+            let post = self.b.create_block();
             let other = self.b.create_block();
             let hit = self.b.ins().icmp_imm_u(IntCC::Equal, r, s as i64);
-            self.b.ins().brif(hit, blk, &[], other, &[]);
+            self.b.ins().brif(hit, post, &[], other, &[]);
+            self.b.switch_to_block(post);
+            self.reload();
+            self.reload_cached(pc, s);
+            let blk = self.blocks[s];
+            self.b.ins().jump(blk, &[]);
             self.b.switch_to_block(other);
         }
         self.b.ins().return_(&[r]);
@@ -1125,12 +1600,12 @@ impl Lower<'_, '_> {
                 self.set_acc(t, p);
             }
             Instr::Star(r) => {
-                let (t, p) = self.acc();
-                self.store_reg(r, t, p);
+                let v = self.read(Src::Acc);
+                self.store_reg(pc, r, v);
             }
             Instr::Mov { dst, src } => {
-                let (t, p) = self.load_reg(src);
-                self.store_reg(dst, t, p);
+                let v = self.read_reg(src);
+                self.store_reg(pc, dst, v);
             }
             Instr::Nop => {}
 
