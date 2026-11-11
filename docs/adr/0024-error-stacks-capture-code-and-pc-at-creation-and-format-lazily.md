@@ -20,7 +20,7 @@ Three constraints shape the design:
 
 **At error creation the engine records each frame as a code block reference and an instruction index; it computes positions and text only when `stack` is first read, and caches the text.**
 
-- Every path that creates an Error object (the constructors, `Vm::make_error` for runtime errors, `SuppressedError` from disposal) attaches an `ErrorStack` to the object's `Class::Error` slot. The slot is `None` for errors created with `Error.stackTraceLimit` not a Number, and for snapshot-restored errors.
+- Every path that creates an Error object (the constructors, `Vm::make_error` for runtime errors, `SuppressedError` from disposal) attaches an `ErrorStack` to the object's `Class::Error` slot. The slot is `None` for errors created with `Error.stackTraceLimit` not a Number, and for snapshot-restored errors whose stack was never read.
 - A frame is `(code, pc, this, callee, flags)`: no strings, no positions. Positions come from the code block's position table at format time, with a small cache of line starts per source.
 - Code that creates no error does nothing new: there is no per-call bookkeeping, and no shadow stack.
 
@@ -58,5 +58,5 @@ Three constraints shape the design:
 - Creating an error costs one allocation and one `Rc` clone per frame (up to `stackTraceLimit`). Reading the stack costs a position lookup per frame once. Code that creates no errors is unaffected; the JS benchmark geomean is unchanged.
 - A captured error keeps its frames' code blocks, `this` values and callees alive until the stack is formatted. The frames are dropped after formatting.
 - The JIT shares the interpreter's frames (ADR 0019), so positions resolve the same through compiled code.
-- A snapshot drops captured, unformatted traces: restored errors read `stack` as `undefined` unless it was formatted into an own property before the snapshot. CallSite objects refuse to snapshot.
+- A snapshot drops captured, unformatted traces: a restored error reads `stack` as `undefined` unless the stack was read (formatted and cached in the slot) or assigned as an own property before the snapshot. The cached value is written with the error (snapshot layout `agnijs-snap-2`). CallSite objects refuse to snapshot.
 - Hosts that run transpiled code get original positions without the engine fetching anything. The engine never reads a `sourceMappingURL` comment for `Error.stack`, so it reads no files and makes no network calls. Only the CDP adapter follows comments, through its own loader.

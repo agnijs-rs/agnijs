@@ -36,7 +36,7 @@ Engines without snapshots keep the trait's default, `Error::Unsupported`.
 - the intrinsic classes;
 - the engine version, the bytecode format and the `intl` feature.
 
-The fingerprint leads the payload, so a snapshot from another build is a `BytecodeMismatch` before anything is decoded. The container is the ADR 0010 `AGJS` container, with tag `agnijs-snap-1+<bytecode format>`.
+The fingerprint leads the payload, so a snapshot from another build is a `BytecodeMismatch` before anything is decoded. The container is the ADR 0010 `AGJS` container, with tag `agnijs-snap-N+<bytecode format>`, N the layout version (`agnijs-snap-2` since TASK-103.17 added the cached error stack).
 
 **Code goes through the bytecode serializer, each tree once.** Inline caches, feedback and global caches therefore load empty, and JIT code is never written; the tiering counters start again. A function or environment names its code block by its preorder position across the written trees.
 

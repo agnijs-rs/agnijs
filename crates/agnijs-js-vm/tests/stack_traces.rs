@@ -161,6 +161,44 @@ fn a_host_source_map_rewrites_error_stack_positions() {
     );
 }
 
+fn restored(bootstrap_name: &str, bootstrap: &str) -> Box<dyn Engine> {
+    let mut e = agnijs_js_vm::make_engine(TestHost::new());
+    let realm = e.main_realm();
+    e.eval_script(realm, bootstrap_name, bootstrap)
+        .unwrap_or_else(|err| panic!("{err}"));
+    let bytes = e.snapshot(realm).unwrap_or_else(|err| panic!("snapshot: {err}"));
+    agnijs_js_vm::make_engine_from_snapshot(TestHost::new(), &bytes)
+        .unwrap_or_else(|err| panic!("restore: {err}"))
+}
+
+fn eval_engine(e: &mut dyn Engine, name: &str, src: &str) -> String {
+    let realm = e.main_realm();
+    match e.eval_script(realm, name, src) {
+        Ok(ApiValue::String(s)) => s.to_string_lossy(),
+        Ok(other) => panic!("{src}\n=> {other:?}"),
+        Err(err) => panic!("{src}\n=> {err}"),
+    }
+}
+
+/// Code restored from a snapshot keeps its script name and positions, and a
+/// host map registered on the restored engine applies to it. An error made
+/// before the snapshot keeps a stack only if it was read (formatted into an
+/// own property) first; an unread capture is dropped (ADR 0024).
+#[test]
+fn stacks_resolve_in_code_restored_from_a_snapshot() {
+    let mut e = restored(
+        "gen.js",
+        "function boom() { throw new Error('m') }\nglobalThis.unread = new Error('u');\nglobalThis.read = new Error('r'); read.stack;",
+    );
+    let late = eval_engine(&mut *e, "r.js", "try { boom(); } catch (err) { err.stack }");
+    assert_eq!(late, "Error: m\n    at boom (gen.js:1:25)\n    at r.js:1:7");
+    let early = eval_engine(&mut *e, "r.js", "typeof unread.stack + '|' + read.stack");
+    assert_eq!(early, "undefined|Error: r\n    at gen.js:3:19");
+    e.set_source_map("gen.js", Some(MAP)).unwrap();
+    let mapped = eval_engine(&mut *e, "r.js", "try { boom(); } catch (err) { err.stack }");
+    assert_eq!(mapped, "Error: m\n    at boom (src/orig.ts:10:4)\n    at r.js:1:7");
+}
+
 #[test]
 fn a_malformed_source_map_is_ignored() {
     let mut vm = vm();

@@ -74,7 +74,7 @@ use std::sync::OnceLock;
 
 /// The snapshot layout version. Bump it with any change to the layout
 /// below; the container tag also names the bytecode format.
-pub const VERSION: &str = "agnijs-snap-1";
+pub const VERSION: &str = "agnijs-snap-2";
 
 /// The container's format tag: the snapshot layout and the bytecode format
 /// its code trees use.
@@ -729,6 +729,11 @@ impl<'v> Writer<'v> {
                 }
             }
             Class::WeakRef(v) => refs.push((*v, "WeakRefTarget")),
+            Class::Error(Some(s)) => {
+                if let Some(v) = s.formatted {
+                    refs.push((v, "ErrorData stack"));
+                }
+            }
             _ => {}
         }
         if let Some(p) = proto {
@@ -1358,6 +1363,14 @@ fn write_object(vm: &Vm, ctx: &Ctx, cref: &dyn Fn(&Rc<CodeBlock>) -> u32, out: &
             out.u8(p.callable as u8 | (p.constructor as u8) << 1);
         }
         Class::WeakRef(v) => ctx.value(out, *v),
+        // Only a formatted stack is kept; captured frames are dropped.
+        Class::Error(s) => match s.as_ref().and_then(|s| s.formatted) {
+            Some(v) => {
+                out.u8(1);
+                ctx.value(out, v);
+            }
+            None => out.u8(0),
+        },
         _ => {}
     }
 }
@@ -1999,7 +2012,14 @@ fn read_object(
             }
             Class::Bound(Box::new(BoundData { target, this, args }))
         }
-        code::ERROR => Class::Error(None),
+        code::ERROR => match r.u8()? {
+            0 => Class::Error(None),
+            1 => Class::Error(Some(Box::new(crate::stack_trace::ErrorStack {
+                frames: Vec::new(),
+                formatted: Some(t.value(r, false)?),
+            }))),
+            _ => return corrupt("an error stack flag other than 0 or 1"),
+        },
         code::BOOLEAN => Class::Boolean(r.bool()?),
         code::NUMBER => Class::Number(r.f64()?),
         code::STRING => Class::String(t.str(r.u32()?)?),
