@@ -1062,23 +1062,25 @@ mod tests {
     }
 
     /// A spill area as compiled code fills it: a boxed object at 0, the
-    /// bits of a number at 16.
+    /// bits of a number at 16. Typed fields rather than a byte buffer: a
+    /// `Val` has padding, and a byte array may not hold uninitialised bytes.
     #[repr(C, align(16))]
-    struct Spill([u8; 32]);
+    struct Spill {
+        obj: Val,
+        number_bits: u64,
+    }
 
     fn spill() -> Spill {
-        let mut s = Spill([0; 32]);
-        // SAFETY: a `Val` fits at offset 0 of the aligned buffer.
-        unsafe { ptr::write(s.0.as_mut_ptr() as *mut Val, Val::Obj(42)) };
-        s.0[16..24].copy_from_slice(&2.5f64.to_bits().to_le_bytes());
-        s
+        const _: () = assert!(std::mem::size_of::<Val>() == 16);
+        Spill { obj: Val::Obj(42), number_bits: 2.5f64.to_bits() }
     }
 
     #[test]
     fn a_handle_reads_the_registers_its_point_lists() {
         let points = points();
         let mut spill = spill();
-        let ctx = Ctx::<Val>::for_test(0, spill.0.as_mut_ptr(), Rc::as_ptr(&points));
+        let ctx =
+            Ctx::<Val>::for_test(0, &mut spill as *mut Spill as *mut u8, Rc::as_ptr(&points));
         let h = FrameHandle::over(&ctx, points.clone());
         assert_eq!(h.pc(), Some(3));
         let mut live = Vec::new();

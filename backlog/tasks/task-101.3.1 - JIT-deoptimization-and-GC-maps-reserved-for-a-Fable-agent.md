@@ -4,7 +4,7 @@ title: JIT deoptimization and GC maps (reserved for a Fable agent)
 status: In Progress
 assignee: []
 created_date: '2026-11-10T08:41:00Z'
-updated_date: '2026-11-11T05:14:00Z'
+updated_date: '2026-11-11T06:13:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -23,10 +23,10 @@ The baseline JIT (ADR 0020) never speculates and never holds a JS value outside 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The four ignored contract tests in agnijs-js-jit/src/handoff.rs pass un-ignored
-- [ ] #2 jit_differential passes with an optimisation that needs deopt and GC maps enabled, including under GC stress
-- [ ] #3 test262 passes at the baselines with AGNIJS_JIT=force
-- [ ] #4 No unsafe outside agnijs-js-jit's exec-style module and no native stack scanning
+- [x] #1 The four ignored contract tests in agnijs-js-jit/src/handoff.rs pass un-ignored
+- [x] #2 jit_differential passes with an optimisation that needs deopt and GC maps enabled, including under GC stress
+- [x] #3 test262 passes at the baselines with AGNIJS_JIT=force
+- [x] #4 No unsafe outside agnijs-js-jit's exec-style module and no native stack scanning
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -41,4 +41,8 @@ The baseline JIT (ADR 0020) never speculates and never holds a JS value outside 
 
 <!-- SECTION:NOTES:BEGIN -->
 Step 1 pushed (1b17214 on main): JIT crate mechanism (points table, FrameHandle, deopt trampoline, call-out materialisation, register caching with liveness-guarded number speculation) and the VM's frame list, GC root walk, attach walk and materialize. The four contract tests pass un-ignored; fault and panic injection added; jit_differential green under GC stress. Remaining: VM-side speculation (choose numbers from the live frame, demote on Guard, recompile; Tier code slot must become replaceable), jit_deopt.rs VM tests, gates (test262 x3, intl402, GC-stress slice, bench off-feature), ADR 0020 addendum and design-doc update.
+
+Step 2 pushed (ee94009 on main, rebased onto the TASK-101.2 commits): VM-side speculation (Vm::jit_guess from number_candidates and the live frame), guard deopt demotes the register in Tier::demoted and drops Tier::code (now a RefCell slot; runs hold their own Rc), recompilation at the next offer, MAX_DEOPTS=4 then no guessing; JitStats::speculated; analysis.rs holds the register analysis; tests/jit_deopt.rs (6 tests, green with and without AGNIJS_GC_STRESS=1); full VM suite green with AGNIJS_JIT=force; bench jit_workloads green; ADR 0020 addendum and design doc section 8 written. Not yet run (the machine's disk filled during the gates: 0 MB free twice; only my own target dir was cleaned): test262 default/--precompile/AGNIJS_JIT=force, intl402, GC-stress test262 slice, bench geomean with the feature off, Miri on exec::tests. ACs 1 and 2 are evidenced; 3 is not yet; 4 holds by construction (unsafe only in exec.rs, frames found via JitState::frames).
+
+test262 gates run locally after the push (release, --features jit, checkout at the PIN e4fbf57): AGNIJS_JIT=force 42231/42231 (882s), default 42231/42231, --precompile 42231/42231, --only-intl402 981/981, AGNIJS_GC_STRESS=16 language slice 5949/5949; 0 regressions, 0 newly passing in every run. AC 3 checked.
 <!-- SECTION:NOTES:END -->
