@@ -15,6 +15,8 @@ members = [
     "crates/agnijs-js-jit",
     "crates/agnijs-capi",
     "crates/agnijs-js-resolve",
+    "crates/agnijs",
+    "crates/agnijs-derive",
 ]
 
 [workspace.package]
@@ -38,6 +40,8 @@ agnijs-js-regex = { path = "crates/agnijs-js-regex", default-features = false }
 agnijs-js-intl = { path = "crates/agnijs-js-intl" }
 agnijs-js-debugger = { path = "crates/agnijs-js-debugger" }
 agnijs-js-cdp = { path = "crates/agnijs-js-cdp" }
+agnijs = { path = "crates/agnijs" }
+agnijs-derive = { path = "crates/agnijs-derive" }
 # The baseline JIT: optional, behind agnijs-js-vm's `jit` feature (ADR 0020).
 agnijs-js-jit = { path = "crates/agnijs-js-jit" }
 # Optional Node-style resolver for embedders; no engine crate depends on it (ADR 0023).

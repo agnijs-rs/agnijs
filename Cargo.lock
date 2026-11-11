@@ -3,12 +3,32 @@
 version = 4
 
 [[package]]
+name = "agnijs"
+version = "0.1.0"
+dependencies = [
+ "agnijs-derive",
+ "agnijs-engine-api",
+ "agnijs-js-vm",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "agnijs-capi"
 version = "0.1.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-parser",
  "agnijs-js-vm",
+]
+
+[[package]]
+name = "agnijs-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

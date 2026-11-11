@@ -112,6 +112,7 @@ A Cargo workspace at the repository root (it was `native/engine/` in the Gable r
 | `agnijs-js-debugger` | The debugger interface and its implementation hooks. |
 | `agnijs-js-cdp` | The CDP adapter. |
 | `agnijs-js-test262` | The test262 runner, harness glue and exclusions file handling. |
+| `agnijs` | The Rust embedding layer: serde interop, host-class and async-function ergonomics over the engine interface (TASK-103.4; [design note](design/rust-embedding-api.md), [cookbook](embedding-cookbook.md)). `agnijs-derive` holds its macros. |
 | `agnijs-engine-quickjs` | The interim adapter (may live in the host-runtime effort; its conformance-kit pass is an M0 deliverable). |
 
 **Boundary rule (ADR 0016).** The engine stands alone. No engine crate depends on a Gable crate, package or file; `agnijs-engine-api` is the only surface shared with an embedder such as Gable, and Gable-specific adaptation (Renderer handles, the error handler, HMR policy, host globals) lives on Gable's side of the `Host` trait. Engine docs and public identifiers speak of the host or the embedder, not Gable's framework vocabulary. `crates/agnijs-js-test262/tests/boundary.rs` and the `standalone` CI job (which builds and tests an export of the tracked files alone) enforce it.
