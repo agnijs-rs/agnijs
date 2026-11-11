@@ -236,6 +236,22 @@ pub enum VariableKind {
     Var,
     Let,
     Const,
+    /// `using` (explicit resource management).
+    Using,
+    /// `await using`.
+    AwaitUsing,
+}
+
+impl VariableKind {
+    /// Whether the bindings are immutable (const, using, await using).
+    pub fn is_const(self) -> bool {
+        matches!(self, Self::Const | Self::Using | Self::AwaitUsing)
+    }
+
+    /// Whether this is a `using` or `await using` declaration.
+    pub fn is_using(self) -> bool {
+        matches!(self, Self::Using | Self::AwaitUsing)
+    }
 }
 
 #[derive(Debug)]

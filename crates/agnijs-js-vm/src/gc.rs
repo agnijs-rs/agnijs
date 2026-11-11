@@ -448,6 +448,7 @@ impl Class {
                 let _ = v;
             }
             Class::FinalizationRegistry(f) => f.trace(t),
+            Class::DisposableStack(d) => d.trace(t),
             Class::ArrayBuffer(_) => {}
             Class::TypedArray(a) => t.obj(a.buffer),
             Class::DataView(d) => t.obj(d.buffer),

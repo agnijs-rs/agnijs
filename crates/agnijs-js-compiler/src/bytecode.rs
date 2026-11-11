@@ -701,6 +701,37 @@ pub enum Instr {
         on_return: Offset,
     },
 
+    // ---- explicit resource management -------------------------------------
+    /// acc = a new, empty dispose capability for a `using` scope.
+    DisposeStackNew,
+    /// AddDisposableResource(stack, acc, hint): a TypeError unless acc is
+    /// a disposable resource. Preserves acc.
+    DisposeAdd {
+        stack: Reg,
+        is_async: bool,
+    },
+    /// Start disposing `stack` with the scope's completion: a throw of
+    /// `value` when `kind` holds 1 (the finally-block completion codes).
+    DisposeBegin {
+        stack: Reg,
+        kind: Reg,
+        value: Reg,
+    },
+    /// Run disposal methods until one needs an Await: acc = the value to
+    /// await, or the hole when every resource is disposed.
+    DisposeStep {
+        stack: Reg,
+    },
+    /// Fold the thrown acc (an awaited disposal's rejection) into the
+    /// disposal's completion.
+    DisposeError {
+        stack: Reg,
+    },
+    /// Finish disposing: throw the new error when a disposal threw.
+    DisposeEnd {
+        stack: Reg,
+    },
+
     Debugger,
     Nop,
 }

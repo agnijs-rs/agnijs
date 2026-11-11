@@ -10,6 +10,7 @@ pub mod arraybuffer;
 pub mod base64;
 pub mod atomics;
 pub mod date;
+pub mod disposable;
 pub mod error;
 pub mod function;
 pub mod generator;
@@ -65,6 +66,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     date::install(vm, realm);
     typedarray::install(vm, realm);
     base64::install(vm, realm);
+    disposable::install(vm, realm);
     #[cfg(feature = "intl")]
     intl::install(vm, realm);
     global::install(vm, realm);

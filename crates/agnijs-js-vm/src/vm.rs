@@ -38,6 +38,7 @@ pub enum ErrorType {
     EvalError,
     URIError,
     AggregateError,
+    SuppressedError,
 }
 
 impl ErrorType {
@@ -51,6 +52,7 @@ impl ErrorType {
             ErrorType::EvalError => "EvalError",
             ErrorType::URIError => "URIError",
             ErrorType::AggregateError => "AggregateError",
+            ErrorType::SuppressedError => "SuppressedError",
         }
     }
     pub fn prototype(self) -> Intrinsic {
@@ -63,6 +65,7 @@ impl ErrorType {
             ErrorType::EvalError => Intrinsic::EvalErrorPrototype,
             ErrorType::URIError => Intrinsic::URIErrorPrototype,
             ErrorType::AggregateError => Intrinsic::AggregateErrorPrototype,
+            ErrorType::SuppressedError => Intrinsic::SuppressedErrorPrototype,
         }
     }
     pub fn constructor(self) -> Intrinsic {
@@ -75,6 +78,7 @@ impl ErrorType {
             ErrorType::EvalError => Intrinsic::EvalError,
             ErrorType::URIError => Intrinsic::URIError,
             ErrorType::AggregateError => Intrinsic::AggregateError,
+            ErrorType::SuppressedError => Intrinsic::SuppressedError,
         }
     }
 }
@@ -216,6 +220,8 @@ names! {
     Symbol_replace = "Symbol.replace",
     Symbol_search = "Symbol.search",
     Symbol_split = "Symbol.split",
+    Symbol_dispose = "Symbol.dispose",
+    Symbol_asyncDispose = "Symbol.asyncDispose",
     IntlLegacyConstructedSymbol = "IntlLegacyConstructedSymbol",
     this_binding = "*this*",
     new_target_binding = "*new.target*",
@@ -238,6 +244,8 @@ pub struct WellKnown {
     pub replace: SymId,
     pub search: SymId,
     pub split: SymId,
+    pub dispose: SymId,
+    pub async_dispose: SymId,
 }
 
 impl WellKnown {
@@ -262,9 +270,11 @@ impl WellKnown {
             replace: mk(heap, names.Symbol_replace),
             search: mk(heap, names.Symbol_search),
             split: mk(heap, names.Symbol_split),
+            dispose: mk(heap, names.Symbol_dispose),
+            async_dispose: mk(heap, names.Symbol_asyncDispose),
         }
     }
-    pub fn all(&self) -> [SymId; 13] {
+    pub fn all(&self) -> [SymId; 15] {
         [
             self.iterator,
             self.async_iterator,
@@ -279,6 +289,8 @@ impl WellKnown {
             self.replace,
             self.search,
             self.split,
+            self.dispose,
+            self.async_dispose,
         ]
     }
 }

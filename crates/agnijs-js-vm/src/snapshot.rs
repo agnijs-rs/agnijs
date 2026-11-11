@@ -329,6 +329,7 @@ fn unsupported_class(c: &Class) -> Option<&'static str> {
         #[cfg(feature = "intl")]
         Class::Intl(_) => "an Intl service object",
         Class::RawJSON => "a JSON.rawJSON object",
+        Class::DisposableStack(_) => "a DisposableStack",
         _ => return None,
     })
 }

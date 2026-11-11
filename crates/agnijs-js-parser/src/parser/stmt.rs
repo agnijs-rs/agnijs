@@ -56,6 +56,22 @@ impl<'s> Parser<'s> {
                     self.consume_semicolon()?;
                     Ok(Statement::VariableDeclaration(d))
                 }
+                "using" | "await" if self.at_using_declaration(false)?.is_some() => {
+                    let kind = if &*name == "await" {
+                        VariableKind::AwaitUsing
+                    } else {
+                        VariableKind::Using
+                    };
+                    if top_level && !module {
+                        return self.err(
+                            "using declarations are not allowed at the top level of a script",
+                            self.tok.span,
+                        );
+                    }
+                    let d = self.parse_variable_declaration(kind, false)?;
+                    self.consume_semicolon()?;
+                    Ok(Statement::VariableDeclaration(d))
+                }
                 "import" if module && top_level => {
                     let next = self.peek()?;
                     if matches!(
@@ -100,6 +116,54 @@ impl<'s> Parser<'s> {
             }
             _ => false,
         })
+    }
+
+    /// Whether a `using` or `await using` declaration starts here:
+    /// `using` [no LineTerminator] BindingIdentifier, or `await`
+    /// [no LineTerminator] `using` [no LineTerminator] BindingIdentifier
+    /// where `await` is a keyword. Some(true) for `await using`. In a
+    /// `for` head, `using of` is the expression `using` followed by `of`.
+    pub(crate) fn at_using_declaration(&mut self, in_for: bool) -> Result<Option<bool>> {
+        let binding_ok = |p: &Self, t: &crate::lexer::Token<'_>, allow_of: bool| match &t.kind {
+            TokenKind::Ident { name, .. } => {
+                !t.newline_before
+                    && !p.is_reserved_word(name)
+                    && (allow_of || &**name != "of")
+            }
+            _ => false,
+        };
+        if self.at_kw("using") {
+            let next = self.peek()?;
+            if in_for && binding_ok(self, &next, true) && !binding_ok(self, &next, false) {
+                // `for (using of = x;;)` declares `of`; `for (using of of
+                // xs)` iterates into `using`.
+                let snap = self.snapshot();
+                self.advance()?;
+                let after = self.peek();
+                self.rewind(snap);
+                let after = after?;
+                let decl = matches!(after.kind, TokenKind::Punct(Punct::Eq));
+                return Ok(decl.then_some(false));
+            }
+            return Ok(binding_ok(self, &next, !in_for).then_some(false));
+        }
+        if !self.at_kw("await") || !self.await_is_keyword() {
+            return Ok(None);
+        }
+        let next = self.peek()?;
+        let is_using = matches!(
+            &next.kind,
+            TokenKind::Ident { name, escaped: false } if &**name == "using"
+        ) && !next.newline_before;
+        if !is_using {
+            return Ok(None);
+        }
+        let snap = self.snapshot();
+        self.advance()?;
+        let after = self.peek();
+        self.rewind(snap);
+        let after = after?;
+        Ok(binding_ok(self, &after, true).then_some(true))
     }
 
     /// Statement (not a declaration).
@@ -474,6 +538,12 @@ impl<'s> Parser<'s> {
                     if self.tok.kind == TokenKind::Eof {
                         return self.unexpected();
                     }
+                    if self.at_using_declaration(false)?.is_some() {
+                        return self.err(
+                            "using declarations are not allowed directly in a switch case",
+                            self.tok.span,
+                        );
+                    }
                     consequent.push(self.parse_statement_list_item(false, false)?);
                 }
                 cases.push(SwitchCase {
@@ -578,10 +648,27 @@ impl<'s> Parser<'s> {
         in_for: bool,
     ) -> Result<VariableDeclaration> {
         let start = self.tok.span.start;
-        self.advance()?; // var / let / const
+        self.advance()?; // var / let / const / using / await
+        if kind == VariableKind::AwaitUsing {
+            self.advance()?; // using
+        }
         let mut declarations = Vec::new();
         loop {
             let dstart = self.tok.span.start;
+            if kind.is_using() {
+                match &self.tok.kind {
+                    TokenKind::Ident { name, .. } if &**name == "let" => {
+                        return self.err("'let' is not a valid using binding name", self.tok.span);
+                    }
+                    TokenKind::Ident { .. } => {}
+                    _ => {
+                        return self.err(
+                            "using declarations may not have binding patterns",
+                            self.tok.span,
+                        )
+                    }
+                }
+            }
             let id = self.parse_binding_target()?;
             let mut names = Vec::new();
             Self::bound_names(&id, &mut names);
@@ -600,9 +687,10 @@ impl<'s> Parser<'s> {
             if self.eat(Punct::Eq)? {
                 init = Some(self.parse_assignment_expression()?);
             } else if !in_for {
-                if kind == VariableKind::Const {
+                if kind.is_const() {
+                    let what = if kind == VariableKind::Const { "const" } else { "using" };
                     return self.err(
-                        "missing initializer in const declaration",
+                        format!("missing initializer in {what} declaration"),
                         self.span_from(dstart),
                     );
                 }
@@ -671,13 +759,20 @@ impl<'s> Parser<'s> {
         } else if self.at_kw("let") && self.let_starts_declaration()? {
             Some(VariableKind::Let)
         } else {
-            None
+            match self.at_using_declaration(true)? {
+                Some(true) => Some(VariableKind::AwaitUsing),
+                Some(false) => Some(VariableKind::Using),
+                None => None,
+            }
         };
         if let Some(kind) = decl_kind {
             let decl_start = self.tok.span.start;
             let decl = self.with_in(false, |p| p.parse_variable_declaration(kind, true))?;
             let is_of = self.at_kw("of");
             let is_in = self.at_kw("in");
+            if is_in && kind.is_using() {
+                return self.err("for-in loops may not use a using declaration", decl.span);
+            }
             if (is_of || is_in) && decl.declarations.len() == 1 {
                 let d = &decl.declarations[0];
                 if d.init.is_some() {
@@ -703,8 +798,9 @@ impl<'s> Parser<'s> {
             // Classic for: initializers are required for const/destructuring.
             for d in &decl.declarations {
                 if d.init.is_none() {
-                    if kind == VariableKind::Const {
-                        return self.err("missing initializer in const declaration", d.span);
+                    if kind.is_const() {
+                        let what = if kind == VariableKind::Const { "const" } else { "using" };
+                        return self.err(format!("missing initializer in {what} declaration"), d.span);
                     }
                     if !matches!(d.id, Pattern::Ident(_)) {
                         return self

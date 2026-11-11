@@ -23,7 +23,7 @@ pub(crate) fn lexical_decls(body: &[Statement]) -> ScopeDecls {
 fn add_lexical_decl(s: &Statement, d: &mut ScopeDecls) {
     match s {
         Statement::VariableDeclaration(v) if v.kind != VariableKind::Var => {
-            let kind = if v.kind == VariableKind::Const {
+            let kind = if v.kind.is_const() {
                 BindingKind::Const
             } else {
                 BindingKind::Let
@@ -362,7 +362,7 @@ impl<'a> Compiler<'a> {
         self.declare_block_scope(body);
         self.finish_scope();
         self.instantiate_functions(body)?;
-        self.stmts(body)?;
+        self.stmts_disposing(body)?;
         self.close_scope();
         Ok(())
     }
@@ -710,6 +710,7 @@ impl<'a> Compiler<'a> {
                         None
                     };
                     self.expr_named(init, NameHint::Static(&id.name))?;
+                    self.emit_dispose_add(d.kind, decl.span)?;
                     if r.is_some() {
                         self.emit_store_ref(&id.name, id.span, r);
                     } else {
@@ -722,6 +723,21 @@ impl<'a> Compiler<'a> {
                 }
                 (_, None) => unreachable!("destructuring declaration without initializer"),
             }
+        }
+        Ok(())
+    }
+
+    /// AddDisposableResource for the value in acc of a `using` or
+    /// `await using` binding (nothing for other declarations).
+    fn emit_dispose_add(&mut self, kind: VariableKind, span: Span) -> CResult<()> {
+        if kind.is_using() {
+            let Some(&stack) = self.fs_ref().dispose.last() else {
+                return self.error("using declaration outside a using scope", span);
+            };
+            self.emit(Instr::DisposeAdd {
+                stack,
+                is_async: kind == VariableKind::AwaitUsing,
+            });
         }
         Ok(())
     }
@@ -893,6 +909,24 @@ impl<'a> Compiler<'a> {
                 None => None,
             };
             self.block(&fin.body)?;
+            self.emit_completion_dispatch(kind_reg, value_reg, exits, saved_cv);
+        } else {
+            self.patch_all(to_end);
+        }
+        self.free_to(mark);
+        Ok(())
+    }
+
+    /// After a finally block (or a `using` scope's disposal): continue
+    /// with the completion recorded in `kind_reg` and `value_reg`.
+    fn emit_completion_dispatch(
+        &mut self,
+        kind_reg: Reg,
+        value_reg: Reg,
+        exits: Vec<PendingExit>,
+        saved_cv: Option<(Reg, Reg)>,
+    ) {
+        {
             // Dispatch on the completion kind.
             let mut normal_jumps = Vec::new();
             // Normal: kind == 0.
@@ -948,11 +982,102 @@ impl<'a> Compiler<'a> {
                 self.emit(Instr::Ldar(s));
                 self.emit(Instr::Star(cv));
             }
-        } else {
-            self.patch_all(to_end);
         }
+    }
+
+    /// Run `body` as the scope of `using` declarations: its resources are
+    /// disposed however it completes (DisposeResources), with the
+    /// completion routed like a finally block's. `is_async` when the scope
+    /// has an `await using`.
+    pub(crate) fn with_disposal(
+        &mut self,
+        is_async: bool,
+        body: impl FnOnce(&mut Self) -> CResult<()>,
+    ) -> CResult<()> {
+        let outer_depth = self.env_depth();
+        let mark = self.mark();
+        let stack = self.alloc();
+        let kind_reg = self.alloc();
+        let value_reg = self.alloc();
+        self.emit(Instr::DisposeStackNew);
+        self.emit(Instr::Star(stack));
+        self.fs().dispose.push(stack);
+        self.fs().ctl.push(Ctl::Finally {
+            kind_reg,
+            value_reg,
+            entries: Vec::new(),
+            exits: Vec::new(),
+            next_id: 3,
+        });
+        let start = self.pc();
+        // An error abandons the whole compilation, control stack and all.
+        body(self)?;
+        self.fs().dispose.pop();
+        let (entries, exits) = match self.fs().ctl.pop() {
+            Some(Ctl::Finally { entries, exits, .. }) => (entries, exits),
+            _ => return self.error("control stack out of sync", Span::new(0, 0)),
+        };
+        let end = self.pc();
+        let to_end = self.emit_jump(Instr::Jump(0));
+        // Throw path.
+        let throw_pc = self.pc();
+        self.add_handler(start, end, throw_pc, outer_depth);
+        self.emit(Instr::Star(value_reg));
+        self.emit(Instr::LdaInt(1));
+        self.emit(Instr::Star(kind_reg));
+        let to_dispose = self.emit_jump(Instr::Jump(0));
+        // Normal path.
+        self.patch(to_end);
+        self.emit(Instr::LdaInt(0));
+        self.emit(Instr::Star(kind_reg));
+        self.patch(to_dispose);
+        self.patch_all(entries);
+        self.emit(Instr::DisposeBegin {
+            stack,
+            kind: kind_reg,
+            value: value_reg,
+        });
+        let top = self.pc();
+        self.emit(Instr::DisposeStep { stack });
+        if is_async {
+            let done = self.emit_jump(Instr::JumpIfEmpty(0));
+            let await_pc = self.pc();
+            self.emit(Instr::Await);
+            self.emit_jump_to(top);
+            // An awaited disposal's rejection joins the completion.
+            let reject_pc = self.pc();
+            self.add_handler(await_pc, await_pc + 1, reject_pc, outer_depth);
+            self.emit(Instr::DisposeError { stack });
+            self.emit_jump_to(top);
+            self.patch(done);
+        }
+        self.emit(Instr::DisposeEnd { stack });
+        self.emit_completion_dispatch(kind_reg, value_reg, exits, None);
         self.free_to(mark);
         Ok(())
+    }
+
+    /// Whether a statement list declares `using` bindings directly, and
+    /// whether any of them is `await using`.
+    pub(crate) fn using_scope(body: &[Statement]) -> Option<bool> {
+        let mut found = None;
+        for s in body {
+            if let Statement::VariableDeclaration(v) = s {
+                if v.kind.is_using() {
+                    let a = v.kind == VariableKind::AwaitUsing;
+                    found = Some(found.unwrap_or(false) || a);
+                }
+            }
+        }
+        found
+    }
+
+    /// Compile a statement list, as a `using` scope when it declares any.
+    pub(crate) fn stmts_disposing(&mut self, body: &[Statement]) -> CResult<()> {
+        match Self::using_scope(body) {
+            Some(is_async) => self.with_disposal(is_async, |c| c.stmts(body)),
+            None => self.stmts(body),
+        }
     }
 
     // ---- loops -----------------------------------------------------------
@@ -1010,12 +1135,10 @@ impl<'a> Compiler<'a> {
 
     fn for_stmt(&mut self, f: &ForStatement, labels: Vec<Rc<str>>) -> CResult<()> {
         let mark = self.mark();
-        let mut lexical_scope = false;
-        let mut per_iteration = false;
         match &f.init {
             Some(ForInit::VariableDeclaration(d)) if d.kind != VariableKind::Var => {
                 self.open_scope(ScopeKind::Block);
-                let kind = if d.kind == VariableKind::Const {
+                let kind = if d.kind.is_const() {
                     BindingKind::Const
                 } else {
                     BindingKind::Let
@@ -1028,16 +1151,41 @@ impl<'a> Compiler<'a> {
                     }
                 }
                 let pushed = self.finish_scope();
-                lexical_scope = true;
-                per_iteration = pushed && d.kind == VariableKind::Let;
-                self.variable_declaration(d)?;
+                let per_iteration = pushed && d.kind == VariableKind::Let;
+                if d.kind.is_using() {
+                    // The whole loop is the scope of the using bindings.
+                    let is_async = d.kind == VariableKind::AwaitUsing;
+                    self.with_disposal(is_async, |c| {
+                        c.variable_declaration(d)?;
+                        c.for_stmt_loop(f, labels, false)
+                    })?;
+                } else {
+                    self.variable_declaration(d)?;
+                    self.for_stmt_loop(f, labels, per_iteration)?;
+                }
+                self.close_scope();
             }
-            Some(ForInit::VariableDeclaration(d)) => self.variable_declaration(d)?,
+            Some(ForInit::VariableDeclaration(d)) => {
+                self.variable_declaration(d)?;
+                self.for_stmt_loop(f, labels, false)?;
+            }
             Some(ForInit::Expression(e)) => {
                 self.expr_unused(e)?;
+                self.for_stmt_loop(f, labels, false)?;
             }
-            None => {}
+            None => self.for_stmt_loop(f, labels, false)?,
         }
+        self.free_to(mark);
+        Ok(())
+    }
+
+    /// The test, body and update of a classic for loop, after its head.
+    fn for_stmt_loop(
+        &mut self,
+        f: &ForStatement,
+        labels: Vec<Rc<str>>,
+        per_iteration: bool,
+    ) -> CResult<()> {
         if per_iteration {
             self.emit(Instr::CopyEnv);
         }
@@ -1064,10 +1212,6 @@ impl<'a> Compiler<'a> {
         self.emit_jump_to(top);
         self.patch_all(exit);
         self.patch_all(breaks);
-        if lexical_scope {
-            self.close_scope();
-        }
-        self.free_to(mark);
         Ok(())
     }
 
@@ -1119,7 +1263,7 @@ impl<'a> Compiler<'a> {
         if let ForLeft::VariableDeclaration(d) = left {
             if d.kind != VariableKind::Var {
                 self.open_scope(ScopeKind::Block);
-                let kind = if d.kind == VariableKind::Const {
+                let kind = if d.kind.is_const() {
                     BindingKind::Const
                 } else {
                     BindingKind::Let
@@ -1223,9 +1367,25 @@ impl<'a> Compiler<'a> {
         let value = self.alloc();
         self.emit(Instr::Star(value));
         let scoped = self.for_open_iteration_scope(&f.left);
-        self.emit(Instr::Ldar(value));
-        self.for_bind(&f.left)?;
-        self.sub_statement(&f.body)?;
+        match &f.left {
+            ForLeft::VariableDeclaration(d) if d.kind.is_using() => {
+                // Each iteration is the scope of its using binding.
+                let is_async = d.kind == VariableKind::AwaitUsing;
+                let kind = d.kind;
+                let span = d.span;
+                self.with_disposal(is_async, |c| {
+                    c.emit(Instr::Ldar(value));
+                    c.emit_dispose_add(kind, span)?;
+                    c.for_bind(&f.left)?;
+                    c.sub_statement(&f.body)
+                })?;
+            }
+            _ => {
+                self.emit(Instr::Ldar(value));
+                self.for_bind(&f.left)?;
+                self.sub_statement(&f.body)?;
+            }
+        }
         if scoped {
             self.close_scope();
         }

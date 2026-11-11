@@ -237,7 +237,7 @@ impl<'a> Compiler<'a> {
         }
         self.fs().declarations = Some(decls);
         self.fs().module = Some(info);
-        self.stmts(&program.body)?;
+        self.stmts_disposing(&program.body)?;
         self.emit(Instr::LdaUndefined);
         self.emit(Instr::Return);
         self.close_scope_silent();

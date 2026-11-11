@@ -1,6 +1,7 @@
 //! One instruction at a time: the big match.
 
 use super::{Args, ConstructKind, Flow, RunOutcome};
+use crate::builtins::disposable;
 use crate::convert::{bin_arith, Hint};
 use crate::object::{Class, FieldKey, ObjectData};
 use crate::symbol::{PrivateElement, SymbolData, SymbolKind};
@@ -1443,6 +1444,36 @@ impl Vm {
                     }
                 }
             }
+            Instr::DisposeStackNew => {
+                let s = disposable::new_capability(self);
+                set_acc!(Value::Object(s));
+            }
+            Instr::DisposeAdd { stack, is_async } => {
+                let s = self.dispose_capability(reg!(stack))?;
+                let v = acc!();
+                disposable::add_value(self, s, v, is_async)?;
+                set_acc!(v);
+            }
+            Instr::DisposeBegin { stack, kind, value } => {
+                let s = self.dispose_capability(reg!(stack))?;
+                let has_error = matches!(reg!(kind), Value::Number(n) if n == 1.0);
+                let error = reg!(value);
+                disposable::begin(self, s, has_error, error);
+            }
+            Instr::DisposeStep { stack } => {
+                let s = self.dispose_capability(reg!(stack))?;
+                let v = disposable::step(self, s)?;
+                set_acc!(v.unwrap_or(Value::Empty));
+            }
+            Instr::DisposeError { stack } => {
+                let s = self.dispose_capability(reg!(stack))?;
+                let e = acc!();
+                disposable::record_error(self, s, e);
+            }
+            Instr::DisposeEnd { stack } => {
+                let s = self.dispose_capability(reg!(stack))?;
+                disposable::end(self, s)?;
+            }
             Instr::Nop => {}
             Instr::Debugger => {
                 if self.debug_hot {
@@ -1451,6 +1482,14 @@ impl Vm {
             }
         }
         Ok(Flow::Next)
+    }
+
+    /// The dispose capability a `using` scope keeps in a register.
+    fn dispose_capability(&mut self, v: Value) -> JsResult<crate::value::ObjId> {
+        match disposable::as_capability(self, v) {
+            Some(s) => Ok(s),
+            None => Err(self.throw_type("invalid dispose capability register")),
+        }
     }
 
     /// `Return`: pop the frame and deliver the value.

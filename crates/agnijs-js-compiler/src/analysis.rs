@@ -269,6 +269,9 @@ impl<'a> Walker<'a> {
     }
 
     fn var_decl(&mut self, d: &VariableDeclaration) {
+        if d.kind == VariableKind::AwaitUsing && self.arrow_depth == 0 {
+            self.cur.has_tla = true;
+        }
         for decl in &d.declarations {
             self.pattern(&decl.id);
             if let Some(i) = &decl.init {
@@ -359,6 +362,7 @@ impl<'a> Walker<'a> {
                 if f.is_await && self.arrow_depth == 0 {
                     // Only module top level can have for-await outside an
                     // async function; the parser enforces it.
+                    self.cur.has_tla = true;
                 }
                 self.for_left(&f.left);
                 self.expr(&f.right);

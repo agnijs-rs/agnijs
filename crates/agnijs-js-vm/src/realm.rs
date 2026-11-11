@@ -159,6 +159,12 @@ intrinsics! {
     IntlSegmentIteratorPrototype,
     IntlDisplayNames,
     IntlDisplayNamesPrototype,
+    SuppressedError,
+    SuppressedErrorPrototype,
+    DisposableStack,
+    DisposableStackPrototype,
+    AsyncDisposableStack,
+    AsyncDisposableStackPrototype,
 }
 
 /// A global lexical binding (`let`, `const`, `class` at script top level).

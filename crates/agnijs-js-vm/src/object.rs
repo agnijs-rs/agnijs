@@ -436,6 +436,9 @@ pub enum Class {
     /// A `JSON.rawJSON` object ([[IsRawJSON]]); its text is the frozen
     /// `rawJSON` property.
     RawJSON,
+    /// A DisposableStack or AsyncDisposableStack, or the internal stack
+    /// of a scope with `using` declarations.
+    DisposableStack(Box<crate::builtins::disposable::DisposeData>),
 }
 
 /// An iterator and its `next` method.

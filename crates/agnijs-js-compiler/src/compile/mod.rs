@@ -212,6 +212,9 @@ pub(crate) struct FnState {
     /// Inside a class field initializer: `arguments` is forbidden by the
     /// parser, but `eval` must know.
     pub is_field_initializer: bool,
+    /// The dispose capability registers of the enclosing `using` scopes,
+    /// innermost last.
+    pub dispose: Vec<Reg>,
 }
 
 pub struct Compiler<'a> {
@@ -1190,6 +1193,7 @@ impl<'a> Compiler<'a> {
             declarations: None,
             module: None,
             is_field_initializer: false,
+            dispose: Vec::new(),
         });
     }
 

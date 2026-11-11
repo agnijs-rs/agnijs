@@ -24,7 +24,9 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.method(ctor, "for", 1, symbol_for);
     vm.method(ctor, "keyFor", 1, symbol_key_for);
     let wk = [
+        ("asyncDispose", vm.well_known.async_dispose),
         ("asyncIterator", vm.well_known.async_iterator),
+        ("dispose", vm.well_known.dispose),
         ("hasInstance", vm.well_known.has_instance),
         ("isConcatSpreadable", vm.well_known.is_concat_spreadable),
         ("iterator", vm.well_known.iterator),

@@ -685,6 +685,12 @@ instr_table! {
     Await;
     ResumeDispatch { kind: reg, on_return: off };
     Debugger; Nop;
+    DisposeStackNew;
+    DisposeAdd { stack: reg, is_async: raw };
+    DisposeBegin { stack: reg, kind: reg, value: reg };
+    DisposeStep { stack: reg };
+    DisposeError { stack: reg };
+    DisposeEnd { stack: reg };
 }
 
 /// Checks that need more than one operand.

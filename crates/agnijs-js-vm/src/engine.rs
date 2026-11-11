@@ -2,7 +2,7 @@
 //! the interface, host functions and objects, and the bytecode container.
 //!
 //! Bytecode container (ADR 0010): the shared `AGJS` container with the
-//! `agnijs-bc-7` tag around a kind byte, a checksum, the serialised code
+//! `agnijs-bc-8` tag around a kind byte, a checksum, the serialised code
 //! tree and the compiled programs of its regex literals, so loading
 //! precompiled code skips parsing and compiling, regexes included. Any
 //! other container, including the M2 source-payload container, is
@@ -26,8 +26,9 @@ use std::rc::Rc;
 /// compiler: any change to `Instr`, `CodeBlock`, the constant pool, the
 /// serialiser's layout or the regex program format
 /// (`agnijs_js_regex::Regex::program_bytes`) changes it. `agnijs-bc-7`
-/// added the regex section (TASK-100.31).
-pub const FORMAT: &str = "agnijs-bc-7";
+/// added the regex section (TASK-100.31); `agnijs-bc-8` the explicit
+/// resource management instructions (TASK-103.7).
+pub const FORMAT: &str = "agnijs-bc-8";
 
 const KIND_SCRIPT: u8 = 1;
 const KIND_MODULE: u8 = 2;

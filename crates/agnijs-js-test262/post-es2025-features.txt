@@ -3,8 +3,17 @@
 # The ES2025 gate is: standard section minus this list. Review this file
 # when the pin moves (the runner reports names that no longer exist).
 #
-# ES2026 (17th edition)
-explicit-resource-management
+# ES2026 (17th edition): none left. TASK-103.7 implemented and removed
+# Array.fromAsync, Error.isError, Math.sumPrecise, uint8array-base64,
+# json-parse-with-source, iterator-sequencing, iterator-chunking,
+# iterator-includes, joint-iteration, Atomics.pause, upsert and
+# explicit-resource-management. None of them is Stage 3 at the pin (all
+# are in the Standard section).
+#
+# Stage 3 features are the Proposed section of features.txt; the runner
+# skips their tests as proposed (features.rs), so they need no entry
+# here. Review that section too when the pin moves: a proposal that
+# moved to Standard is gated by this file from then on.
 #
 # Reached Stage 4 after ES2026 was frozen, or unclear edition; treated as
 # post-2025 until a maintainer confirms otherwise.

@@ -146,7 +146,7 @@ impl<'a> Compiler<'a> {
         analysis: &FnAnalysis,
     ) -> CResult<()> {
         self.function_prologue(params, body, simple, is_arrow, ctx, analysis)?;
-        self.stmts(body)?;
+        self.stmts_disposing(body)?;
         self.emit(Instr::LdaUndefined);
         self.emit_return();
         while self.scopes.len() > self.fs_ref().scope_base {

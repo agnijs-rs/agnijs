@@ -34,9 +34,11 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
         ErrorType::EvalError,
         ErrorType::URIError,
         ErrorType::AggregateError,
+        ErrorType::SuppressedError,
     ] {
         let proto = vm.new_object_with_proto(Some(error_proto));
         let (f, len): (crate::object::NativeFn, u32) = match ty {
+            ErrorType::SuppressedError => (suppressed_error_constructor, 3),
             ErrorType::TypeError => (type_error_constructor, 1),
             ErrorType::RangeError => (range_error_constructor, 1),
             ErrorType::ReferenceError => (reference_error_constructor, 1),
@@ -169,6 +171,29 @@ fn aggregate_error_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let key = PropKey::Str(vm.names.errors);
     vm.define_raw(o, key, Value::Object(arr), Attrs::METHOD);
     Ok(Value::Object(o))
+}
+
+/// SuppressedError(error, suppressed, message).
+fn suppressed_error_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let o = make_error_object(vm, a, ErrorType::SuppressedError, a.arg(2), Value::Undefined)?;
+    set_suppressed(vm, o, a.arg(0), a.arg(1));
+    Ok(Value::Object(o))
+}
+
+fn set_suppressed(vm: &mut Vm, o: ObjId, error: Value, suppressed: Value) {
+    let key = PropKey::Str(vm.atom("error"));
+    vm.define_raw(o, key, error, Attrs::METHOD);
+    let key = PropKey::Str(vm.atom("suppressed"));
+    vm.define_raw(o, key, suppressed, Attrs::METHOD);
+}
+
+/// A new SuppressedError of the current realm with no message, as
+/// DisposeResources creates when a disposal throws over an earlier error.
+pub fn new_suppressed_error(vm: &mut Vm, error: Value, suppressed: Value) -> Value {
+    let proto = vm.intrinsic(Intrinsic::SuppressedErrorPrototype);
+    let o = vm.alloc(crate::object::ObjectData::new(Some(proto), Class::Error));
+    set_suppressed(vm, o, error, suppressed);
+    Value::Object(o)
 }
 
 /// Error.prototype.toString.
