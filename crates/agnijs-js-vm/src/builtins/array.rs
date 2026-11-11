@@ -32,6 +32,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
         Intrinsic::ArrayPrototype,
     );
     vm.method(ctor, "from", 1, array_from);
+    vm.method(ctor, "fromAsync", 1, super::array_from_async::array_from_async);
     vm.method(ctor, "isArray", 1, array_is_array);
     vm.method(ctor, "of", 0, array_of);
     super::species_accessor(vm, ctor);

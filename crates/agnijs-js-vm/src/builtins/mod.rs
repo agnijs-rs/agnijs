@@ -2,10 +2,12 @@
 //! global object in dependency order.
 
 pub mod array;
+pub mod array_from_async;
 pub mod bigint;
 pub mod boolean;
 pub mod collections;
 pub mod arraybuffer;
+pub mod base64;
 pub mod atomics;
 pub mod date;
 pub mod error;
@@ -62,6 +64,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     collections::install(vm, realm);
     date::install(vm, realm);
     typedarray::install(vm, realm);
+    base64::install(vm, realm);
     #[cfg(feature = "intl")]
     intl::install(vm, realm);
     global::install(vm, realm);

@@ -346,6 +346,8 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     let entries = vm.method(proto, "entries", 0, map_entries);
     vm.method(proto, "forEach", 1, map_for_each);
     vm.method(proto, "get", 1, map_get);
+    vm.method(proto, "getOrInsert", 2, map_get_or_insert);
+    vm.method(proto, "getOrInsertComputed", 2, map_get_or_insert_computed);
     vm.method(proto, "has", 1, map_has);
     vm.method(proto, "keys", 0, map_keys);
     vm.method(proto, "set", 2, map_set);
@@ -394,6 +396,8 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     super::install_ctor(vm, realm, "WeakMap", 0, weakmap_constructor, proto, Intrinsic::WeakMap, Intrinsic::WeakMapPrototype);
     vm.method(proto, "delete", 1, weakmap_delete);
     vm.method(proto, "get", 1, weakmap_get);
+    vm.method(proto, "getOrInsert", 2, weakmap_get_or_insert);
+    vm.method(proto, "getOrInsertComputed", 2, weakmap_get_or_insert_computed);
     vm.method(proto, "has", 1, weakmap_has);
     vm.method(proto, "set", 2, weakmap_set);
     super::to_string_tag(vm, proto, "WeakMap");
@@ -546,6 +550,36 @@ fn map_set(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let k = map_key(vm, key);
     data(vm, o).set(k, key, a.arg(1));
     Ok(a.this)
+}
+
+/// Map.prototype.getOrInsert(key, value) (ES2026 upsert).
+fn map_get_or_insert(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let o = this_coll(vm, a.this, Kind::Map, "getOrInsert")?;
+    let key = normalize(a.arg(0));
+    let k = map_key(vm, key);
+    if let Some(v) = data(vm, o).get(&k) {
+        return Ok(v);
+    }
+    data(vm, o).set(k, key, a.arg(1));
+    Ok(a.arg(1))
+}
+
+/// Map.prototype.getOrInsertComputed(key, callbackfn): the callback runs
+/// with the canonical key, and its result overwrites whatever it stored.
+fn map_get_or_insert_computed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let o = this_coll(vm, a.this, Kind::Map, "getOrInsertComputed")?;
+    let f = a.arg(1);
+    if !vm.is_callable(f) {
+        return vm.type_error("Map.prototype.getOrInsertComputed: callback is not a function");
+    }
+    let key = normalize(a.arg(0));
+    let k = map_key(vm, key);
+    if let Some(v) = data(vm, o).get(&k) {
+        return Ok(v);
+    }
+    let v = vm.call_value(f, Value::Undefined, &[key])?;
+    data(vm, o).set(k, key, v);
+    Ok(v)
 }
 
 fn map_size(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -996,6 +1030,41 @@ fn weakmap_set(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let k = map_key(vm, key);
     data(vm, o).set(k, key, a.arg(1));
     Ok(a.this)
+}
+
+/// WeakMap.prototype.getOrInsert(key, value) (ES2026 upsert).
+fn weakmap_get_or_insert(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let o = this_coll(vm, a.this, Kind::WeakMap, "getOrInsert")?;
+    let key = a.arg(0);
+    if !can_be_held_weakly(vm, key) {
+        return vm.type_error("Invalid value used as weak map key");
+    }
+    let k = map_key(vm, key);
+    if let Some(v) = data(vm, o).get(&k) {
+        return Ok(v);
+    }
+    data(vm, o).set(k, key, a.arg(1));
+    Ok(a.arg(1))
+}
+
+/// WeakMap.prototype.getOrInsertComputed(key, callbackfn).
+fn weakmap_get_or_insert_computed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let o = this_coll(vm, a.this, Kind::WeakMap, "getOrInsertComputed")?;
+    let f = a.arg(1);
+    if !vm.is_callable(f) {
+        return vm.type_error("WeakMap.prototype.getOrInsertComputed: callback is not a function");
+    }
+    let key = a.arg(0);
+    if !can_be_held_weakly(vm, key) {
+        return vm.type_error("Invalid value used as weak map key");
+    }
+    let k = map_key(vm, key);
+    if let Some(v) = data(vm, o).get(&k) {
+        return Ok(v);
+    }
+    let v = vm.call_value(f, Value::Undefined, &[key])?;
+    data(vm, o).set(k, key, v);
+    Ok(v)
 }
 
 fn weakset_add(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

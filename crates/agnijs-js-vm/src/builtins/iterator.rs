@@ -17,6 +17,29 @@ pub struct HelperState {
     pub done: bool,
     pub executing: bool,
     pub inner: Option<(Value, Value)>,
+    /// `Iterator.zip` / `Iterator.zipKeyed` (ES2026 joint iteration).
+    pub zip: Option<Box<ZipState>>,
+}
+
+/// IteratorZip's closure state: the iterator records (`None` once a
+/// `longest` zip has exhausted one), which of them are still open (the
+/// spec's openIters, in the original order), the padding and, for
+/// `zipKeyed`, the property keys of the result objects.
+pub struct ZipState {
+    pub iters: Vec<Option<(Value, Value)>>,
+    pub open: Vec<bool>,
+    pub padding: Vec<Value>,
+    pub keys: Option<Vec<Value>>,
+    pub mode: ZipMode,
+    /// Whether next() has run, so a return() resumes a suspended yield.
+    pub started: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ZipMode {
+    Shortest,
+    Longest,
+    Strict,
 }
 
 impl HelperState {
@@ -29,6 +52,15 @@ impl HelperState {
         if let Some((a, b)) = self.inner {
             t.value(a);
             t.value(b);
+        }
+        if let Some(z) = &self.zip {
+            for (a, b) in z.iters.iter().flatten() {
+                t.value(*a);
+                t.value(*b);
+            }
+            for v in z.padding.iter().chain(z.keys.iter().flatten()) {
+                t.value(*v);
+            }
         }
     }
 }

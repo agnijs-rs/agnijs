@@ -73,6 +73,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.method(math, "min", 2, math_min);
     vm.method(math, "pow", 2, math_pow);
     vm.method(math, "random", 0, math_random);
+    vm.method(math, "sumPrecise", 1, math_sum_precise);
     super::to_string_tag(vm, math, "Math");
     let global = vm.realm_of(realm).global;
     vm.define_raw_str(global, "Math", Value::Object(math), Attrs::METHOD);
@@ -188,6 +189,165 @@ fn math_pow(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let b = vm.to_number(a.arg(0))?;
     let e = vm.to_number(a.arg(1))?;
     Ok(Value::Number(js_pow(b, e)))
+}
+
+/// Math.sumPrecise(items) (ES2026): the exactly rounded sum of an iterable
+/// of Numbers. Every element must already be a Number (no coercion); the
+/// first that is not closes the iterator and throws.
+fn math_sum_precise(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let items = a.arg(0);
+    if !items.is_object() {
+        return vm.type_error("Math.sumPrecise requires an iterable object");
+    }
+    let (it, next) = vm.get_iterator(items, false)?;
+    let mut acc = ExactSum::new();
+    while let Some(v) = vm.iterator_step_value(it, next)? {
+        let Value::Number(x) = v else {
+            let f = vm.throw_type("Math.sumPrecise: every element must be a Number");
+            vm.iterator_close_swallow(it);
+            return Err(f);
+        };
+        acc.add(x);
+    }
+    Ok(Value::Number(acc.result()))
+}
+
+/// An exact accumulator for sums of doubles: a two's-complement fixed-point
+/// integer in units of 2^-1074 (the smallest subnormal), wide enough for
+/// any double (2^1024 needs 2098 bits) with 2^62 elements of headroom.
+/// Limbs hold 32 bits each in an `i64`, so carries are deferred: each add
+/// touches at most three limbs by less than 2^32 each, and the limbs are
+/// normalised every 2^30 adds. Overflow, NaN and the sign of zero are
+/// tracked beside it as the spec's state machine does.
+pub(crate) struct ExactSum {
+    limbs: [i64; LIMBS],
+    pending: u32,
+    pos_inf: bool,
+    neg_inf: bool,
+    nan: bool,
+    /// Only -0 (or nothing) has been added: the result is -0.
+    minus_zero: bool,
+}
+
+/// 68 limbs of 32 bits: 2176 bits ≥ 2098 + 64 of headroom + sign.
+const LIMBS: usize = 68;
+
+impl ExactSum {
+    pub(crate) fn new() -> ExactSum {
+        ExactSum { limbs: [0; LIMBS], pending: 0, pos_inf: false, neg_inf: false, nan: false, minus_zero: true }
+    }
+
+    pub(crate) fn add(&mut self, x: f64) {
+        if x.is_nan() {
+            self.nan = true;
+            return;
+        }
+        if x.is_infinite() {
+            if x > 0.0 { self.pos_inf = true } else { self.neg_inf = true }
+            return;
+        }
+        if x == 0.0 && x.is_sign_negative() {
+            return;
+        }
+        self.minus_zero = false;
+        if x == 0.0 {
+            return;
+        }
+        let bits = x.to_bits();
+        let biased = ((bits >> 52) & 0x7ff) as u32;
+        let frac = bits & ((1u64 << 52) - 1);
+        // x = mant * 2^(shift - 1074)
+        let (mant, shift) = if biased == 0 { (frac, 0u32) } else { (frac | (1u64 << 52), biased - 1) };
+        let limb = (shift / 32) as usize;
+        let off = shift % 32;
+        let wide = (mant as u128) << off; // < 2^85: three limbs
+        let neg = x < 0.0;
+        for k in 0..3 {
+            let part = ((wide >> (32 * k)) & 0xffff_ffff) as i64;
+            if part != 0 {
+                if neg { self.limbs[limb + k] -= part } else { self.limbs[limb + k] += part }
+            }
+        }
+        self.pending += 1;
+        if self.pending >= 1 << 30 {
+            self.normalise();
+        }
+    }
+
+    /// Carry every limb into 0..2^32, the top one keeping the sign.
+    fn normalise(&mut self) {
+        let mut carry = 0i64;
+        for l in self.limbs.iter_mut().take(LIMBS - 1) {
+            let v = *l + carry;
+            *l = v & 0xffff_ffff;
+            carry = v >> 32;
+        }
+        self.limbs[LIMBS - 1] += carry;
+        self.pending = 0;
+    }
+
+    pub(crate) fn result(mut self) -> f64 {
+        if self.nan || (self.pos_inf && self.neg_inf) {
+            return f64::NAN;
+        }
+        if self.pos_inf {
+            return f64::INFINITY;
+        }
+        if self.neg_inf {
+            return f64::NEG_INFINITY;
+        }
+        if self.minus_zero {
+            return -0.0;
+        }
+        self.normalise();
+        let negative = self.limbs[LIMBS - 1] < 0;
+        if negative {
+            // Two's-complement negate over 32-bit limbs.
+            let mut carry = 1i64;
+            for l in self.limbs.iter_mut() {
+                let v = (!*l & 0xffff_ffff) + carry;
+                *l = v & 0xffff_ffff;
+                carry = v >> 32;
+            }
+        }
+        let mag = &self.limbs;
+        let Some(top_limb) = (0..LIMBS).rev().find(|&i| mag[i] != 0) else {
+            return 0.0;
+        };
+        let bit = |i: usize| -> u64 { ((mag[i / 32] >> (i % 32)) & 1) as u64 };
+        // Index of the highest set bit of the magnitude.
+        let top = top_limb * 32 + 63 - (mag[top_limb] as u64).leading_zeros() as usize;
+        let value = if top < 53 {
+            // Exactly representable as a multiple of 2^-1074.
+            let mut m = 0u64;
+            for i in (0..=top).rev() {
+                m = (m << 1) | bit(i);
+            }
+            (m as f64) * f64::from_bits(1)
+        } else {
+            let mut m = 0u64;
+            for i in (top - 52..=top).rev() {
+                m = (m << 1) | bit(i);
+            }
+            let round = bit(top - 53) == 1;
+            let sticky = top >= 54 && (0..top - 53).any(|i| bit(i) == 1);
+            let mut e = top as i64 - 1074; // value in [2^e, 2^(e+1))
+            if round && (sticky || m & 1 == 1) {
+                m += 1;
+                if m == 1u64 << 53 {
+                    m >>= 1;
+                    e += 1;
+                }
+            }
+            let biased = e + 1023;
+            if biased >= 2047 {
+                f64::INFINITY
+            } else {
+                f64::from_bits(((biased as u64) << 52) | (m & ((1u64 << 52) - 1)))
+            }
+        };
+        if negative { -value } else { value }
+    }
 }
 
 /// The xorshift64* state for `seed`: splitmix64 spreads nearby seeds

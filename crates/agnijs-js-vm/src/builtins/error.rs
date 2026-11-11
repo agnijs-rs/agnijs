@@ -24,6 +24,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     let empty = Value::String(vm.names.empty);
     vm.define_raw_str(error_proto, "message", empty, Attrs::METHOD);
     vm.method(error_proto, "toString", 0, error_proto_to_string);
+    vm.method(error_ctor, "isError", 1, error_is_error);
 
     for ty in [
         ErrorType::TypeError,
@@ -75,6 +76,16 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     vm.realm_mut()
         .set_intrinsic(Intrinsic::ThrowTypeError, thrower);
     super::function::install_poison_pills(vm);
+}
+
+/// Error.isError(arg) (ES2026): whether `arg` has an [[ErrorData]] slot.
+/// A proxy has none, whatever its target.
+fn error_is_error(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let is = match a.arg(0) {
+        Value::Object(o) => matches!(vm.heap.obj(o).class, Class::Error),
+        _ => false,
+    };
+    Ok(Value::Bool(is))
 }
 
 fn throw_type_error(vm: &mut Vm, _a: &CallArgs) -> JsResult<Value> {

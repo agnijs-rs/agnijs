@@ -4,21 +4,11 @@
 # when the pin moves (the runner reports names that no longer exist).
 #
 # ES2026 (17th edition)
-Array.fromAsync
-Atomics.pause
-Error.isError
 explicit-resource-management
-iterator-sequencing
 json-parse-with-source
-Math.sumPrecise
-uint8array-base64
-upsert
 #
 # Reached Stage 4 after ES2026 was frozen, or unclear edition; treated as
 # post-2025 until a maintainer confirms otherwise.
-iterator-chunking
-iterator-includes
-joint-iteration
 Temporal
 canonical-tz
 #
