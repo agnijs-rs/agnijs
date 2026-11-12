@@ -52,6 +52,8 @@ regress = { version = "0.12", features = ["utf16"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# WHATWG URL parsing for the import maps in agnijs-js-resolve (ADR 0025).
+url = "2.5"
 clap = { version = "4", features = ["derive"] }
 walkdir = "2"
 rayon = "1"

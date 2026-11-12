@@ -456,3 +456,132 @@ fn an_unknown_realm_is_refused() {
     assert!(matches!(e.run_jobs(bogus), Err(Error::UnknownRealm)));
     assert!(matches!(e.global_object(bogus), Err(Error::UnknownRealm)));
 }
+
+// ---- JSON modules and import attributes (ADR 0025) ----------------------------------------------
+
+/// Run `import(specifier, { with: { type } })` from a script and report
+/// how it settled: `ok:<default export as JSON>` or `<ErrorName>:<message>`.
+fn dynamic_import(e: &mut dyn Engine, realm: RealmId, specifier: &str, ty: &str) -> String {
+    eval(
+        e,
+        realm,
+        &format!(
+            "globalThis.settled = undefined;
+             import('{specifier}', {{ with: {{ type: '{ty}' }} }}).then(
+               ns => settled = 'ok:' + JSON.stringify(ns.default),
+               err => settled = err.constructor.name + ':' + err.message)"
+        ),
+    );
+    e.run_jobs(realm).unwrap();
+    match eval(e, realm, "settled") {
+        Value::String(s) => s.to_string(),
+        other => panic!("not settled: {other:?}"),
+    }
+}
+
+fn add_json(host: &TestHost, specifier: &str, text: &str) {
+    host.modules.borrow_mut().insert(
+        specifier.to_string(),
+        agnijs_engine_api::ModuleSource::Json(text.to_string()),
+    );
+}
+
+#[test]
+fn a_json_module_loads_by_static_and_dynamic_import_as_one_record() {
+    let (host, mut e, realm) = engine();
+    add_json(&host, "app/data.json", r#"{"x": [1, 2]}"#);
+    host.add_module(
+        "app/main.js",
+        "import d from './data.json' with { type: 'json' }; globalThis.first = d;",
+    );
+    e.load_module(realm, "app/main.js").unwrap();
+    e.run_jobs(realm).unwrap();
+    assert_eq!(
+        dynamic_import(&mut *e, realm, "app/data.json", "json"),
+        r#"ok:{"x":[1,2]}"#
+    );
+    eval(&mut *e, realm, "import('app/data.json', { with: { type: 'json' } }).then(ns => globalThis.same = ns.default === first)");
+    e.run_jobs(realm).unwrap();
+    assert_eq!(eval(&mut *e, realm, "same"), Value::Bool(true));
+}
+
+#[test]
+fn a_json_request_never_runs_javascript() {
+    let (host, mut e, realm) = engine();
+    host.add_module(
+        "app/code.js",
+        "globalThis.ran = (globalThis.ran || 0) + 1; export default 1;",
+    );
+    // Source for a JSON request is refused before it compiles.
+    assert_eq!(
+        dynamic_import(&mut *e, realm, "app/code.js", "json"),
+        "TypeError:Module 'app/code.js' is not a JSON module"
+    );
+    assert_eq!(
+        eval(&mut *e, realm, "typeof ran"),
+        Value::string("undefined")
+    );
+    // A JavaScript record already in the module map is refused too.
+    assert_eq!(
+        dynamic_import(&mut *e, realm, "app/code.js", "javascript")
+            .split(':')
+            .next(),
+        Some("TypeError")
+    );
+    e.load_module(realm, "app/code.js").unwrap();
+    e.run_jobs(realm).unwrap();
+    assert_eq!(eval(&mut *e, realm, "ran"), Value::Number(1.0));
+    assert_eq!(
+        dynamic_import(&mut *e, realm, "app/code.js", "json"),
+        "TypeError:Module 'app/code.js' is not a JSON module"
+    );
+    // So is bytecode.
+    let bytes = e
+        .compile_module(realm, "app/bc.js", "export default 2;")
+        .unwrap();
+    host.modules.borrow_mut().insert(
+        "app/bc.js".into(),
+        agnijs_engine_api::ModuleSource::Bytecode(bytes),
+    );
+    assert_eq!(
+        dynamic_import(&mut *e, realm, "app/bc.js", "json"),
+        "TypeError:Module 'app/bc.js' is not a JSON module"
+    );
+    assert_eq!(eval(&mut *e, realm, "ran"), Value::Number(1.0));
+}
+
+#[test]
+fn an_unsupported_module_type_is_refused_without_loading() {
+    let (host, mut e, realm) = engine();
+    host.add_module("app/style.css", "globalThis.ran = true; export default 0;");
+    for ty in ["css", "text", "bytes", ""] {
+        assert_eq!(
+            dynamic_import(&mut *e, realm, "app/style.css", ty),
+            format!("TypeError:Import attribute type '{ty}' is not supported")
+        );
+    }
+    assert_eq!(
+        eval(&mut *e, realm, "typeof ran"),
+        Value::string("undefined")
+    );
+    // The static form fails the load the same way, before the host is asked.
+    host.add_module(
+        "app/main.js",
+        "import s from './style.css' with { type: 'css' };",
+    );
+    let p = e.load_module(realm, "app/main.js").unwrap();
+    e.run_jobs(realm).unwrap();
+    assert!(matches!(
+        e.promise_state(realm, &p).unwrap(),
+        PromiseState::Rejected(_)
+    ));
+    assert!(!host
+        .resolve_calls
+        .borrow()
+        .iter()
+        .any(|(_, s, _)| s == "./style.css"));
+    assert_eq!(
+        eval(&mut *e, realm, "typeof ran"),
+        Value::string("undefined")
+    );
+}

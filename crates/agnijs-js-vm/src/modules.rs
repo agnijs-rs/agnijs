@@ -203,13 +203,32 @@ impl Vm {
                     .syntax_error(&format!("Import attribute '{}' is not supported", a.key));
             }
         }
+        // `json` is the only module type (ADR 0025). Any other type is
+        // refused rather than loaded as JavaScript: an importer that asks
+        // for `css` or `text` must not get code run in its place.
+        let mut wants_json = false;
+        for a in attributes {
+            if a.value != "json" {
+                return self.type_error(&format!(
+                    "Import attribute type '{}' is not supported",
+                    a.value
+                ));
+            }
+            wants_json = true;
+        }
         let host = self.host.clone();
         let resolved = match host.resolve_module(referrer, specifier, attributes) {
             Ok(r) => r,
             Err(msg) => return self.type_error(&msg),
         };
-        if let Some(m) = self.modules.get(&(realm, resolved.clone())) {
-            return Ok(*m);
+        if let Some(&m) = self.modules.get(&(realm, resolved.clone())) {
+            // The record is shared by every request that resolves to this
+            // specifier, so a `type: "json"` request must still get a JSON
+            // module when a plain import loaded the specifier first.
+            if wants_json && record(self, m).code.is_some() {
+                return self.type_error(&format!("Module '{resolved}' is not a JSON module"));
+            }
+            return Ok(m);
         }
         let source = match host.load_module(&resolved) {
             Ok(s) => s,
@@ -224,9 +243,6 @@ impl Vm {
             }
             other => other,
         };
-        let wants_json = attributes
-            .iter()
-            .any(|a| a.key == "type" && a.value == "json");
         let module = match source {
             ModuleSource::Source(text) | ModuleSource::SourceWithMap { source: text, .. } => {
                 if wants_json {
@@ -240,6 +256,9 @@ impl Vm {
                 self.new_module_record(realm, &resolved, Some(code), None)
             }
             ModuleSource::Bytecode(bytes) => {
+                if wants_json {
+                    return self.type_error(&format!("Module '{resolved}' is not a JSON module"));
+                }
                 let code = match self.load_bytecode(&bytes, true) {
                     Ok(crate::engine::Decoded::Module(c)) => c,
                     Ok(_) => {

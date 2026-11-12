@@ -36,3 +36,7 @@ The question (TASK-103.14) is whether that belongs in AgniJS or in each embedder
 - Embedders opt in by adding the crate. Builds that do not, pay nothing, and the engine's dependency graph is unchanged.
 - The resolver is tested against a documented fixture tree under `crates/agnijs-js-resolve/tests/fixtures`, plus a test that drives a real host through `Engine::load_module`.
 - `package.json` parsing keeps object key order, which condition matching depends on, without turning on `serde_json`'s `preserve_order` for the whole workspace.
+
+## Addendum (TASK-103.20, 2026-11-11): import maps join the crate
+
+The crate also holds `ImportMap`, a WHATWG import map resolver over URLs (ADR 0025). It is independent of `Resolver` and shares only the key-ordered JSON reader. The crate now depends on `url`; the engine crates still do not depend on the crate.

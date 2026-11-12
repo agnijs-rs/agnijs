@@ -19,9 +19,15 @@
 //!
 //! Paths are strings with `/` separators. Results are never canonicalised
 //! through symlinks.
+//!
+//! The [`ImportMap`] type is a second, independent resolver: WHATWG import
+//! maps over URLs (ADR 0025).
 
 use serde::de::{Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::fmt;
+
+mod import_map;
+pub use import_map::{ImportMap, ImportMapError};
 
 /// The file-system operations the resolver needs.
 pub trait FileSystem {
@@ -503,8 +509,8 @@ fn is_drive_path(s: &str) -> bool {
 }
 
 fn split_root(p: &str) -> (&str, &str) {
-    if p.starts_with('/') {
-        ("/", &p[1..])
+    if let Some(rest) = p.strip_prefix('/') {
+        ("/", rest)
     } else if is_drive_path(p) {
         (&p[..3], &p[3..])
     } else {
@@ -568,9 +574,9 @@ fn basename(p: &str) -> &str {
 /// package author's key order, which `serde_json::Value` does not keep
 /// without a workspace-wide feature.
 #[derive(Clone, Debug)]
-enum Json {
+pub(crate) enum Json {
     Null,
-    Bool(bool),
+    Bool,
     Num,
     Str(String),
     Arr(Vec<Json>),
@@ -597,8 +603,8 @@ impl<'de> Deserialize<'de> for Json {
             fn visit_unit<E>(self) -> std::result::Result<Json, E> {
                 Ok(Json::Null)
             }
-            fn visit_bool<E>(self, b: bool) -> std::result::Result<Json, E> {
-                Ok(Json::Bool(b))
+            fn visit_bool<E>(self, _: bool) -> std::result::Result<Json, E> {
+                Ok(Json::Bool)
             }
             fn visit_i64<E>(self, _: i64) -> std::result::Result<Json, E> {
                 Ok(Json::Num)

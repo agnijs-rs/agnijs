@@ -5,11 +5,12 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
-description = "An optional Node-style module resolver (node_modules, package.json exports and imports, extensions) for embedders' Host::resolve_module; the engine does not depend on it"
+description = "Optional module resolvers for embedders' Host::resolve_module: Node-style (node_modules, package.json exports and imports, extensions) and WHATWG import maps; the engine does not depend on it"
 
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 agnijs-engine-api.workspace = true

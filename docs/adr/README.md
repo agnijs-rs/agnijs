@@ -22,3 +22,4 @@ Crate names in these records use the current `agnijs-*` names; where a record sa
 - [22. A realm snapshot is validated data: natives go by registry index, code through the bytecode serializer, and what cannot be written is refused](0022-realm-snapshots-are-validated-data-with-natives-by-registry-index.md)
 - [23. Node-style module resolution is an optional crate in the workspace, and the engine core knows nothing of it](0023-node-style-module-resolution-is-an-optional-crate-outside-the-engine.md)
 - [24. Error stacks capture code and instruction index at creation, format on first read in the V8 format, and map through host-supplied source maps](0024-error-stacks-capture-code-and-pc-at-creation-and-format-lazily.md)
+- [25. JSON is the engine's only module type, import maps live beside the Node resolver, and decorators and ShadowRealm wait at Stage 2.7](0025-json-is-the-only-module-type-import-maps-live-beside-the-node-resolver-and-stage-2-7-proposals-wait.md)
