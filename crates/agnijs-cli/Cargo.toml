@@ -1,0 +1,32 @@
+[package]
+name = "agnijs-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "The agnijs command: run a file, evaluate code or start a REPL, with source-mapped stack traces, resource limits, bytecode, snapshots and a DevTools endpoint"
+
+# The command is a host like any embedder's: it is built on the public
+# embedding layer (agnijs) and the optional crates beside the engine. No
+# engine crate depends on it, so it stays out of the size and no-Intl builds.
+[[bin]]
+name = "agnijs"
+path = "src/main.rs"
+
+[dependencies]
+agnijs.workspace = true
+agnijs-engine-api.workspace = true
+agnijs-js-resolve.workspace = true
+agnijs-js-debugger.workspace = true
+agnijs-js-cdp.workspace = true
+# Only for its public constructor of a debuggable engine (`make_debuggee`).
+agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl"] }
+# Only to locate a syntax error in the main file: the engine reports one
+# without its position.
+agnijs-js-parser.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
+ctrlc = "3"
+

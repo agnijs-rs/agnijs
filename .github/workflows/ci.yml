@@ -189,6 +189,27 @@ jobs:
       - run: cargo miri setup
       - run: cargo miri test --locked -p agnijs-capi --lib miri_
 
+  cli:
+    # The agnijs command (TASK-103.16): its tests spawn the binary (files,
+    # stdin, eval, the REPL over a pipe, bytecode, snapshots, source maps and
+    # a DevTools client on --inspect-brk), and clippy is clean.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: cli
+      - run: cargo test --locked -p agnijs-cli
+      - run: cargo clippy --locked -p agnijs-cli --all-targets --no-deps -- -D warnings
+
   size-profiles:
     # The smaller builds docs/binary-size.md documents (TASK-103.5): the
     # engine without Intl, and with ICU4X data trimmed to a locale list,

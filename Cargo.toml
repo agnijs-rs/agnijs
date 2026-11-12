@@ -17,6 +17,7 @@ members = [
     "crates/agnijs-js-resolve",
     "crates/agnijs",
     "crates/agnijs-derive",
+    "crates/agnijs-cli",
 ]
 
 [workspace.package]

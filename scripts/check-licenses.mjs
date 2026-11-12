@@ -20,6 +20,7 @@ const ALLOWED = new Set([
   'Unicode-DFS-2016',
   'CC0-1.0',
   'Unlicense',
+  'BSL-1.0', // Boost: permissive; clipboard-win and error-code, under the agnijs-cli line editor on Windows
   'MPL-2.0', // weak copyleft, file-level; none expected, listed so a hit is a review prompt
 ]);
 

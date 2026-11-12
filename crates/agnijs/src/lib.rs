@@ -104,7 +104,13 @@ impl Context {
     /// A fresh engine with your own [`Host`]: module loading, console
     /// sink, clock, interrupt polling and so on.
     pub fn with_host(host: Rc<dyn Host>) -> Context {
-        let engine = agnijs_js_vm::make_engine(host);
+        Self::from_engine(agnijs_js_vm::make_engine(host))
+    }
+
+    /// A context over an engine you constructed: one restored from a
+    /// snapshot, a debuggable one, or another implementation of the engine
+    /// interface. The context works in the engine's main realm.
+    pub fn from_engine(engine: Box<dyn Engine>) -> Context {
         let realm = engine.main_realm();
         Context {
             engine,
@@ -112,6 +118,16 @@ impl Context {
             exec: asynch::Executor::new(),
             classes: HashMap::new(),
         }
+    }
+
+    /// A context whose engine is restored from a realm snapshot taken with
+    /// [`Engine::snapshot`] (ADR 0022). The bytes are untrusted: a snapshot
+    /// from another engine build or damaged bytes fail with
+    /// [`Error::Engine`].
+    pub fn from_snapshot(host: Rc<dyn Host>, snapshot: &[u8]) -> Result<Context> {
+        Ok(Self::from_engine(agnijs_js_vm::make_engine_from_snapshot(
+            host, snapshot,
+        )?))
     }
 
     /// The engine interface, for anything this crate does not wrap.

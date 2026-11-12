@@ -31,6 +31,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | `agnijs-js-test262` | The test262 runner, baselines and the ADR 0016 boundary tests |
 | `agnijs-js-bench` | Micro-benchmarks and the benchmark protocol |
 | `agnijs-engine-quickjs` | An adapter over QuickJS-NG, used as a comparison engine |
+| `agnijs-cli` | The `agnijs` command: run files, stdin and `eval`, a REPL, bytecode and snapshots, `--inspect` ([README](crates/agnijs-cli/README.md)) |
 
 The specification is [`docs/js-engine-spec.md`](docs/js-engine-spec.md); decisions are recorded as ADRs in [`docs/adr`](docs/adr). Performance findings are in [`docs/js-engine-performance-findings.md`](docs/js-engine-performance-findings.md).
 
