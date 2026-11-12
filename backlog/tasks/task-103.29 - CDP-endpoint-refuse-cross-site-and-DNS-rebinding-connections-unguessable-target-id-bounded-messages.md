@@ -3,11 +3,11 @@ id: TASK-103.29
 title: >-
   CDP endpoint: refuse cross-site and DNS-rebinding connections, unguessable
   target id, bounded messages
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12T06:25:00Z'
-updated_date: '2026-11-12T14:52:00Z'
+updated_date: '2026-11-12T15:42:00Z'
 labels:
   - ready-for-agent
   - security
@@ -27,11 +27,11 @@ Found by the security review (TASK-103.9, docs/security-model.md). `CdpServer` (
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The HTTP discovery routes and the WebSocket upgrade refuse a Host header that is not an IP literal or localhost, and refuse a browser Origin unless the embedder allows it
-- [ ] #2 The target id in the WebSocket path is random per server and not derivable from the port
-- [ ] #3 Reassembled WebSocket messages have a total size limit, and exceeding it closes the connection
-- [ ] #4 Listening on a non-loopback address requires an explicit opt-in in the API, and the CLI warns when given one
-- [ ] #5 Tests cover a wrong Host, a cross-site Origin, a guessed id and an oversized fragmented message
+- [x] #1 The HTTP discovery routes and the WebSocket upgrade refuse a Host header that is not an IP literal or localhost, and refuse a browser Origin unless the embedder allows it
+- [x] #2 The target id in the WebSocket path is random per server and not derivable from the port
+- [x] #3 Reassembled WebSocket messages have a total size limit, and exceeding it closes the connection
+- [x] #4 Listening on a non-loopback address requires an explicit opt-in in the API, and the CLI warns when given one
+- [x] #5 Tests cover a wrong Host, a cross-site Origin, a guessed id and an oversized fragmented message
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -50,3 +50,9 @@ Found by the security review (TASK-103.9, docs/security-model.md). `CdpServer` (
 <!-- SECTION:NOTES:BEGIN -->
 Red: the new tests need CdpOptions/listen_with, so they did not compile against the old server; the old server had none of the checks. Green: agnijs-js-cdp 4 unit + 3 cdp_client + 8 endpoint_security, agnijs-cli 24 integration + 3 unit (incl. only_non_loopback_addresses_are_remote) pass. clippy -D warnings clean on agnijs-js-cdp and agnijs-cli (--no-deps; dependency crates have warnings that were already there under the current clippy). rustfmt: new test file and inspect.rs fully formatted; server.rs/ws.rs only my hunks (remaining diffs are lines that were already there). cargo check --workspace --all-targets clean. test262 default: 43192 passed, 0 regressions. No engine code touched, so no precompile/snapshot/intl402/QuickJS runs. Randomness: no new dependency; the id is SipHash over std RandomState's OS-seeded keys (two hashes, 122 random bits). Also capped the HTTP request head at 64 KiB (small, related). The CLI warning is unit-tested via remote_addresses() rather than by binding 0.0.0.0 in a test (avoids firewall prompts).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+CdpServer refuses a Host that is not an IP literal or localhost (403 on /json routes and the upgrade) and any Origin except the DevTools front end's or ones allowed via CdpOptions::allow_origin. The target id is a random v4 UUID per server, so guessed paths get 404. Reassembled WebSocket messages are capped (64 MiB default, CdpOptions::max_message_size). An oversize frame is refused before its payload is allocated, and the server closes with 1009. listen() refuses non-loopback addresses; listen_with + CdpOptions::allow_remote opts in, and the CLI warns and opts in when given one. The HTTP request head is capped at 64 KiB. docs/security-model.md now describes these protections. Verification: endpoint_security.rs (8 tests: wrong Host, cross-site Origin, allowed Origin, guessed id, oversize fragmented and single-frame messages, loopback opt-in), the cdp_client and CLI suites, clippy -D warnings on touched crates, workspace check, default test262 (0 regressions), CI run 43241743610 all green. Commit 60d8c31. Limits: the checks stop web pages, not other local processes; a remote client that uses a host name instead of an IP is refused, as in Node.
+<!-- SECTION:FINAL_SUMMARY:END -->
