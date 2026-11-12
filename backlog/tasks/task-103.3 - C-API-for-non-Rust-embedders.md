@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09T02:14:00Z'
-updated_date: '2026-11-10T21:56:00Z'
+updated_date: '2026-11-12T04:12:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -25,7 +25,7 @@ A stable C API next to the Rust one so C, C++, Swift, Go, Python, Zig and other 
 - [x] #2 A C test suite and a small non-Rust example (for example Swift or Python via ctypes) run in CI; a leak and sanitizer run is clean
 - [x] #3 An ABI and versioning policy is documented and enforced by a header-drift check
 - [x] #4 No panic can escape or abort the host: clippy denies unwrap, expect, panic, indexing and slicing in the C API crate; every extern function is wrapped in catch_unwind and maps a panic to an error result; the crate builds with panic=unwind; a fault-injection test forces panics at each entry point, and malformed input, invalid handles, double frees and use after teardown all return errors, with the process surviving and a poisoned handle failing safely
-- [x] #5 Before the C API is stable, every reachable panic in the engine core public paths is audited: fuzzing the engine interface with arbitrary scripts, bytecode and handle sequences finds no panic, and any found are fixed in the engine
+- [ ] #5 Before the C API is stable, every reachable panic in the engine core public paths is audited: fuzzing the engine interface with arbitrary scripts, bytecode and handle sequences finds no panic, and any found are fixed in the engine
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -85,4 +85,8 @@ Known limits:
 - The macOS static link libraries are as listed in c/CMakeLists.txt; CI is green with them.
 
 2026-11-10: AC1 closed by TASK-103.1. The C API now has fuel (ABI 1.1): agnijs_set_fuel, agnijs_clear_fuel, agnijs_get_fuel and status AGNIJS_OUT_OF_FUEL, plus agnijs_set_random_seed for deterministic runs. Header regenerated; covered by the C test, basics.rs and fault_injection.rs. Docs: docs/c-api.md and an ADR 0021 addendum.
+
+2026-11-11 verification against origin/main 1d172aa (read-only, no build): AC1-4 hold. Header crates/agnijs-capi/include/agnijs.h is cbindgen-generated at ABI 1.2 (AGNIJS_ABI_VERSION_MINOR 2, agnijs_set_source_map and agnijs_sink_set_source_map, documented in docs/c-api.md); crate-type cdylib+staticlib+rlib; CI jobs capi (fault-injection tests, release fuzz, CMake/ctest on three OSes) and capi-checks (cbindgen 0.29.4 drift check via git diff --exit-code, clippy -D warnings, ASan/LSan ctest, Miri miri_ tests); lint denies in lib.rs and compile_error under cfg(panic=abort). Last completed main CI runs are green.
+
+AC5 unchecked: it does NOT hold. TASK-103.24's panic is reachable through the C API: agnijs_compile_module on a module with an import, then agnijs_eval_bytecode on the result. Engine::eval_bytecode (agnijs-js-vm engine.rs ~642) builds a module record without loading its requests and calls link_module; inner_module_linking skips the unloaded (None) requests via flatten(), then initialize_environment hits expect("unloaded module request") (modules.rs ~577). The C API's ffi guard catches it, so the host survives (AC4 still holds), but the call returns AGNIJS_ERR_PANIC and poisons the engine. That is an engine-core panic on a public path, which AC5 forbids, and the FFI fuzz does not generate module bytecode with imports. Close AC5 and this task when TASK-103.24 lands (its AC1 and AC3 cover the fix and the fuzz case).
 <!-- SECTION:NOTES:END -->
