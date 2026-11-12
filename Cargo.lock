@@ -30,7 +30,6 @@ dependencies = [
  "agnijs-engine-api",
  "agnijs-js-cdp",
  "agnijs-js-debugger",
- "agnijs-js-parser",
  "agnijs-js-resolve",
  "agnijs-js-vm",
  "clap",

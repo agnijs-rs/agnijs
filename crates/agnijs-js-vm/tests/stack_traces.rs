@@ -206,3 +206,78 @@ fn a_malformed_source_map_is_ignored() {
     let out = eval_str(&mut vm, "bad.js", "new Error('m').stack");
     assert_eq!(out, "Error: m\n    at bad.js:1:1");
 }
+
+// ---- syntax errors keep their position (TASK-103.24) ----
+
+/// `*` of `+*` on line 2 is the error: 1-based column 12.
+const BAD: &str = "let a = 1;\nlet b = a +* 2;\n";
+
+fn syntax_exception(r: agnijs_engine_api::Result<impl std::fmt::Debug>) -> agnijs_engine_api::Exception {
+    match r {
+        Err(agnijs_engine_api::Error::Exception(x)) => x,
+        other => panic!("{other:?}"),
+    }
+}
+
+fn stack_text(e: &mut dyn Engine, v: &ApiValue) -> String {
+    let realm = e.main_realm();
+    match e.get(realm, v, &"stack".into()).unwrap() {
+        ApiValue::String(s) => s.to_string_lossy(),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn at(script: &str, line: u32, column: u32) -> agnijs_engine_api::StackFrame {
+    agnijs_engine_api::StackFrame {
+        function: String::new(),
+        script: script.into(),
+        line,
+        column,
+    }
+}
+
+#[test]
+fn a_syntax_error_reports_its_position_to_the_host() {
+    let mut e = agnijs_js_vm::make_engine(TestHost::new());
+    let realm = e.main_realm();
+    let x = syntax_exception(e.eval_script(realm, "s.js", BAD));
+    assert_eq!(x.name, "SyntaxError");
+    assert_eq!(x.stack, vec![at("s.js", 2, 12)]);
+    let text = stack_text(&mut *e, &x.value);
+    assert_eq!(text, format!("SyntaxError: {}\n    at s.js:2:12", x.message));
+    let x = syntax_exception(e.compile_script(realm, "c.js", BAD));
+    assert_eq!(x.stack, vec![at("c.js", 2, 12)]);
+    let x = syntax_exception(e.compile_module(realm, "m.js", BAD));
+    assert_eq!(x.stack, vec![at("m.js", 2, 12)]);
+    // Columns count UTF-16 units, as for runtime errors.
+    let x = syntax_exception(e.eval_script(realm, "u.js", "let s = '\u{1F600}' +* 2;"));
+    assert_eq!(x.stack, vec![at("u.js", 1, 15)]);
+}
+
+#[test]
+fn a_syntax_error_in_a_loaded_module_carries_its_position() {
+    let host = TestHost::new();
+    host.add_module("app/main.js", "import './bad.js';");
+    host.add_module("app/bad.js", BAD);
+    let mut e = agnijs_js_vm::make_engine(host);
+    let realm = e.main_realm();
+    let p = e.load_module(realm, "app/main.js").unwrap();
+    e.run_jobs(realm).unwrap();
+    let reason = match e.promise_state(realm, &p).unwrap() {
+        agnijs_engine_api::PromiseState::Rejected(r) => r,
+        other => panic!("{other:?}"),
+    };
+    let text = stack_text(&mut *e, &reason);
+    assert!(text.starts_with("SyntaxError: "), "{text}");
+    assert!(text.ends_with("\n    at app/bad.js:2:12"), "{text}");
+}
+
+#[test]
+fn a_syntax_error_position_goes_through_the_source_map() {
+    let mut e = agnijs_js_vm::make_engine(TestHost::new());
+    let realm = e.main_realm();
+    e.set_source_map("gen.js", Some(MAP)).unwrap();
+    // `}` at generated 2:0 (0-based), which the map places at 20:0.
+    let x = syntax_exception(e.eval_script(realm, "gen.js", "x;\n}"));
+    assert_eq!(x.stack, vec![at("src/orig.ts", 20, 1)]);
+}

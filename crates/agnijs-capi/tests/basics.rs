@@ -628,6 +628,68 @@ fn bytecode_saves_and_loads() {
     free_engine(e2);
 }
 
+fn module_image(e: AgnijsEngine, specifier: &str, src: &str) -> Vec<u8> {
+    let r = realm(e);
+    let mut b = 0;
+    let st = unsafe {
+        agnijs_compile_module(e, r, specifier.as_ptr().cast(), specifier.len(), src.as_ptr().cast(), src.len(), &mut b)
+    };
+    assert_eq!(st, AGNIJS_OK, "{}", last_error());
+    let (mut p, mut n) = (ptr::null(), 0usize);
+    assert_eq!(unsafe { agnijs_buffer_data(e, b, &mut p, &mut n) }, AGNIJS_OK);
+    let bytes = unsafe { std::slice::from_raw_parts(p, n) }.to_vec();
+    assert_eq!(agnijs_buffer_free(e, b), AGNIJS_OK);
+    bytes
+}
+
+/// TASK-103.24: module bytecode with imports used to panic in the engine
+/// (caught here as `AGNIJS_ERR_PANIC`, poisoning the engine).
+#[test]
+fn eval_bytecode_of_a_module_with_imports_loads_them_through_the_hooks() {
+    let e = module_engine();
+    let r = realm(e);
+    let ok = module_image(e, "mem:/app.js", "import { two } from './dep.js'; globalThis.got = two * 21;");
+    let mut p = 0;
+    let st = unsafe { agnijs_eval_bytecode(e, r, ok.as_ptr(), ok.len(), &mut p) };
+    assert_eq!(st, AGNIJS_OK, "{}", last_error());
+    unsafe { agnijs_run_jobs(e, r, ptr::null_mut()) };
+    let (mut state, mut v) = (0, 0);
+    unsafe { agnijs_promise_state(e, r, p, &mut state, &mut v) };
+    assert_eq!(state, AGNIJS_PROMISE_FULFILLED);
+    assert_eq!(eval_display(e, "got"), "42");
+    // An import the hook cannot load is an exception, not a panic, and the
+    // engine stays usable.
+    let broken = module_image(e, "mem:/broken.js", "import { x } from './missing.js'; globalThis.x = x;");
+    let st = unsafe { agnijs_eval_bytecode(e, r, broken.as_ptr(), broken.len(), &mut p) };
+    assert_eq!(st, AGNIJS_EXCEPTION, "{}", last_error());
+    let (_, message, _) = take_exception(e);
+    assert!(message.contains("no module mem:/missing.js"), "{message}");
+    assert_eq!(eval_display(e, "1 + 1"), "2");
+    free_engine(e);
+}
+
+#[test]
+fn a_syntax_error_carries_its_position_in_the_exception_frames() {
+    let e = engine();
+    let (st, _) = eval_status(e, "let a = 1;\nlet b = a +* 2;\n");
+    assert_eq!(st, AGNIJS_EXCEPTION);
+    let mut ex = AgnijsException {
+        struct_size: std::mem::size_of::<AgnijsException>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(unsafe { agnijs_take_exception(e, &mut ex) }, AGNIJS_OK);
+    assert_eq!(ex.frame_count, 1);
+    let (mut p, mut n) = (ptr::null(), 0usize);
+    assert_eq!(unsafe { agnijs_buffer_data(e, ex.stack, &mut p, &mut n) }, AGNIJS_OK);
+    let stack = String::from_utf8(unsafe { std::slice::from_raw_parts(p, n) }.to_vec()).unwrap();
+    assert_eq!(stack, "<anonymous> (test.js:2:12)");
+    for b in [ex.name, ex.message, ex.stack] {
+        assert_eq!(agnijs_buffer_free(e, b), AGNIJS_OK);
+    }
+    free(e, ex.value);
+    free_engine(e);
+}
+
 // ---- realms, limits and interrupts ------------------------------------------------------
 
 #[test]

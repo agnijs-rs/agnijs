@@ -292,3 +292,85 @@ fn a_corrupt_payload_is_refused_without_running() {
         "nothing ran from a refused container"
     );
 }
+
+// ---- module bytecode with imports through eval_bytecode (TASK-103.24) ----
+
+const MAIN_WITH_IMPORTS: &str = "import { dep } from './dep.js';\n\
+     import * as lib from './lib.js';\n\
+     export { dep } from './dep.js';\n\
+     globalThis.total = dep + lib.lib;";
+
+fn module_bytecode(specifier: &str, source: &str) -> Vec<u8> {
+    let (_host, mut compiler, realm) = engine();
+    compiler.compile_module(realm, specifier, source).unwrap()
+}
+
+fn fulfilled(e: &mut dyn Engine, realm: RealmId, p: &Value) -> Value {
+    e.run_jobs(realm).unwrap();
+    match e.promise_state(realm, p).unwrap() {
+        PromiseState::Fulfilled(v) => v,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn eval_bytecode_loads_a_modules_imports_through_the_host() {
+    let bytes = module_bytecode("app/main.js", MAIN_WITH_IMPORTS);
+    let (host, mut e, realm) = engine();
+    host.add_module("app/dep.js", "export const dep = 21;");
+    host.add_module("app/lib.js", "export const lib = 21;");
+    let p = e.eval_bytecode(realm, &bytes).unwrap();
+    fulfilled(&mut *e, realm, &p);
+    assert_eq!(eval(&mut *e, realm, "total"), Value::Number(42.0));
+    // The imports were resolved against the module's own name.
+    let calls = host.resolve_calls.borrow();
+    assert!(calls
+        .iter()
+        .any(|(referrer, spec, _)| referrer.as_deref() == Some("app/main.js") && spec == "./dep.js"));
+}
+
+#[test]
+fn eval_bytecode_of_a_module_whose_import_does_not_load_is_an_error() {
+    let bytes = module_bytecode("app/main.js", MAIN_WITH_IMPORTS);
+    let (host, mut e, realm) = engine();
+    host.add_module("app/lib.js", "export const lib = 21;");
+    match e.eval_bytecode(realm, &bytes) {
+        Err(Error::Exception(x)) => {
+            assert!(x.message.contains("module not found: app/dep.js"), "{x:?}")
+        }
+        other => panic!("{other:?}"),
+    }
+    // The engine is intact, and the load is retried once the host has it.
+    assert_eq!(eval(&mut *e, realm, "1 + 1"), Value::Number(2.0));
+    host.add_module("app/dep.js", "export const dep = 21;");
+    let p = e.eval_bytecode(realm, &bytes).unwrap();
+    fulfilled(&mut *e, realm, &p);
+    assert_eq!(eval(&mut *e, realm, "total"), Value::Number(42.0));
+}
+
+#[test]
+fn a_module_graph_that_failed_to_load_is_never_linked_half_loaded() {
+    // a imports b and c, b imports a back, c is missing: b finished loading
+    // its own requests before c failed, so the cached graph is partial.
+    let (host, mut e, realm) = engine();
+    host.add_module(
+        "a.js",
+        "import { b } from 'b.js'; import { c } from 'c.js'; export const a = 1; globalThis.sum = () => b + c;",
+    );
+    host.add_module("b.js", "import { a } from 'a.js'; export const b = 20;");
+    let rejected = |e: &mut dyn Engine, specifier: &str| {
+        let p = e.load_module(realm, specifier).unwrap();
+        e.run_jobs(realm).unwrap();
+        match e.promise_state(realm, &p).unwrap() {
+            PromiseState::Rejected(_) => {}
+            other => panic!("{specifier}: {other:?}"),
+        }
+    };
+    rejected(&mut *e, "a.js");
+    // Reaching the partial graph through b, whose own requests all loaded.
+    rejected(&mut *e, "b.js");
+    host.add_module("c.js", "export const c = 21;");
+    let p = e.load_module(realm, "b.js").unwrap();
+    fulfilled(&mut *e, realm, &p);
+    assert_eq!(eval(&mut *e, realm, "sum()"), Value::Number(41.0));
+}

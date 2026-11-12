@@ -112,6 +112,24 @@ fn a_syntax_error_shows_where_it_is() {
     assert!(e.contains("SyntaxError:"), "{e}");
 }
 
+/// The position comes from the engine's error (TASK-103.24), so it is
+/// shown for code that is not a file and for an imported module too.
+#[test]
+fn a_syntax_error_in_eval_code_or_an_imported_module_shows_where_it_is() {
+    let d = dir("syntax-more");
+    let o = agnijs(&d, &["eval", "let x = 1;\nx +* 2"]);
+    assert_eq!(code(&o), 1);
+    let e = err(&o);
+    assert!(e.contains("[eval]:2\nx +* 2\n   ^\n"), "{e}");
+    write(&d, "main.mjs", "import './dep.mjs';\n");
+    write(&d, "dep.mjs", "export const a = 1;\nexport const = 2;\n");
+    let o = agnijs(&d, &["main.mjs"]);
+    assert_eq!(code(&o), 1);
+    let e = err(&o);
+    assert!(e.contains("dep.mjs:2\nexport const = 2;\n"), "{e}");
+    assert!(e.contains("SyntaxError:"), "{e}");
+}
+
 #[test]
 fn an_unhandled_rejection_fails_the_run() {
     let d = dir("rejection");

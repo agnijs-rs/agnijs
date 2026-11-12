@@ -204,7 +204,7 @@ fn host_class_constructor_methods_and_errors() {
         .set(realm, &g, &"fromRust".into(), &obj)
         .unwrap();
     assert_eq!(js.eval::<i64>("fromRust.deposit(1)").unwrap(), 10);
-    assert_eq!(js.eval::<bool>("fromRust instanceof Acc").unwrap(), true);
+    assert!(js.eval::<bool>("fromRust instanceof Acc").unwrap());
     assert_eq!(js.host_object::<Account>(&obj).unwrap().balance, 10);
 }
 

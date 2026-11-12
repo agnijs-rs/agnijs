@@ -1,11 +1,11 @@
 ---
 id: TASK-103.3
 title: C API for non-Rust embedders
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T02:14:00Z'
-updated_date: '2026-11-12T04:12:00Z'
+updated_date: '2026-11-12T05:29:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -25,7 +25,7 @@ A stable C API next to the Rust one so C, C++, Swift, Go, Python, Zig and other 
 - [x] #2 A C test suite and a small non-Rust example (for example Swift or Python via ctypes) run in CI; a leak and sanitizer run is clean
 - [x] #3 An ABI and versioning policy is documented and enforced by a header-drift check
 - [x] #4 No panic can escape or abort the host: clippy denies unwrap, expect, panic, indexing and slicing in the C API crate; every extern function is wrapped in catch_unwind and maps a panic to an error result; the crate builds with panic=unwind; a fault-injection test forces panics at each entry point, and malformed input, invalid handles, double frees and use after teardown all return errors, with the process surviving and a poisoned handle failing safely
-- [ ] #5 Before the C API is stable, every reachable panic in the engine core public paths is audited: fuzzing the engine interface with arbitrary scripts, bytecode and handle sequences finds no panic, and any found are fixed in the engine
+- [x] #5 Before the C API is stable, every reachable panic in the engine core public paths is audited: fuzzing the engine interface with arbitrary scripts, bytecode and handle sequences finds no panic, and any found are fixed in the engine
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -89,4 +89,12 @@ Known limits:
 2026-11-11 verification against origin/main 1d172aa (read-only, no build): AC1-4 hold. Header crates/agnijs-capi/include/agnijs.h is cbindgen-generated at ABI 1.2 (AGNIJS_ABI_VERSION_MINOR 2, agnijs_set_source_map and agnijs_sink_set_source_map, documented in docs/c-api.md); crate-type cdylib+staticlib+rlib; CI jobs capi (fault-injection tests, release fuzz, CMake/ctest on three OSes) and capi-checks (cbindgen 0.29.4 drift check via git diff --exit-code, clippy -D warnings, ASan/LSan ctest, Miri miri_ tests); lint denies in lib.rs and compile_error under cfg(panic=abort). Last completed main CI runs are green.
 
 AC5 unchecked: it does NOT hold. TASK-103.24's panic is reachable through the C API: agnijs_compile_module on a module with an import, then agnijs_eval_bytecode on the result. Engine::eval_bytecode (agnijs-js-vm engine.rs ~642) builds a module record without loading its requests and calls link_module; inner_module_linking skips the unloaded (None) requests via flatten(), then initialize_environment hits expect("unloaded module request") (modules.rs ~577). The C API's ffi guard catches it, so the host survives (AC4 still holds), but the call returns AGNIJS_ERR_PANIC and poisons the engine. That is an engine-core panic on a public path, which AC5 forbids, and the FFI fuzz does not generate module bytecode with imports. Close AC5 and this task when TASK-103.24 lands (its AC1 and AC3 cover the fix and the fuzz case).
+
+2026-11-12: AC5 closed by TASK-103.24. agnijs_compile_module of a module with imports followed by agnijs_eval_bytecode now loads the imports through the host's hooks (OK, or AGNIJS_EXCEPTION when one does not load) instead of AGNIJS_ERR_PANIC; the engine-core cause (a half-loaded module record linked after a failed load) is fixed by following ECMA-262's 'new' module status, and the neighbouring host-reachable panics in linking, evaluation, LdaImport and import.meta return errors. The FFI fuzz now has module_bytecode_with_imports_never_panics (module images with imports, cycles, JSON, TLA, throwing and flaky dependencies, bit-flipped images, release, run_jobs, GC) next to the existing script/bytecode/handle fuzz; it and the fault-injection suite pass, as do test262 default/--precompile/--snapshot/--only-intl402 and QuickJS-NG with 0 regressions.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+C API for non-Rust embedders (crates/agnijs-capi): a cbindgen-generated, versioned C header with static and dynamic libraries covering realms, script and module evaluation, values and handles, host functions and classes, jobs and timers, limits and fuel, and bytecode load and save. A panic never escapes: clippy denies unwrap/expect/panic/indexing/slicing in the crate, every extern fn runs under catch_unwind and poisons the engine on a caught panic, panic=abort is refused, and fault injection forces a panic at each entry point. The ABI policy is enforced by a header-drift check in CI, with a C test suite, examples, ASan/LSan and Miri runs. AC5 (no reachable panic in the engine core public paths) holds since TASK-103.24 fixed the eval_bytecode module-import panic and extended the fuzz to module bytecode with imports; fuzzing scripts, bytecode, module images and handle sequences finds no panic.
+<!-- SECTION:FINAL_SUMMARY:END -->

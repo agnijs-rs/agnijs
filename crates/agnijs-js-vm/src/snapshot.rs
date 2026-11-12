@@ -2017,6 +2017,7 @@ fn read_object(
             1 => Class::Error(Some(Box::new(crate::stack_trace::ErrorStack {
                 frames: Vec::new(),
                 formatted: Some(t.value(r, false)?),
+                origin: None,
             }))),
             _ => return corrupt("an error stack flag other than 0 or 1"),
         },

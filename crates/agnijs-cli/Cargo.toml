@@ -24,7 +24,6 @@ agnijs-js-cdp.workspace = true
 agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl"] }
 # Only to locate a syntax error in the main file: the engine reports one
 # without its position.
-agnijs-js-parser.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 rustyline = { version = "19", default-features = false, features = ["with-file-history"] }

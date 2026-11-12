@@ -95,6 +95,9 @@ impl CapturedFrame {
 pub struct ErrorStack {
     pub frames: Vec<CapturedFrame>,
     pub formatted: Option<Value>,
+    /// Where a syntax error is in the code that failed to compile: the
+    /// first `at` line of its trace and the first frame the host sees.
+    pub origin: Option<Box<StackFrame>>,
 }
 
 impl ErrorStack {
@@ -272,10 +275,16 @@ impl Vm {
     /// source map when the host registered one.
     fn mapped_position(&mut self, code: &CodeBlock, pc: u32) -> Position {
         let p = self.generated_position(code, pc);
+        self.through_source_map(p)
+    }
+
+    /// `p`, in the script it names, through that script's source map when
+    /// the host registered one.
+    fn through_source_map(&mut self, p: Position) -> Position {
         if self.stacks.source_maps.is_empty() {
             return p;
         }
-        let Some(map) = self.source_map(&code.source.name) else {
+        let Some(map) = self.source_map(&p.file) else {
             return p;
         };
         match map.lookup(p.line - 1, p.column - 1) {
@@ -397,7 +406,62 @@ impl Vm {
             *slot = Some(Box::new(ErrorStack {
                 frames,
                 formatted: None,
+                origin: None,
             }));
+        }
+    }
+
+    /// The SyntaxError for code named `name` that failed to compile, with
+    /// the position of the error (1-based line, UTF-16 column, through the
+    /// script's source map) as the first line of its trace and the first
+    /// frame the host sees (TASK-103.24).
+    pub fn compile_error_value(
+        &mut self,
+        name: &str,
+        source: &str,
+        e: &agnijs_js_compiler::CompileError,
+    ) -> Value {
+        let v = self.make_error(crate::vm::ErrorType::SyntaxError, &e.message);
+        let mut off = (e.span.start as usize).min(source.len());
+        while !source.is_char_boundary(off) {
+            off -= 1;
+        }
+        let line_start = source[..off].rfind('\n').map_or(0, |i| i + 1);
+        let line = source[..line_start].bytes().filter(|&b| b == b'\n').count();
+        let column = source[line_start..off].encode_utf16().count();
+        let p = self.through_source_map(Position {
+            file: name.to_string(),
+            line: u32::try_from(line).unwrap_or(u32::MAX - 1) + 1,
+            column: u32::try_from(column).unwrap_or(u32::MAX - 1) + 1,
+        });
+        let origin = Box::new(StackFrame {
+            function: String::new(),
+            script: p.file,
+            line: p.line,
+            column: p.column,
+        });
+        if let Value::Object(o) = v {
+            if let Class::Error(slot) = &mut self.heap.obj_mut(o).class {
+                match slot {
+                    Some(s) => s.origin = Some(origin),
+                    None => {
+                        *slot = Some(Box::new(ErrorStack {
+                            frames: Vec::new(),
+                            formatted: None,
+                            origin: Some(origin),
+                        }))
+                    }
+                }
+            }
+        }
+        v
+    }
+
+    /// The compile-error position of error object `o`, if it has one.
+    pub(crate) fn error_origin(&self, o: ObjId) -> Option<StackFrame> {
+        match &self.heap.obj(o).class {
+            Class::Error(Some(s)) => s.origin.as_deref().cloned(),
+            _ => None,
         }
     }
 
@@ -535,6 +599,9 @@ impl Vm {
 
     fn default_stack_text(&mut self, o: ObjId, frames: &[CapturedFrame]) -> String {
         let mut s = self.stack_header(o);
+        if let Some(at) = self.error_origin(o) {
+            s.push_str(&format!("\n    at {}:{}:{}", at.script, at.line, at.column));
+        }
         for f in frames {
             self.frame_line(f, &mut s);
         }
@@ -825,6 +892,7 @@ pub fn capture_stack_trace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             *slot = Some(Box::new(ErrorStack {
                 frames,
                 formatted: None,
+                origin: None,
             }));
             return Ok(Value::Undefined);
         }

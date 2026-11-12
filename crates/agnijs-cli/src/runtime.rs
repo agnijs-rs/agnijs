@@ -72,10 +72,10 @@ pub struct Runtime {
     /// The REPL prints every uncaught value as `Uncaught ...`, without a
     /// code frame.
     pub repl_mode: bool,
-    /// The main file's name, source and whether it is a module: the engine
-    /// reports a syntax error without its position, so the command parses
-    /// the file again to show where it is.
-    main_source: Option<(String, String, bool)>,
+    /// The main file's name and source, for the code frame of an error in
+    /// code the engine has no source for: a script that did not compile,
+    /// or `[eval]` and `[stdin]`, which are not files.
+    main_source: Option<(String, String)>,
 }
 
 /// A value the REPL or `eval --print` shows.
@@ -228,7 +228,7 @@ impl Runtime {
         if let Some(map) = host::source_map_for(name, source) {
             let _ = self.ctx.engine().set_source_map(name, Some(&map));
         }
-        self.main_source = Some((name.to_string(), source.to_string(), false));
+        self.main_source = Some((name.to_string(), source.to_string()));
         let realm = self.realm();
         let r = self.ctx.engine().eval_script(realm, name, source);
         let v = self.check(r)?;
@@ -239,7 +239,7 @@ impl Runtime {
     /// Load the module `specifier` (a path, or a virtual module the host
     /// serves), then run the event loop and report how its evaluation ended.
     pub fn run_module(&mut self, specifier: &str, source: &str) -> Result<Shown, Failure> {
-        self.main_source = Some((specifier.to_string(), source.to_string(), true));
+        self.main_source = Some((specifier.to_string(), source.to_string()));
         let realm = self.realm();
         let r = self.ctx.engine().load_module(realm, specifier);
         let p = self.check(r)?;
@@ -442,7 +442,7 @@ impl Runtime {
             return;
         }
         let mut out = String::new();
-        if let Some(frame) = self.code_frame(value).or_else(|| self.syntax_frame(value)) {
+        if let Some(frame) = self.code_frame(value) {
             out.push_str(&frame);
             out.push('\n');
         }
@@ -478,8 +478,15 @@ impl Runtime {
         if script.starts_with("agnijs:") {
             return None;
         }
+        let main = self
+            .main_source
+            .as_ref()
+            .filter(|(name, _)| *name == script)
+            .map(|(_, text)| text.clone());
+        let engine = self.ctx.engine();
         let source = engine
             .script_source(realm, &script)
+            .or(main)
             .or_else(|| std::fs::read_to_string(&script).ok())?;
         let text = source.lines().nth(line.checked_sub(1)?)?;
         let col = column.saturating_sub(1);
@@ -489,35 +496,6 @@ impl Runtime {
             .map(|c| if c == '\t' { '\t' } else { ' ' })
             .collect();
         Some(format!("{script}:{line}\n{text}\n{pad}^\n"))
-    }
-}
-
-impl Runtime {
-    /// For a `SyntaxError` in the main file, the code frame of the parse
-    /// error found by parsing it again.
-    fn syntax_frame(&mut self, value: &Value) -> Option<String> {
-        let realm = self.realm();
-        let name = self.ctx.engine().get(realm, value, &"name".into()).ok()?;
-        if !matches!(&name, Value::String(s) if s.to_string_lossy() == "SyntaxError") {
-            return None;
-        }
-        let (file, source, module) = self.main_source.as_ref()?;
-        let err = if *module {
-            agnijs_js_parser::parse_module(source).err()?
-        } else {
-            agnijs_js_parser::parse_script(source).err()?
-        };
-        let at = (err.span.start as usize).min(source.len());
-        let line_start = source[..at].rfind('\n').map_or(0, |i| i + 1);
-        let line_no = source[..line_start].matches('\n').count() + 1;
-        let text = source[line_start..].lines().next().unwrap_or("");
-        let col = source[line_start..at].chars().count();
-        let pad: String = text
-            .chars()
-            .take(col)
-            .map(|c| if c == '\t' { '\t' } else { ' ' })
-            .collect();
-        Some(format!("{file}:{line_no}\n{text}\n{pad}^\n"))
     }
 }
 

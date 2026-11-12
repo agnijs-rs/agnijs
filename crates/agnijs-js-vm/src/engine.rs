@@ -362,7 +362,13 @@ impl Vm {
                 let (name, message) = self.exception_name_message(v);
                 let unwound = std::mem::take(&mut self.throw_stack);
                 self.throw_stack_value = None;
-                let stack = self.resolve_unwound(unwound);
+                let mut stack = self.resolve_unwound(unwound);
+                // A syntax error's position comes first, as in its trace.
+                if let Value::Object(o) = v {
+                    if let Some(at) = self.error_origin(o) {
+                        stack.insert(0, at);
+                    }
+                }
                 let value = self.to_api_value(v);
                 Error::Exception(Exception {
                     value,
@@ -472,10 +478,18 @@ impl Vm {
         }
     }
 
-    fn syntax_error_value(&mut self, realm: RealmId, message: &str) -> Error {
+    /// The host's error for `source`, named `name`, failing to compile:
+    /// a SyntaxError of `realm` that carries the error's position.
+    fn syntax_error_value(
+        &mut self,
+        realm: RealmId,
+        name: &str,
+        source: &str,
+        e: &agnijs_js_compiler::CompileError,
+    ) -> Error {
         let saved = self.current_realm;
         self.current_realm = realm;
-        let v = self.make_error(ErrorType::SyntaxError, message);
+        let v = self.compile_error_value(name, source, e);
         self.current_realm = saved;
         let e = self.fault_to_error(Fault::Throw(v));
         if self.debug_hot && self.frames.is_empty() {
@@ -566,7 +580,7 @@ impl Engine for Vm {
         self.check_realm(realm)?;
         let code = match agnijs_js_compiler::compile_script(source, name) {
             Ok(c) => c,
-            Err(e) => return Err(self.syntax_error_value(realm, &e.message)),
+            Err(e) => return Err(self.syntax_error_value(realm, name, source, &e)),
         };
         self.note_script(&code, agnijs_js_debugger::ScriptKind::Script, realm);
         self.realms[realm.0 as usize]
@@ -610,7 +624,7 @@ impl Engine for Vm {
         self.check_realm(realm)?;
         match agnijs_js_compiler::compile_script(source, name) {
             Ok(code) => Ok(encode_bytecode(false, &code)),
-            Err(e) => Err(self.syntax_error_value(realm, &e.message)),
+            Err(e) => Err(self.syntax_error_value(realm, name, source, &e)),
         }
     }
 
@@ -623,7 +637,7 @@ impl Engine for Vm {
         self.check_realm(realm)?;
         match agnijs_js_compiler::compile_module(source, specifier) {
             Ok(code) => Ok(encode_bytecode(true, &code)),
-            Err(e) => Err(self.syntax_error_value(realm, &e.message)),
+            Err(e) => Err(self.syntax_error_value(realm, specifier, source, &e)),
         }
     }
 
@@ -650,6 +664,10 @@ impl Engine for Vm {
                             m
                         }
                     };
+                    // Its imports load through the host's hooks, as for a
+                    // module the host's loader answered with this bytecode.
+                    // A failure is returned like a link failure.
+                    vm.load_requested_modules(m)?;
                     vm.link_module(m)?;
                     vm.evaluate_module(m)
                 })?;

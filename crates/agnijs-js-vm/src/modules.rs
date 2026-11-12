@@ -55,6 +55,11 @@ pub struct ModuleRecord {
     pub error: Option<Value>,
     /// Resolved records, parallel to `ModuleInfo::requested`.
     pub requested: Vec<Option<ObjId>>,
+    /// Every module this one requests, directly or not, has loaded: the
+    /// record has left ECMA-262's `new` status. A load that fails leaves
+    /// the records it visited unloaded, so the next load retries them
+    /// rather than linking a partial graph.
+    pub loaded: bool,
     /// Resolved named imports, parallel to `ModuleInfo::imports`.
     pub import_bindings: Vec<Option<Binding>>,
     /// The default export of a synthetic module.
@@ -197,6 +202,81 @@ impl Vm {
         specifier: &str,
         attributes: &[ImportAttribute],
     ) -> JsResult<ObjId> {
+        let mut visited = Vec::new();
+        let m = self.load_module_request(realm, referrer, specifier, attributes, &mut visited)?;
+        self.mark_loaded(&visited);
+        Ok(m)
+    }
+
+    /// LoadRequestedModules(module) for a record made from already
+    /// compiled code (`Engine::eval_bytecode`): its requests are resolved
+    /// against its own name and loaded through the host's hooks, exactly as
+    /// if the host had answered a load with it.
+    pub fn load_requested_modules(&mut self, module: ObjId) -> JsResult<()> {
+        let mut visited = Vec::new();
+        self.load_requests_of(module, &mut visited)?;
+        self.mark_loaded(&visited);
+        Ok(())
+    }
+
+    /// The whole graph below each visited record loaded.
+    fn mark_loaded(&mut self, visited: &[ObjId]) {
+        for &m in visited {
+            record_mut(self, m).loaded = true;
+        }
+    }
+
+    /// InnerModuleLoading: load the requests of `module` that are not
+    /// loaded yet, and descend into loaded ones that are still `new`.
+    /// `visited` holds the records this load has already entered (cycles).
+    fn load_requests_of(&mut self, module: ObjId, visited: &mut Vec<ObjId>) -> JsResult<()> {
+        if record(self, module).loaded || visited.contains(&module) {
+            return Ok(());
+        }
+        visited.push(module);
+        let Some(code) = record(self, module).code.clone() else {
+            return Ok(());
+        };
+        let Some(info) = code.module.clone() else {
+            return self.type_error("Module code without module information");
+        };
+        let (realm, referrer) = {
+            let r = record(self, module);
+            (r.realm, r.specifier.clone())
+        };
+        for (i, req) in info.requested.iter().enumerate() {
+            match record(self, module).requested.get(i).copied().flatten() {
+                Some(dep) => self.load_requests_of(dep, visited)?,
+                None => {
+                    let spec = self.module_specifier_string(&req.specifier);
+                    let attrs: Vec<ImportAttribute> = req
+                        .attributes
+                        .iter()
+                        .map(|(k, v)| ImportAttribute {
+                            key: String::from_utf16_lossy(k),
+                            value: String::from_utf16_lossy(v),
+                        })
+                        .collect();
+                    let dep =
+                        self.load_module_request(realm, Some(&referrer), &spec, &attrs, visited)?;
+                    if let Some(slot) = record_mut(self, module).requested.get_mut(i) {
+                        *slot = Some(dep);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// HostLoadImportedModule for one request, then its own requests.
+    fn load_module_request(
+        &mut self,
+        realm: RealmId,
+        referrer: Option<&str>,
+        specifier: &str,
+        attributes: &[ImportAttribute],
+        visited: &mut Vec<ObjId>,
+    ) -> JsResult<ObjId> {
         for a in attributes {
             if a.key != "type" {
                 return self
@@ -228,6 +308,9 @@ impl Vm {
             if wants_json && record(self, m).code.is_some() {
                 return self.type_error(&format!("Module '{resolved}' is not a JSON module"));
             }
+            // A record an earlier, failed load left behind retries what it
+            // could not load then.
+            self.load_requests_of(m, visited)?;
             return Ok(m);
         }
         let source = match host.load_module(&resolved) {
@@ -250,7 +333,9 @@ impl Vm {
                 }
                 let code = match agnijs_js_compiler::compile_module(&text, &resolved) {
                     Ok(c) => c,
-                    Err(e) => return self.syntax_error(&e.message),
+                    Err(e) => {
+                        return Err(Fault::Throw(self.compile_error_value(&resolved, &text, &e)))
+                    }
                 };
                 self.note_script(&code, agnijs_js_debugger::ScriptKind::Module, realm);
                 self.new_module_record(realm, &resolved, Some(code), None)
@@ -279,26 +364,7 @@ impl Vm {
         };
         self.modules.insert((realm, resolved.clone()), module);
         // Load what the module requests.
-        let code = record(self, module).code.clone();
-        if let Some(code) = code {
-            let info = code
-                .module
-                .clone()
-                .expect("module code without module info");
-            for (i, req) in info.requested.iter().enumerate() {
-                let spec = self.module_specifier_string(&req.specifier);
-                let attrs: Vec<ImportAttribute> = req
-                    .attributes
-                    .iter()
-                    .map(|(k, v)| ImportAttribute {
-                        key: String::from_utf16_lossy(k),
-                        value: String::from_utf16_lossy(v),
-                    })
-                    .collect();
-                let dep = self.load_module_graph(realm, Some(&resolved), &spec, &attrs)?;
-                record_mut(self, module).requested[i] = Some(dep);
-            }
-        }
+        self.load_requests_of(module, visited)?;
         Ok(module)
     }
 
@@ -310,10 +376,11 @@ impl Vm {
         synthetic: Option<Value>,
     ) -> ObjId {
         let (n_req, n_imp, has_tla) = match &code {
-            Some(c) => {
-                let info = c.module.as_ref().expect("module code without module info");
-                (info.requested.len(), info.imports.len(), info.has_tla)
-            }
+            Some(c) => match c.module.as_ref() {
+                Some(info) => (info.requested.len(), info.imports.len(), info.has_tla),
+                // Refused at link time.
+                None => (0, 0, false),
+            },
             None => (0, 0, false),
         };
         let rec = ModuleRecord {
@@ -326,6 +393,7 @@ impl Vm {
             status: ModuleStatus::Unlinked,
             error: None,
             requested: vec![None; n_req],
+            loaded: n_req == 0,
             import_bindings: vec![None; n_imp],
             synthetic_value: synthetic,
             import_meta: None,
@@ -525,8 +593,14 @@ impl Vm {
         }
         index += 1;
         stack.push(module);
+        if !record(self, module).loaded {
+            return self.unloaded_request_error(module);
+        }
         let requested = record(self, module).requested.clone();
-        for req in requested.into_iter().flatten() {
+        for req in requested {
+            let Some(req) = req else {
+                return self.unloaded_request_error(module);
+            };
             index = self.inner_module_linking(req, stack, index)?;
             let rs = record(self, req).status;
             if rs == ModuleStatus::Linking {
@@ -549,12 +623,22 @@ impl Vm {
         Ok(index)
     }
 
+    /// Linking reached a record whose requests did not all load. Loading
+    /// leaves no such record reachable from a module that loaded, so this
+    /// guards the invariant rather than reporting a host error.
+    fn unloaded_request_error<T>(&mut self, module: ObjId) -> JsResult<T> {
+        let spec = record(self, module).specifier.clone();
+        self.type_error(&format!("Module '{spec}' cannot be linked: its imports have not loaded"))
+    }
+
     /// InitializeEnvironment(module).
     fn initialize_environment(&mut self, module: ObjId) -> JsResult<()> {
         let Some(code) = record(self, module).code.clone() else {
             return Ok(());
         };
-        let info = code.module.clone().unwrap();
+        let Some(info) = code.module.clone() else {
+            return self.type_error("Module code without module information");
+        };
         // Indirect exports must resolve.
         for e in &info.indirect_exports {
             let name = e.export_name.clone().unwrap();
@@ -574,7 +658,9 @@ impl Vm {
         record_mut(self, module).env = Some(env);
         // Imports.
         for (i, imp) in info.imports.iter().enumerate() {
-            let req = record(self, module).requested[imp.request].expect("unloaded module request");
+            let Some(req) = record(self, module).requested.get(imp.request).copied().flatten() else {
+                return self.unloaded_request_error(module);
+            };
             match &imp.import_name {
                 None => {
                     let ns = self.get_module_namespace(req)?;
@@ -678,7 +764,12 @@ impl Vm {
             }
             ModuleStatus::Evaluating => return Ok(index),
             ModuleStatus::Linked => {}
-            other => panic!("evaluating a module in state {other:?}"),
+            other => {
+                let spec = record(self, module).specifier.clone();
+                return self.type_error(&format!(
+                    "Module '{spec}' cannot be evaluated: it is {other:?}, not linked"
+                ));
+            }
         }
         {
             let r = record_mut(self, module);
@@ -745,7 +836,9 @@ impl Vm {
 
     /// ExecuteModule(module) for a synchronous module body.
     fn execute_module(&mut self, module: ObjId) -> JsResult<()> {
-        let f = record(self, module).function.expect("unlinked module");
+        let Some(f) = record(self, module).function else {
+            return self.type_error("Module is not linked");
+        };
         let saved = self.current_realm;
         self.current_realm = record(self, module).realm;
         let r = self.call_value(Value::Object(f), Value::Undefined, &[]);
@@ -755,13 +848,15 @@ impl Vm {
 
     /// ExecuteAsyncModule(module).
     fn execute_async_module(&mut self, module: ObjId) -> JsResult<()> {
-        let f = record(self, module).function.expect("unlinked module");
+        let Some(f) = record(self, module).function else {
+            return self.type_error("Module is not linked");
+        };
         let saved = self.current_realm;
         self.current_realm = record(self, module).realm;
         let p = self.call_value(Value::Object(f), Value::Undefined, &[]);
         self.current_realm = saved;
         let Value::Object(p) = p? else {
-            unreachable!("async module body did not return a promise")
+            return self.type_error("Async module body did not return a promise");
         };
         let on_ok = vm_closure(self, async_module_fulfilled, module);
         let on_err = vm_closure(self, async_module_rejected, module);
@@ -978,16 +1073,21 @@ fn async_module_rejected(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 /// `LdaImport(idx)`: the value of named import `idx` of the running module.
 pub fn load_import(vm: &mut Vm, fi: usize, idx: u32) -> JsResult<Value> {
-    let module = vm.frames[fi].module.expect("LdaImport outside module code");
-    let b = record(vm, module).import_bindings[idx as usize].expect("unresolved import binding");
+    // Only hand-made bytecode reaches either error.
+    let Some(module) = vm.frames[fi].module else {
+        return vm.syntax_error("Import binding read outside module code");
+    };
+    let Some(b) = record(vm, module).import_bindings.get(idx as usize).copied().flatten() else {
+        return vm.reference_error("Unresolved import binding");
+    };
     vm.binding_value(b)
 }
 
 /// `import.meta` of the running module.
 pub fn import_meta(vm: &mut Vm, fi: usize) -> JsResult<Value> {
-    let module = vm.frames[fi]
-        .module
-        .expect("import.meta outside module code");
+    let Some(module) = vm.frames[fi].module else {
+        return vm.syntax_error("import.meta outside module code");
+    };
     if let Some(m) = record(vm, module).import_meta {
         return Ok(Value::Object(m));
     }

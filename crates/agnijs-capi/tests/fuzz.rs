@@ -20,7 +20,7 @@ use agnijs_capi::*;
 use agnijs_engine_api::{Engine, Host};
 use common::*;
 use std::cell::Cell;
-use std::ffi::c_void;
+use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::rc::Rc;
 
@@ -573,5 +573,142 @@ fn mutated_bytecode_is_refused_or_runs() {
             _ => {}
         }
     }
+    free_engine(e);
+}
+
+// ---- module bytecode with imports (TASK-103.24) ----
+
+thread_local! {
+    /// Whether the load hook serves `mem:/flaky.js` right now.
+    static FLAKY: Cell<bool> = const { Cell::new(false) };
+}
+
+unsafe extern "C-unwind" fn fuzz_resolve(_: *mut c_void, _: *const c_char, _: usize, spec: *const c_char, len: usize, sink: AgnijsSink) -> AgnijsStatus {
+    let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(spec.cast::<u8>(), len) }).into_owned();
+    let full = format!("mem:/{}", s.trim_start_matches("./"));
+    unsafe { agnijs_sink_set_string(sink, full.as_ptr().cast(), full.len()) }
+}
+
+unsafe extern "C-unwind" fn fuzz_load(_: *mut c_void, name: *const c_char, len: usize, sink: AgnijsSink) -> AgnijsStatus {
+    let s = String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(name.cast::<u8>(), len) }).into_owned();
+    let (kind, text) = match s.as_str() {
+        "mem:/dep.js" => (AGNIJS_MODULE_SOURCE, "export const two = 2; export default 'd';"),
+        "mem:/star.js" => (AGNIJS_MODULE_SOURCE, "export * from './dep.js'; export * as ns from './dep.js';"),
+        "mem:/cyc_a.js" => (AGNIJS_MODULE_SOURCE, "import { b } from './cyc_b.js'; export const a = 1; export function fa() { return b; }"),
+        "mem:/cyc_b.js" => (AGNIJS_MODULE_SOURCE, "import { a, fa } from './cyc_a.js'; export const b = 2; export const viaA = () => a + fa();"),
+        "mem:/bad.js" => (AGNIJS_MODULE_SOURCE, "export const = ;"),
+        "mem:/d.json" => (AGNIJS_MODULE_JSON, "{\"x\": [1, 2]}"),
+        "mem:/tla.js" => (AGNIJS_MODULE_SOURCE, "export const late = await Promise.resolve(3);"),
+        "mem:/throws.js" => (AGNIJS_MODULE_SOURCE, "throw new Error('dep threw');"),
+        "mem:/flaky.js" if FLAKY.with(Cell::get) => (AGNIJS_MODULE_SOURCE, "import { missing } from './missing.js'; export const f = 7;"),
+        _ => {
+            let m = format!("no module {s}");
+            unsafe { agnijs_sink_set_error(sink, m.as_ptr().cast(), m.len()) };
+            return AGNIJS_ERR_NOT_FOUND;
+        }
+    };
+    unsafe { agnijs_sink_set_module(sink, kind, text.as_ptr(), text.len()) }
+}
+
+/// Modules with every kind of request: named, namespace, default, star and
+/// indirect re-exports, cycles, JSON, top-level await, a dependency that
+/// throws, one that does not parse, one that is missing, one that comes
+/// and goes, a missing export, dynamic import, and another image's name.
+const MODULE_CORPUS: &[&str] = &[
+    "import { two } from './dep.js'; globalThis.r0 = two;",
+    "import * as s from './star.js'; globalThis.r1 = s.two + s.ns.two;",
+    "import { a, fa } from './cyc_a.js'; import { viaA } from './cyc_b.js'; globalThis.r2 = viaA() + a + fa();",
+    "import './bad.js';",
+    "import data from './d.json' with { type: 'json' }; globalThis.r4 = data.x;",
+    "import { late } from './tla.js'; globalThis.r5 = late + (await 1);",
+    "import './throws.js';",
+    "import { f } from './flaky.js'; globalThis.r7 = f;",
+    "import { nope } from './dep.js'; globalThis.r8 = nope;",
+    "import { x } from './missing.js'; globalThis.r9 = x;",
+    "export { two as default } from './dep.js'; export * from './star.js'; globalThis.r10 = import.meta;",
+    "import('./flaky.js').then(m => { globalThis.r11 = m.f; }, e => { globalThis.r11 = String(e); });",
+    "import d from './img0.js'; globalThis.r12 = d;",
+    "import './dep.js' with { type: 'json' };",
+    "import dflt, * as all from './dep.js'; export { dflt }; export const both = [dflt, all.two];",
+];
+
+#[test]
+fn module_bytecode_with_imports_never_panics() {
+    let mut rng = Rng(seed() ^ 0x40D5);
+    let polls = Cell::new(0u32);
+    let mut o = options();
+    o.memory_limit = 64 << 20;
+    o.interrupt = Some(poll_budget);
+    o.now_ms = Some(zero_clock);
+    o.user_data = &polls as *const Cell<u32> as *mut c_void;
+    o.resolve_module = Some(fuzz_resolve);
+    o.load_module = Some(fuzz_load);
+    let e = engine_with(&o);
+    let r = realm(e);
+    let images: Vec<(String, Vec<u8>)> = MODULE_CORPUS
+        .iter()
+        .enumerate()
+        .map(|(i, src)| {
+            let name = format!("mem:/img{i}.js");
+            let mut buf = 0;
+            let st = unsafe { agnijs_compile_module(e, r, name.as_ptr().cast(), name.len(), src.as_ptr().cast(), src.len(), &mut buf) };
+            assert_eq!(st, AGNIJS_OK, "{src}: {}", last_error());
+            let mut p: *const u8 = ptr::null();
+            let mut n = 0;
+            assert_eq!(unsafe { agnijs_buffer_data(e, buf, &mut p, &mut n) }, AGNIJS_OK);
+            let bytes = unsafe { std::slice::from_raw_parts(p, n) }.to_vec();
+            assert_eq!(agnijs_buffer_free(e, buf), AGNIJS_OK);
+            (name, bytes)
+        })
+        .collect();
+    let deps = ["mem:/dep.js", "mem:/star.js", "mem:/cyc_a.js", "mem:/cyc_b.js", "mem:/flaky.js", "mem:/tla.js"];
+    let (mut ran, mut threw) = (0, 0);
+    for _ in 0..iterations(800) {
+        polls.set(0);
+        match rng.below(10) {
+            0..=5 => {
+                let (_, image) = rng.pick(&images);
+                let mut img = image.clone();
+                if rng.chance(4) && !img.is_empty() {
+                    let at = rng.below(img.len());
+                    img[at] ^= 1 << rng.below(8);
+                }
+                let mut v = 0;
+                let st = unsafe { agnijs_eval_bytecode(e, r, img.as_ptr(), img.len(), &mut v) };
+                assert!(known(st), "status {st}: {}", last_error());
+                match st {
+                    AGNIJS_OK => {
+                        ran += 1;
+                        free(e, v);
+                    }
+                    AGNIJS_EXCEPTION => {
+                        threw += 1;
+                        take_exception(e);
+                    }
+                    _ => {}
+                }
+            }
+            6 => FLAKY.with(|f| f.set(!f.get())),
+            7 => {
+                let spec = if rng.chance(2) { rng.pick(&images).0.as_str() } else { *rng.pick(&deps) };
+                let st = unsafe { agnijs_release_module(e, r, spec.as_ptr().cast(), spec.len(), ptr::null_mut()) };
+                assert_eq!(st, AGNIJS_OK, "{}", last_error());
+            }
+            8 => {
+                let st = unsafe { agnijs_run_jobs(e, r, ptr::null_mut()) };
+                assert!(known(st), "status {st}: {}", last_error());
+                if st == AGNIJS_EXCEPTION {
+                    take_exception(e);
+                }
+            }
+            _ => {
+                let st = agnijs_collect_garbage(e);
+                assert_eq!(st, AGNIJS_OK, "{}", last_error());
+            }
+        }
+    }
+    assert!(ran > 0 && threw > 0, "ran {ran}, threw {threw}");
+    // Still a working engine.
+    assert_eq!(eval_display(e, "6 * 7"), "42");
     free_engine(e);
 }
