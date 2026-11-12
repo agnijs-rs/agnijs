@@ -2,7 +2,7 @@
 
 This page says what an embedder can rely on when AgniJS runs code it does not trust, what it cannot rely on, and what it must do itself. Each claim names the code or the test behind it. Where the engine falls short of what a sandbox needs, the gap is stated next to the claim with the task that tracks it. Read those gaps before you rely on a limit.
 
-AgniJS is pre-release. This page describes `main` as of TASK-103.9 (November 2026).
+AgniJS is pre-release. This page describes `main` as of TASK-103.27 (November 2026).
 
 ## Threat model
 
@@ -103,7 +103,7 @@ This guards against accidents, not attackers: see [Bytecode and snapshots are tr
 
 ## Limits
 
-None of these limits is on by default except the interpreter's frame caps and the regex routing. A host that runs untrusted code sets them.
+Only the interpreter's frame caps, the native stack budget and the regex routing are on by default. A host that runs untrusted code sets the others.
 
 ### Memory limit
 
@@ -170,12 +170,31 @@ The collection threshold is capped at the distance to the limit (`rearm_threshol
 - **Frame caps.** The interpreter caps JavaScript frames at 20,000 (`MAX_FRAMES`) and nested native reentry at 1,200 (`MAX_NATIVE_DEPTH`, `vm.rs`). Past either cap, a catchable `RangeError: Maximum call stack size exceeded` is thrown (`push_frame` in `interp/mod.rs`, `Vm::in_native`).
 - **Stack budget.** The parser, the compiler, the regex parser and recursive built-ins (JSON, `flat`, proxies, bound functions) stop at a native stack budget (`agnijs_js_parser::stack`, from `crates/agnijs-js-regex/src/stack.rs`, checked by `Vm::check_stack`).
 
-**How it is enforced.** The C API installs the budget around every call (`engine_op` in `crates/agnijs-capi/src/registry.rs`). The default is 512 KiB, and the caller needs 256 KiB of headroom beyond it. Tests: `deeply_nested_source_fails_cleanly_on_a_small_stack` and `the_stack_budget_option_is_checked_and_sets_the_depth` in `crates/agnijs-capi/tests/hostile.rs`. The regex backtracker uses an explicit stack, so no pattern or input recurses on the native stack (`backtrack.rs`; `crates/agnijs-js-regex/tests/nesting.rs`).
+**How it is enforced.** Every engine installs the budget around each call from the host that compiles or runs code: `Vm::enter`, `eval_script`, `compile_script`, `compile_module` and `eval_bytecode` in `crates/agnijs-js-vm/src/engine.rs`. That covers `agnijs::Context::new` and `with_host`, `agnijs_js_vm::make_engine`, `Vm::new`, snapshot restores, debuggees and the CLI. The default is 512 KiB (`agnijs_js_parser::stack::DEFAULT_BUDGET`). The engine may use up to 256 KiB more before it notices (`HEADROOM`), so a call needs 768 KiB of free stack: a 2 MiB thread (the Rust default) and a 1 MiB one (the Windows main thread) both have it. A host function that calls back into the engine keeps the outer, tighter limit, so reentry never adds stack. The C API installs the same budget in `engine_op` (`crates/agnijs-capi/src/registry.rs`) and hands its `stack_budget` option to the engine. Tests:
 
-**What it does not cover.** Without a budget, `exhausted()` is always false. Neither `agnijs::Context`, `agnijs_js_vm::make_engine` nor the CLI installs one. In the Rust API, therefore, 300,000 nested `[` in a script, or the same text passed to `JSON.parse`, overflows a 2 MiB thread's stack and ends the process. A probe confirmed both. Until TASK-103.27, a Rust embedder that takes untrusted source must do one of two things:
+- `crates/agnijs-js-vm/tests/stack_budget.rs` and `crates/agnijs/tests/stack_budget.rs`: 300,000-deep array literals, 30,000 nested functions, deep `JSON.parse`, `eval`, `Function`, `JSON.stringify`, `flat`, proxies and regex groups through `Vm::new`, `make_engine`, `Context::new` and `Context::with_host`, on 2 MiB and 1 MiB threads;
+- `deeply_nested_input_is_an_error_not_a_crash` in `crates/agnijs-cli/tests/cli.rs`;
+- `deeply_nested_source_fails_cleanly_on_a_small_stack` and `the_stack_budget_option_is_checked_and_sets_the_depth` in `crates/agnijs-capi/tests/hostile.rs`.
 
-- install `agnijs_js_parser::stack::StackBudget::enter(bytes)` around each call into the engine, on a thread with `bytes` plus 256 KiB of stack free;
-- run the engine on a thread with a stack large enough for the deepest input it accepts.
+The regex backtracker uses an explicit stack, so no pattern or input recurses on the native stack (`backtrack.rs`; `crates/agnijs-js-regex/tests/nesting.rs`).
+
+**Changing it.** `Engine::set_stack_budget(Some(bytes))` sets the budget, and `stack_budget()` reads it. A `Context` reaches them through `context.engine()`. A larger budget on a larger thread accepts deeper nesting. The deepest nesting the default accepts, measured on Windows x64 in November 2026:
+
+| Input | Release build | Debug build |
+| --- | --- | --- |
+| Array literals `[[[...]]]` | 160 | 18 |
+| Object literals `{a:{a:...}}` | 133 | 14 |
+| Function declarations | 185 | 50 |
+| Regex groups | 256 (the regex nesting limit) | 116 |
+| `JSON.parse` arrays | 1,202 | 263 |
+
+Doubling the budget roughly doubles each depth. A debug build uses about ten times the stack per level. An embedder whose own debug builds run scripts with deep nesting can raise the budget on a larger thread, or build the engine crates with `opt-level = 1` in its dev profile. `set_stack_budget(None)` opts out. The engine then installs nothing, and only a budget the host installs itself (`agnijs_js_parser::stack::StackBudget::enter` around the call) or the thread's real stack bounds the recursion.
+
+**What it does not cover.**
+
+- **Too little stack at the call.** The budget is measured from where the host calls in, not from the thread's real limit, which safe code cannot read. A call made with less than budget plus headroom free can still overflow. Call in near the top of a thread, or lower the budget.
+- **An opted-out engine.** With `None` and no budget of the host's own, deeply nested input overflows the thread's stack and ends the process.
+- **Other engines.** The QuickJS engine behind the same interface keeps its own limits and returns `Unsupported` from `set_stack_budget`.
 
 ### Regular expressions (ReDoS)
 
@@ -277,7 +296,7 @@ For code you do not trust:
 1. **One engine per trust domain**, and one process per domain where a crash or a side channel matters.
 2. **A memory limit** (`set_memory_limit`), set well below what the process can afford. It does not yet count ArrayBuffers or collection entries (TASK-103.25), so also cap the process with the operating system (a job object, cgroup or `RLIMIT_AS`) or run the engine in a child process you can kill.
 3. **A wall-clock deadline** through `Host::interrupt` (or `agnijs_engine_request_interrupt` from a watchdog thread). Add **fuel** (`set_fuel`) when you need a deterministic bound. Neither stops a long regex match or a native loop yet (TASK-103.28). A watchdog that can kill the process is the only hard bound today.
-4. **A native stack bound.** The C API sets one by default; keep the headroom free. In Rust, install `StackBudget::enter` around every call, or run on a large stack (TASK-103.27).
+4. **A native stack bound.** Every engine sets one by default; call in with the budget plus headroom free (768 KiB by default), and do not opt out with `set_stack_budget(None)`.
 5. **The regex policy.** Keep `Auto`, or pick `LinearWhenEligible`, and keep the default `linear-regex` feature. Screen untrusted patterns that use backreferences or lookaround.
 6. **No string compilation** unless the script needs it: `Host::can_compile_strings` returns false, or `AGNIJS_FLAG_NO_STRING_COMPILATION`.
 7. **Only the capabilities the script needs.** Validate and bound every host function. Confine `Host::load_module` to an allow-list or directory. Do not hand script objects from another realm or tenant.
@@ -289,7 +308,7 @@ For code you do not trust:
 
 ## Example: granting capabilities one by one
 
-The host below grants one capability, a `fetchConfig(key)` function that reads from an allow-listed map. It refuses `eval`, gives a frozen clock and a fixed seed, and serves one module from memory. It sets a memory limit, fuel and a deadline. It also installs a stack budget, as a Rust embedder must until TASK-103.27.
+The host below grants one capability, a `fetchConfig(key)` function that reads from an allow-listed map. It refuses `eval`, gives a frozen clock and a fixed seed, and serves one module from memory. It sets a memory limit, fuel and a deadline. The native stack budget is on by default, so it needs no line here.
 
 ```rust
 use agnijs::{Context, Host};
@@ -329,10 +348,6 @@ fn main() -> agnijs::Result<()> {
         "theme" => Ok("dark".to_string()),
         _ => Err(agnijs::JsError::range_error("unknown key")),
     })?;
-
-    // Rust embedders install the stack budget themselves (TASK-103.27).
-    // `agnijs` does not re-export it: depend on `agnijs-js-parser` too.
-    let _stack = agnijs_js_parser::stack::StackBudget::enter(512 * 1024);
 
     let theme: String = js.eval("fetchConfig('theme')")?;
     assert_eq!(theme, "dark");

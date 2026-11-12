@@ -318,6 +318,9 @@ pub struct Vm {
     /// stack. Bounds native recursion; a nested run loop under one records
     /// `retain_from` so the collector can run there.
     pub native_depth: u32,
+    /// The native stack budget installed around every call from the host
+    /// (`Engine::set_stack_budget`); `None` installs none.
+    pub(crate) stack_budget: Option<usize>,
     /// Retention bound of the innermost nested run loop (`Vm::run` entered
     /// while `native_depth > 0`): the heap's allocation serial at entry, or
     /// 0 at the top level. A collection treats every heap value born before
@@ -489,6 +492,7 @@ impl Vm {
             handles: HandleTable::new(engine_id),
             host,
             native_depth: 0,
+            stack_budget: Some(agnijs_js_parser::stack::DEFAULT_BUDGET),
             retain_from: 0,
             exit_gc_at: None,
             retain_at_gc: 0,

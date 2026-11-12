@@ -161,6 +161,12 @@ impl Engine for Inspected {
     fn set_random_seed(&mut self, seed: u64) -> Result<()> {
         self.e().set_random_seed(seed)
     }
+    fn set_stack_budget(&mut self, bytes: Option<usize>) -> Result<()> {
+        self.e().set_stack_budget(bytes)
+    }
+    fn stack_budget(&self) -> Option<usize> {
+        self.debuggee.borrow_mut().engine().stack_budget()
+    }
     fn collect_garbage(&mut self) {
         self.e().collect_garbage()
     }

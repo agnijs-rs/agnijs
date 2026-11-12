@@ -5,8 +5,11 @@
 //! a small host thread stack. An embedder that cannot choose its stack size
 //! (the C API) installs a budget with [`StackBudget::enter`]; the recursive
 //! paths then call [`exhausted`] and fail with an error instead of
-//! overflowing. Without a budget [`exhausted`] is always false, so the
-//! engine behaves exactly as before.
+//! overflowing. Without a budget [`exhausted`] is always false.
+//!
+//! The VM installs a budget around every call into it, [`DEFAULT_BUDGET`]
+//! unless the host sets another (`Engine::set_stack_budget`), so engines
+//! made through the Rust API are bounded by default too.
 //!
 //! The stack pointer is approximated by the address of a local, which is
 //! safe code; stacks grow downwards on every supported target.
@@ -20,6 +23,16 @@ thread_local! {
 
 /// The message used when the budget runs out.
 pub const EXHAUSTED_MESSAGE: &str = "Maximum call stack size exceeded";
+
+/// The budget an engine installs unless its host sets another: 512 KiB.
+/// With [`HEADROOM`] it needs 768 KiB of free stack at the call into the
+/// engine, so a 2 MiB thread (the Rust default) and a 1 MiB one (the
+/// Windows main thread) both have room for it beside their own frames.
+pub const DEFAULT_BUDGET: usize = 512 * 1024;
+
+/// Stack the engine may use past the budget before it notices (between
+/// checks, and to build the error). Keep this much free beyond the budget.
+pub const HEADROOM: usize = 256 * 1024;
 
 #[inline(never)]
 fn stack_position() -> usize {

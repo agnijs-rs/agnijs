@@ -18,6 +18,7 @@ use agnijs_engine_api::{
     PromiseState, PropertyKey, RealmId, TypeOf,
 };
 use agnijs_js_compiler::bytecode::CodeBlock;
+use agnijs_js_parser::stack::StackBudget;
 use std::rc::Rc;
 
 /// The format tag in the shared `AGJS` container (`agnijs_engine_api::bytecode`):
@@ -440,6 +441,13 @@ impl Vm {
         }
     }
 
+    /// The host's stack budget for one call into the engine
+    /// (`Engine::set_stack_budget`), installed until the guard drops. A
+    /// call from inside the engine keeps the outer, tighter limit.
+    fn stack_guard(&self) -> Option<StackBudget> {
+        self.stack_budget.map(StackBudget::enter)
+    }
+
     /// Run `f` as an entry from the host into `realm`.
     fn enter<T>(
         &mut self,
@@ -447,6 +455,7 @@ impl Vm {
         f: impl FnOnce(&mut Vm) -> JsResult<T>,
     ) -> api::Result<T> {
         self.check_realm(realm)?;
+        let _stack = self.stack_guard();
         self.handles.reclaim();
         let saved = self.current_realm;
         self.current_realm = realm;
@@ -578,6 +587,7 @@ impl Engine for Vm {
 
     fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<api::Value> {
         self.check_realm(realm)?;
+        let _stack = self.stack_guard();
         let code = match agnijs_js_compiler::compile_script(source, name) {
             Ok(c) => c,
             Err(e) => return Err(self.syntax_error_value(realm, name, source, &e)),
@@ -622,6 +632,7 @@ impl Engine for Vm {
 
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {
         self.check_realm(realm)?;
+        let _stack = self.stack_guard();
         match agnijs_js_compiler::compile_script(source, name) {
             Ok(code) => Ok(encode_bytecode(false, &code)),
             Err(e) => Err(self.syntax_error_value(realm, name, source, &e)),
@@ -635,6 +646,7 @@ impl Engine for Vm {
         source: &str,
     ) -> api::Result<Vec<u8>> {
         self.check_realm(realm)?;
+        let _stack = self.stack_guard();
         match agnijs_js_compiler::compile_module(source, specifier) {
             Ok(code) => Ok(encode_bytecode(true, &code)),
             Err(e) => Err(self.syntax_error_value(realm, specifier, source, &e)),
@@ -643,6 +655,7 @@ impl Engine for Vm {
 
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> api::Result<api::Value> {
         self.check_realm(realm)?;
+        let _stack = self.stack_guard();
         let decoded = self.load_bytecode(bytecode, false)?;
         match &decoded {
             Decoded::Script(code) | Decoded::Module(code) => self.verify_debug_sections(code)?,
@@ -691,6 +704,15 @@ impl Engine for Vm {
 
     fn fuel(&self) -> Option<u64> {
         Vm::fuel(self)
+    }
+
+    fn set_stack_budget(&mut self, bytes: Option<usize>) -> Result<(), Error> {
+        self.stack_budget = bytes;
+        Ok(())
+    }
+
+    fn stack_budget(&self) -> Option<usize> {
+        self.stack_budget
     }
 
     fn set_random_seed(&mut self, seed: u64) -> Result<(), Error> {

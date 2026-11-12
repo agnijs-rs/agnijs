@@ -167,6 +167,10 @@ pub unsafe extern "C" fn agnijs_engine_new(options: *const AgnijsEngineOptions, 
         let flag = Arc::new(AtomicBool::new(false));
         let host = Rc::new(CHost { engine: id, opts, interrupt_flag: flag.clone() });
         let mut engine = agnijs_js_vm::make_engine(host);
+        // The engine installs its own budget on every call as well; give it
+        // this one, so its default never tightens a larger C budget. (The
+        // VM always accepts a budget.)
+        let _ = engine.set_stack_budget(Some(stack_budget));
         if opts.memory_limit != 0 {
             engine.set_memory_limit(Some(opts.memory_limit));
         }

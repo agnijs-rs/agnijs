@@ -329,6 +329,32 @@ fn the_memory_limit_stops_a_growing_heap() {
     assert!(err(&o).contains("memory limit"), "{}", err(&o));
 }
 
+/// Deeply nested source and JSON end in an uncaught error, not a stack
+/// overflow that kills the process (TASK-103.27). The CLI runs on the main
+/// thread, 1 MiB on Windows.
+#[test]
+fn deeply_nested_input_is_an_error_not_a_crash() {
+    let d = dir("deep");
+    let deep = 300_000;
+    let src = format!("{}1{}", "[".repeat(deep), "]".repeat(deep));
+    let file = write(&d, "deep.js", &src);
+    let o = agnijs(&d, &[file.to_str().unwrap()]);
+    let e = err(&o);
+    assert_eq!(code(&o), 1, "{e}");
+    assert!(
+        e.contains("SyntaxError: Maximum call stack size exceeded"),
+        "{e}"
+    );
+    let json = format!("JSON.parse('['.repeat({deep}) + ']'.repeat({deep}))");
+    let o = agnijs(&d, &["eval", &json]);
+    let e = err(&o);
+    assert_eq!(code(&o), 1, "{e}");
+    assert!(
+        e.contains("RangeError: Maximum call stack size exceeded"),
+        "{e}"
+    );
+}
+
 #[test]
 fn the_seed_makes_math_random_reproducible() {
     let d = dir("seed");

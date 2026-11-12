@@ -176,6 +176,32 @@ pub trait Engine {
         let _ = seed;
         Err(crate::error::Error::Unsupported("random seed"))
     }
+    /// Set the native stack budget: how many bytes of the calling thread's
+    /// stack, below the point where the host calls in, the engine's
+    /// recursive parts (parser, compiler, regex parser, JSON and the other
+    /// recursive built-ins, native reentry) may use. Past it, deeply nested
+    /// input fails with a catchable `SyntaxError` or `RangeError` ("Maximum
+    /// call stack size exceeded") instead of overflowing the thread's stack,
+    /// which would end the process. The engine may use up to
+    /// `agnijs_js_parser::stack::HEADROOM` more before it notices, so call
+    /// in with at least budget plus headroom free.
+    ///
+    /// Engines start with `agnijs_js_parser::stack::DEFAULT_BUDGET`
+    /// (512 KiB), which a 2 MiB or a 1 MiB thread can afford. Raise it on a
+    /// larger stack to accept deeper nesting. `None` opts out: the engine
+    /// installs no budget, and only one the host installs itself
+    /// (`StackBudget::enter` around the call) or the thread's real stack
+    /// bounds it. A call made from inside the engine (a host function
+    /// calling back in) keeps the outer, tighter limit. Engines without a
+    /// budget return [`crate::Error::Unsupported`].
+    fn set_stack_budget(&mut self, bytes: Option<usize>) -> Result<()> {
+        let _ = bytes;
+        Err(crate::error::Error::Unsupported("stack budget"))
+    }
+    /// The native stack budget, or `None` when the engine installs none.
+    fn stack_budget(&self) -> Option<usize> {
+        None
+    }
     /// Run a full collection now.
     fn collect_garbage(&mut self);
 

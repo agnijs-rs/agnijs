@@ -26,6 +26,9 @@ impl<'s> Parser<'s> {
         top_level: bool,
         module: bool,
     ) -> Result<Statement> {
+        // Declarations (functions, classes) nest without passing through
+        // `parse_statement`, so this entry checks the budget too.
+        self.check_stack()?;
         let name = match &self.tok.kind {
             TokenKind::Ident {
                 name,

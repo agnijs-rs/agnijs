@@ -142,6 +142,9 @@ pub const AGNIJS_DEFAULT_STACK_BUDGET: usize = 512 * 1024;
 /// Stack the library may use past the budget before it notices (between
 /// checks, and to build the error). Keep this much free beyond the budget.
 pub const AGNIJS_STACK_HEADROOM: usize = 256 * 1024;
+// The C API uses the Rust engine's defaults.
+const _: () = assert!(AGNIJS_DEFAULT_STACK_BUDGET == agnijs_js_parser::stack::DEFAULT_BUDGET);
+const _: () = assert!(AGNIJS_STACK_HEADROOM == agnijs_js_parser::stack::HEADROOM);
 /// The smallest accepted nonzero [`AgnijsEngineOptions::stack_budget`].
 pub const AGNIJS_MIN_STACK_BUDGET: usize = 64 * 1024;
 

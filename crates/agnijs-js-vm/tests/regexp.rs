@@ -176,12 +176,25 @@ fn patterns_nested_to_the_limit_run_from_source_and_from_bytecode() {
             ")".repeat(depth),
             half = depth / 2,
         );
-        assert_eq!(run(false, &src), Value::string(&format!("{},true", depth + 1)));
+        // A debug build uses over 4 KiB of stack per group, more than the
+        // default 512 KiB budget allows at this depth (release builds stay
+        // within it): give these engines most of the 2 MiB, keeping the
+        // 256 KiB headroom free.
+        let budget = Some(1536 * 1024);
+        let mut vm = Vm::new(TestHost::new());
+        vm.set_stack_budget(budget).unwrap();
+        let realm = vm.main_realm();
+        assert_eq!(
+            vm.eval_script(realm, "deep.js", &src).unwrap(),
+            Value::string(&format!("{},true", depth + 1))
+        );
         let host = TestHost::new();
         let mut compiler = agnijs_js_vm::make_engine(host.clone());
+        compiler.set_stack_budget(budget).unwrap();
         let realm = compiler.main_realm();
         let bytes = compiler.compile_script(realm, "deep.js", &src).unwrap();
         let mut e = agnijs_js_vm::make_engine(TestHost::new());
+        e.set_stack_budget(budget).unwrap();
         let realm = e.main_realm();
         assert_eq!(e.eval_bytecode(realm, &bytes).unwrap(), Value::string(&format!("{},true", depth + 1)));
     });
