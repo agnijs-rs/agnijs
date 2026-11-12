@@ -253,9 +253,12 @@ fn a_tiered_loop_that_mostly_calls_out_goes_back_to_the_interpreter() {
 }
 
 #[test]
-fn a_tiered_loop_that_calls_a_function_every_iteration_goes_back_to_the_interpreter() {
-    // Mostly inline work, but each call leaves compiled code and the
-    // return enters it again, which costs more than the inline work saves.
+fn a_tiered_loop_that_calls_a_function_every_iteration_calls_it_in_machine_code() {
+    // Mostly inline work and a call of a small function. Each call used to
+    // leave compiled code, which cost more than the inline work saved, so
+    // the loop went back to the interpreter. Since TASK-101.3.3 the callee
+    // is compiled once the loop has called it often enough, and the loop
+    // then calls it without leaving compiled code.
     let src = "function h(x) { return x & 0xffff; }
                function f(o, n) { var s = 0;
                  for (var i = 0; i < n; i++) { s = s + o.x + o.y + o.x * o.y + (i & 7) * 3 + (i | 1); s = h(s); }
@@ -263,7 +266,14 @@ fn a_tiered_loop_that_calls_a_function_every_iteration_goes_back_to_the_interpre
                f({ x: 3, y: 4 }, 200000)";
     let (on, stats) = run(JitMode::On, src);
     assert_eq!(on, run(JitMode::Off, src).0);
-    assert!(stats.compiled >= 1 && stats.abandoned >= 1, "{stats:?}");
+    // Under AGNIJS_GC_STRESS every back edge and every return calls out for
+    // the safe point, and the loop is rightly given up; the value is still
+    // checked above, the bounds only hold without stress.
+    if std::env::var_os("AGNIJS_GC_STRESS").is_some() {
+        return;
+    }
+    assert!(stats.compiled >= 2 && stats.abandoned == 0, "{stats:?}");
+    assert!(stats.direct_calls > 150_000, "{stats:?}");
 }
 
 #[test]

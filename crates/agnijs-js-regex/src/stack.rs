@@ -51,6 +51,14 @@ pub fn exhausted() -> bool {
     limit != 0 && stack_position() < limit
 }
 
+/// The lowest stack address the installed budget allows, or 0 without one:
+/// for code that bounds its own use of the stack by an address (the JIT's
+/// machine frames), where the recursive paths ask [`exhausted`].
+#[inline]
+pub fn limit() -> usize {
+    LIMIT.with(Cell::get)
+}
+
 /// An installed budget; dropping it restores the previous one.
 pub struct StackBudget {
     previous: usize,

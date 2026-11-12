@@ -401,6 +401,14 @@ pub struct Heap {
     /// `ObjectData::watched`) changes its keys, attributes or prototype, or
     /// dies. It saturates; once there, no prototype entry is recorded.
     pub proto_epoch: u32,
+    /// The stamp of global bindings, for compiled code (TASK-101.3.3): it
+    /// moves whenever the address of a global binding's value may have,
+    /// which is when a key is added to or removed from any object in
+    /// dictionary mode (the global objects are) or a global lexical is
+    /// declared. Compiled code reads a global binding at the address its
+    /// site recorded only while the stamp is the one recorded with it.
+    #[cfg(feature = "jit")]
+    pub(crate) global_stamp: u64,
     /// Atoms pinned for the property keys of code-block names, kept alive
     /// as roots so the keys can be computed once per block (TASK-100.20).
     pub pinned: HashSet<StrId>,
@@ -463,6 +471,8 @@ impl Heap {
             memory_limit: None,
             single_chars: vec![None; 256],
             proto_epoch: 1,
+            #[cfg(feature = "jit")]
+            global_stamp: 0,
             pinned: HashSet::new(),
             strings_allocated: 0,
             objects_allocated: 0,
@@ -476,6 +486,14 @@ impl Heap {
     #[inline]
     pub fn bump_proto_epoch(&mut self) {
         self.proto_epoch = self.proto_epoch.saturating_add(1);
+    }
+
+    /// A dictionary gained or lost a key, or a table of global lexicals
+    /// grew: the values in it may have moved ([`Heap::global_stamp`]).
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn move_global_stamp(&mut self) {
+        self.global_stamp = self.global_stamp.wrapping_add(1);
     }
 
     /// Note a change to `obj`'s keys, attributes or prototype.

@@ -264,3 +264,85 @@ Up to eight registers that loops read or write inline are cached in Cranelift va
 ### The VM's guesses, and giving them up
 
 When a block is compiled the VM guesses that the registers its loops do arithmetic on (`number_candidates`) that hold a number, or nothing yet, in the live frame will only ever hold numbers. A guess that fails leaves through the side exit, the register is marked in the block's `Tier::demoted` and the block's code is dropped and compiled again without that guess the next time it is offered (its hotness is kept, so in mode `On` that is at once). After four failures a block stops guessing. The run that was in the old code holds its own `Rc` to it, so the replacement is safe at any point. `JitStats::speculated` and `deopts` count the guesses and the exits.
+
+## Addendum: frame push and return in machine code (TASK-101.3.3, second part)
+
+The first part of the task (the addendum "calls without leaving compiled code" above) entered a compiled callee from inside the call out, and ended with forced calls still slower than the interpreter: the cost was per-call glue in Rust, not speculation. After TASK-101.3.1 landed on top of it, that glue had grown again: at `1d172aa` the forced call workloads measured 1.27 (closures), 1.25 (calls-recursive) and 1.05 (method-calls) of the interpreter. This part removes the glue: a call of a compiled function is made by machine code. The title's "leaves compiled code for every call" is now wrong for most calls. The interpreter's frame stack stays the only one (ADR 0019 J1), and none of what follows speculates.
+
+### A call made by machine code
+
+- **The runtime describes its frame stack** (`CallLayout`), as it describes its heap (`HeapLayout`): where the frame vector and the register file keep their buffer, length and capacity, the size of a frame and the offsets of the fields a call sets, and where a function object keeps its code block, environment, realm, module and `this` mode. All of it is `offset_of!` or a difference of addresses, computed once in safe code; `None` when anything is not as compiled code reads it, and every call then goes through the runtime.
+- **A callee table per VM** (`CalleeTable`, 256 buckets of 4) maps a code block to what a call of it needs: the machine code's address, the callee's inline-cache table and code info, its register count and parameter registers, its realm, and an *image* of the frame to push, which the VM built as a `Frame` in safe code. The runtime adds a callee the first time compiled code calls it through the runtime, if its compiled code keeps no register in machine state and its block does not keep its arguments. The table is shared by every call site, so a site that calls many functions (rxjs's operator callbacks) is served as well as one that calls one.
+- **One call thunk** (`codegen::compile_thunk`) holds the sequence; a call site is the call's safe point and a call of the thunk with the instruction's operands. The thunk looks the callee's code block up in the table, checks that nothing stands in the way (no poll due, no safe point wanted, the native stack above the VM's floor, room in both vectors, the callee's inline caches of the current shape epoch, a `this` the callee takes as it is or replaces with its realm's global object), writes the caller's frame back, pushes the callee's frame by copying the image and setting the fields that differ per call, clears the callee's registers and copies the arguments it takes, and calls the callee's machine code with a context built in the thunk's own stack frame. On the return it pops the frame, counts the poll after a call returns, and gives the caller the value. Any check that fails makes the call through `Runtime::call` from the same state; a callee that leaves compiled code instead of returning makes each machine frame below it leave too, its frame materialised first.
+- **The context is split** into what a run shares (`Shared`: the runtime, its entries, the interrupt counter, the heap view) and what a frame owns (`Ctx`: its register window, accumulator, `this`, inline-cache table and point). The VM's side of the runtime is per run, and finds its frame at the top of the frame stack.
+- **Nothing new for the collector or a debugger.** A function called directly keeps nothing in machine state, so its interpreter frame is complete at every call out and it needs no frame handle. A function that does keep registers in machine state (one with a loop on numbers) is never called directly; the nested entry of the first part still runs it. The contract machine code is trusted with is two invariants beside I1 to I3, stated in `docs/design/jit-deopt-and-gc-maps.md`, section 9: a frame machine code pushes is a copy of one the runtime built, with typed fields set (I4), and machine code neither grows nor frees a vector or the last reference to a code block (I5).
+- **The native stack bound is in bytes.** Machine frames nest on the native stack now, and their size depends on the function, so the bound of 64 levels became a floor for the stack pointer, `JIT_STACK` (96 KB) below where compiled code was first entered, or the limit of the host's stack budget (`Engine::set_stack_budget`, TASK-103.27) when that is nearer. Past it a call leaves compiled code as it always could.
+
+### What else stays in compiled code
+
+- **A callee without compiled code runs in the interpreter from inside the call out** (`interpret_callee`), as a run loop that ends when its frame returns. Leaving compiled code for it unwound every machine frame on the native stack, each to be entered again from memory as the calls returned: a compiled function that called `new` on a derived class paid that at every call (Gable's signal-create entered compiled code 60,000 times an iteration).
+- **A base class's constructor compiles** like any function called with `new`. Derived constructors, generators and async functions still do not.
+- **Environment slots** (`LdaEnv`, `StaEnv`) are read and written by machine code through `EnvLayout`, from the running frame's innermost environment outwards. With the `jit` feature `Environment` is `#[repr(u8)]`.
+- **Global bindings** (`LdaGlobal`) are read at the address a `GlobalSite` holds, while the current realm and the heap's *global stamp* are the site's. The stamp moves when a key is added to or removed from any object in dictionary mode (the global objects are) and when a global lexical is declared, which is when such an address can move.
+- **Equality** (`==`, `!=`, `===`, `!==`, as values and as fused branches) is decided inline for every pair that needs neither the heap nor a conversion. Before, only two numbers were.
+- **Code that keeps nothing in machine state skips the successor check** after a call out (it has nothing to materialise).
+
+### Tiering in mode `On`
+
+Calls made by machine code change what is worth compiling, so the rules of the TASK-101.3.2 addendum gained three.
+
+- **A function without a loop can be worth compiling**: the static estimate (`profitable_for`) no longer needs a loop when calls can be made directly, counts a `Call` as one call out, not two, and counts environment and global loads as inline.
+- **But only where machine code will call it.** Entered from the interpreter, a small function costs more compiled than interpreted, and compiling costs what interpreting thousands of instructions does. So a hot function without a loop is compiled when the frame calling it is its own block's (recursion) or a compiled block's. Otherwise it waits, uncounted (`Tier::DEMAND`), and is compiled once compiled code has called it 50 times per instruction.
+- **Each block's runs are judged by what they cost against the work they do** (`jit_judge_run`): the entry from the tier loop, its call outs and the callees it ran in the interpreter, against the loop back-edges it took and the calls it made directly. A block that costs more than its work is worth is not entered from the interpreter again; its code is kept for compiled callers (`Tier::DIRECT`). The judgement is per block, where the older window was shared and reset whenever another block was judged.
+
+### Measured
+
+Same machine, method and units as the tables above: i9-9900KF, Windows 11, release builds from one path, the median over alternating rounds of each process's median sample (5 iterations after 1 warm-up), as ratios over the same binary with the JIT off. "Before" is `1d172aa`, the commit this work started from.
+
+`agnijs-js-bench` (5 rounds):
+
+| Workload | `force` before | `force` now | `on` before | `on` now |
+| --- | --- | --- | --- | --- |
+| closures | 1.26 | 0.69 | 1.00 | 0.78 |
+| calls-recursive | 1.23 | 0.38 | 0.97 | 0.37 |
+| method-calls | 1.04 | 0.77 | 0.99 | 1.02 |
+| loop-arith | 0.32 | 0.32 | 0.31 | 0.32 |
+| loop-array-index | 0.56 | 0.26 | 0.54 | 0.26 |
+| prop-monomorphic | 0.59 | 0.31 | 0.58 | 0.30 |
+| prop-polymorphic | 0.53 | 0.27 | 0.52 | 0.28 |
+| prop-write-alloc | 1.24 | 1.33 | 0.99 | 0.99 |
+| string-concat | 1.26 | 1.30 | 1.02 | 0.99 |
+| array-methods | 1.14 | 1.21 | 1.00 | 0.98 |
+| map-set | 1.05 | 1.11 | 0.97 | 1.00 |
+| regex | 1.03 | 1.03 | 0.99 | 1.05 |
+
+The other workloads are within 3% of the interpreter in mode `On`, before and now (the two sub-millisecond start-up pairs move by more between runs).
+
+Gable's benches (5 rounds, the harness of Gable `7cd58eb` built against this tree):
+
+| Bench | `force` before | `force` now | `on` before | `on` now |
+| --- | --- | --- | --- | --- |
+| rxjs-operators | 1.42 | 0.78 | 1.00 | 0.99 |
+| rxjs-higher-order | 1.33 | 1.02 | 1.01 | 1.02 |
+| rxjs-subject-fanout | 1.25 | 0.74 | 1.00 | 0.74 |
+| signal-churn | 1.29 | 1.03 | 1.00 | 1.01 |
+| signal-create | 1.33 | 1.00 | 1.02 | 0.99 |
+| template-mount | 1.32 | 1.19 | 1.00 | 1.02 |
+| template-update | 1.39 | 1.15 | 1.00 | 1.01 |
+| list-diff | 1.21 | 1.08 | 1.00 | 1.03 |
+| ui-bundle-startup | 10.2 | 10.9 | 1.00 | 1.00 |
+| geomean | 1.65 | 1.29 | 1.00 | 0.97 |
+
+- **Forced calls now beat the interpreter** on the three call workloads, by 1.3 to 2.7 times, and on two of Gable's five rxjs and signal benches. The other three (rxjs-higher-order, signal-churn, signal-create) are at the interpreter's speed, not under it: a run of 10 rounds put them at 1.03, 1.03 and 1.02, with the same binary against itself at 1.00.
+- **Mode `On` gains where calls are direct**: calls-recursive (20.6 ms, where QuickJS-NG takes 33.7 ms), closures and rxjs-subject-fanout. The loop and property workloads that read globals halved again, because the global loads in their loops are inline now.
+- **Where forced code lost a little**: workloads that are mostly call outs (prop-write-alloc, string-concat, array-methods, map-set) are 4 to 9 points slower forced than before. A call out finds its frame at the top of the frame stack now instead of being handed it, and a call of a native goes through the thunk before it reaches the runtime. Mode `On` does not compile such code.
+- **regex is 5% slower in mode `On`.** Its loop calls natives only; the estimate takes a `Call` for a call of a compiled function, so the loop is compiled (49 ms) and then given up, and the iterations after that, all interpreted, stay about 5% slower than in a process that never compiled it. Why they stay slower is not established (the allocator's state after a large compilation is the guess; the workload spends a third of its time allocating). Counting a `Call` in a loop as two again removes the loss and also the gains on closures and rxjs-subject-fanout, so it was not done; telling a call of a native from a call of a function needs call-target feedback, which the bytecode does not have yet.
+- **The interpreter without the feature is unchanged**: 25 workloads, head over `1d172aa`, built from one path, geomean 1.002 (the same binary against itself: 1.003).
+
+### What this did not reach
+
+- **Calls that are not a `Call` of a plain function.** `new`, getters and setters, and calls through `Function.prototype.call` and `apply` still push their frame in the runtime and enter the callee from inside the call out. method-calls is half getters, which is why mode `On` gains nothing there yet.
+- **Megamorphic property access.** Gable's signal-churn spends 78% of its call outs on `GetNamed` at sites with more than four shapes, which the interpreter also resolves the long way; a shared cache keyed by shape and key would serve both tiers.
+- **`typeof x === "..."`** is three call outs (`Typeof`, a string constant, a string comparison); a fused instruction in the bytecode would serve both tiers.
+- **Mode `On` on call-heavy code that is not a loop or a recursion.** Forced, rxjs-operators runs at 0.78 of the interpreter; tiered it stays at 0.99, because the functions that would call each other directly are entered from interpreted callers and are (rightly, one at a time) not compiled. Compiling a group of functions that call each other needs call-target feedback too.
+- **Compile time.** Forced, a 100 KB script still takes seconds to compile (compile-source: 8.4 s before this work, 8.9 s after), most of it in a few very large blocks.

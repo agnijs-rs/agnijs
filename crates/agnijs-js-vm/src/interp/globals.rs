@@ -170,6 +170,61 @@ impl Vm {
         None
     }
 
+    /// [`Vm::load_global_cached`], also giving where the value is: the
+    /// binding's slot in the realm's table of global lexicals or in the
+    /// global object's dictionary, which stays where it is until the
+    /// heap's global stamp moves (`Heap::global_stamp`). For compiled
+    /// code's global sites (TASK-101.3.3): the value at that address is
+    /// the binding's while it is a plain, non-empty value, and anything
+    /// else there (an accessor, a binding in its dead zone) is seen as
+    /// such.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn global_slot_cached(
+        &self,
+        code: &CodeBlock,
+        name: u32,
+    ) -> Option<(Value, &PropSlot)> {
+        let realm = self.current_realm;
+        let e = code.globals()[name as usize].get();
+        if e.realm != realm.0 || e.kind != GlobalEntry::PROPERTY {
+            return None;
+        }
+        let r = &self.realms[realm.0 as usize];
+        if e.epoch != r.epoch {
+            return None;
+        }
+        let (_, p) = self
+            .heap
+            .obj(r.global)
+            .dict
+            .as_ref()?
+            .get_index(e.index as usize)?;
+        match p.slot {
+            PropSlot::Data(v) => Some((v, &p.slot)),
+            _ => None,
+        }
+    }
+
+    /// [`Vm::global_slot_cached`] for a global lexical.
+    #[cfg(feature = "jit")]
+    #[inline]
+    pub(crate) fn global_lexical_cached(
+        &self,
+        code: &CodeBlock,
+        name: u32,
+    ) -> Option<(Value, &Value)> {
+        let realm = self.current_realm;
+        let e = code.globals()[name as usize].get();
+        if e.realm != realm.0 || e.kind != GlobalEntry::LEXICAL {
+            return None;
+        }
+        let (_, b) = self.realms[realm.0 as usize]
+            .global_lexicals
+            .get_index(e.index as usize)?;
+        (!b.value.is_empty()).then_some((b.value, &b.value))
+    }
+
     #[inline(never)]
     fn load_global_slow(
         &mut self,
@@ -856,6 +911,10 @@ impl Vm {
         // Lexical bindings start in the TDZ. A new lexical may shadow a
         // global property that some site has cached.
         if !decls.lexical.is_empty() {
+            // The table may move its bindings as it grows, and a property
+            // a site of compiled code reads directly may now be shadowed.
+            #[cfg(feature = "jit")]
+            self.heap.move_global_stamp();
             let r = &mut self.realms[realm.0 as usize];
             r.epoch = r.epoch.wrapping_add(1);
             for (n, kind) in &decls.lexical {

@@ -21,9 +21,19 @@
 //! leaves compiled code only at instruction boundaries where the frame has
 //! been made the interpreter's ([`Exit`]).
 //!
+//! Since TASK-101.3.3 compiled code also does three things the runtime
+//! did for it, when the runtime describes where they happen
+//! ([`CallLayout`]): it calls a compiled function itself, pushing the
+//! callee's frame on the runtime's own frame stack and popping it on the
+//! return ([`CalleeTable`]; the frame stack stays the single one of ADR
+//! 0019 J1), it reads and writes environment slots ([`EnvLayout`]), and it
+//! reads global bindings ([`GlobalSite`]). None of them speculates: every
+//! guard that fails runs the instruction by the runtime at the same pc.
+//!
 //! Everything here is safe code except [`exec`]-memory handling, the entry
-//! trampoline, the helper trampolines and the frame handle's reads of the
-//! spill area, which live in one small module (ADR 0019 J10).
+//! trampoline, the helper trampolines, the frame handle's reads of the
+//! spill area and the probes of how a vector, a reference count and an
+//! option are laid out, which live in one small module (ADR 0019 J10).
 
 #![deny(unsafe_code)]
 
@@ -35,6 +45,7 @@ use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind, IcSite, Instr};
 use agnijs_js_parser::ast::FunctionKind;
 
 mod analysis;
+mod calls;
 #[cfg(jit_host)]
 mod codegen;
 mod exec;
@@ -42,6 +53,7 @@ mod exec;
 pub use analysis::number_candidates;
 pub mod handoff;
 
+pub use calls::{Callee, CalleeTable, GlobalSite, MAX_FILLS, MAX_GLOBAL_FILLS};
 pub use exec::FrameHandle;
 pub use handoff::{DeoptReason, FrameState, Location, Point, PointKind, Points, SideExit};
 
@@ -155,12 +167,16 @@ pub struct HeapView {
     /// The runtime's prototype epoch: a prototype inline-cache entry hits
     /// only in the epoch it was recorded in (ADR 0012).
     pub proto_epoch: u32,
+    /// The environment arena's base ([`EnvLayout`]), null if there is
+    /// none. Like `objects`, it may move under any call out.
+    pub envs: *mut u8,
 }
 
 impl HeapView {
     pub const NONE: HeapView = HeapView {
         objects: std::ptr::null_mut(),
         proto_epoch: 0,
+        envs: std::ptr::null_mut(),
     };
 }
 
@@ -177,6 +193,166 @@ pub struct VecLayout {
 /// three copies of `sample`; `None` if it is not three distinct words.
 pub fn vec_layout<T: Copy>(sample: T) -> Option<VecLayout> {
     exec::vec_layout(sample)
+}
+
+/// [`vec_layout`] for an element type there is no sample of, found on an
+/// empty vector with spare capacity.
+pub fn vec_layout_of<T>() -> Option<VecLayout> {
+    exec::vec_layout_of::<T>()
+}
+
+/// The word an `Rc<T>` is, which is the address of its strong count: the
+/// identity of a code block in the [`CalleeTable`], and what compiled code adds
+/// one to when it pushes a frame holding a reference to the block
+/// ([`CallLayout`]). `None` if this build's `Rc` is not laid out that way
+/// (a probe of a live `Rc` decides), and then nothing is called directly.
+/// The pointer is for identity and for [`Callee::code`]; the runtime never
+/// reads through it.
+pub fn rc_word<T>(rc: &Rc<T>) -> Option<*const usize> {
+    exec::rc_word(rc)
+}
+
+/// Where compiled code finds the runtime's frame stack, register file and
+/// function objects, so that a `Call` of a compiled function pushes the
+/// callee's frame, runs its machine code and pops the frame without
+/// leaving compiled code (TASK-101.3.3). Like [`HeapLayout`], the runtime
+/// computes it once, in safe code, from its own types (`offset_of!`,
+/// [`vec_layout_of`], address differences in live values), and passes
+/// `None` to [`Compiled::compile_calling`] when any check fails; every
+/// call then goes through [`Runtime::call`]. Needs a [`HeapLayout`] too.
+/// Compiled code calls whatever the runtime's [`CalleeTable`] holds from
+/// the run it is in, so a runtime compiles every block it puts in one
+/// table with one layout.
+///
+/// A frame is `frame_size` bytes in the frame vector ([`CallView::frames`]).
+/// Compiled code pushes one by copying the image of it the callee's entry
+/// in the [`CalleeTable`] holds and then writing only these fields, each
+/// with a value of the field's own type:
+///
+/// - `frame_base`: a pointer-sized word, the index in the register file of
+///   the frame's first register;
+/// - `frame_this`: a value ([`layout`]);
+/// - `frame_argc`: a pointer-sized word, the number of arguments;
+/// - `frame_callee`: the `u32` id of the function object, inside a field
+///   the image has already made "some function";
+/// - `frame_env`, `frame_base_env` (`env_size` bytes each, 4 or 8) and
+///   `frame_module` (`module_size` bytes): copied whole from the function's
+///   data at `fn_env` and `fn_module`, which have the same types.
+///
+/// Of the caller's frame it writes `frame_pc` (a pointer-sized word: the
+/// instruction after the call) and `frame_acc` (a value), which is the
+/// write-back the runtime does before a call (ADR 0019 J1). It reads
+/// `frame_code` (the frame's reference to its code block, an `Rc` word,
+/// [`rc_word`]) and `frame_realm` (`u32`) when it pops a frame.
+///
+/// A function object is an object ([`HeapLayout`]) with class tag
+/// `class_function`, whose pointer-sized word at `function_data` (from the
+/// object's start) addresses its data: `fn_code` (the `Rc` word of its code
+/// block), `fn_env`, `fn_module`, `fn_realm` (`u32`) and `fn_this_mode`
+/// (one byte, `this_mode_global` when a null or undefined `this` becomes
+/// the realm's global object and a primitive one is boxed).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CallLayout {
+    /// The words of the frame vector and of the register vector.
+    pub frames: VecLayout,
+    pub registers: VecLayout,
+    pub frame_size: u32,
+    /// Frames the stack may hold; a call that would exceed it is the
+    /// runtime's (it raises the stack overflow).
+    pub max_frames: u32,
+    pub frame_code: u32,
+    pub frame_pc: u32,
+    pub frame_base: u32,
+    pub frame_acc: u32,
+    pub frame_this: u32,
+    pub frame_argc: u32,
+    pub frame_callee: u32,
+    pub frame_env: u32,
+    pub frame_base_env: u32,
+    pub env_size: u32,
+    pub frame_module: u32,
+    pub module_size: u32,
+    pub frame_realm: u32,
+    pub class_function: u8,
+    pub function_data: u32,
+    pub fn_code: u32,
+    pub fn_env: u32,
+    pub fn_module: u32,
+    pub fn_realm: u32,
+    pub fn_this_mode: u32,
+    pub this_mode_global: u8,
+    /// Compiled code makes calls itself. (Without it the layout still
+    /// serves what else compiled code reads through it.)
+    pub direct: bool,
+    /// Environment records, when compiled code may read and write their
+    /// slots itself (`LdaEnv`, `StaEnv`): it finds the running frame's
+    /// innermost environment in the frame, at `frame_env`.
+    pub env: Option<EnvLayout>,
+    /// The runtime keeps a stamp for its global bindings
+    /// ([`Runtime::global_stamp`]), so compiled code may read a global
+    /// binding at the address a [`GlobalSite`] holds.
+    pub globals: bool,
+}
+
+/// Where compiled code finds environment records (TASK-101.3.3), computed
+/// by the runtime like [`HeapLayout`]. Environment `id` is at
+/// `envs + id * stride + offset`, `envs` being [`HeapView::envs`]. From
+/// its start: `kind` is a byte, `declarative` for a record whose bindings
+/// are the values ([`layout`]) of a vector with its buffer pointer at
+/// `slots_ptr` and its length at `slots_len`, and whose enclosing
+/// environment is the optional id at `parent`. Any other kind is the
+/// runtime's.
+///
+/// An optional environment id (in a frame, or a record's parent) is two
+/// words of four bytes: a tag whose first byte is `opt_some` when there is
+/// an id, at `opt_tag`, and the `u32` id at `opt_id` ([`option_tag`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EnvLayout {
+    pub stride: u32,
+    pub offset: u32,
+    pub kind: u32,
+    pub declarative: u8,
+    pub slots_ptr: u32,
+    pub slots_len: u32,
+    pub parent: u32,
+    pub opt_tag: u32,
+    pub opt_some: u8,
+    pub opt_id: u32,
+}
+
+/// How an `Option<T>` of a four-byte `T` without a niche tells `Some`
+/// from `None`, for [`EnvLayout`]: the offset of its tag's first byte and
+/// that byte's value for `Some`, given the offset of the payload
+/// (`payload`, the difference of two addresses in a `Some`). `None` if
+/// the option is not two such words, or the two values show the same byte.
+pub fn option_tag<T: Copy>(
+    none: &Option<T>,
+    some: &Option<T>,
+    payload: usize,
+) -> Option<(u32, u8)> {
+    exec::option_tag(none, some, payload)
+}
+
+/// The addresses compiled code pushes and pops frames through
+/// ([`CallLayout`]), fixed for a run: the frame vector, the register
+/// vector (the vectors themselves, not their buffers, which compiled code
+/// re-reads at every use), the current realm (a `u32`) and the table of
+/// functions compiled code may call directly ([`CalleeTable::base`]).
+#[derive(Clone, Copy, Debug)]
+pub struct CallView {
+    pub frames: *mut u8,
+    pub registers: *mut u8,
+    pub realm: *mut u8,
+    pub callees: *const u8,
+}
+
+impl CallView {
+    pub const NONE: CallView = CallView {
+        frames: std::ptr::null_mut(),
+        registers: std::ptr::null_mut(),
+        realm: std::ptr::null_mut(),
+        callees: std::ptr::null(),
+    };
 }
 
 /// A value type compiled code can work on. The constructors give the
@@ -237,9 +413,62 @@ pub trait Runtime<V: JitValue> {
 
     /// [`Runtime::slow`] for a `Call` instruction, through its own entry
     /// so that the runtime can take the call without decoding a general
-    /// instruction (and run a compiled callee from here).
+    /// instruction (and run a compiled callee from here). In code
+    /// compiled with a [`CallLayout`], compiled code did not find the
+    /// callee in the runtime's table, or could not make the call itself
+    /// for another reason; the runtime may add the callee
+    /// ([`CalleeTable::fill`]).
     fn call(&mut self, pc: u32, acc: V) -> Resume<V> {
         self.slow(pc, acc)
+    }
+
+    /// The function compiled code called directly from the `Call` at `pc`
+    /// executed `Return` with `acc`, and compiled code did not finish the
+    /// return itself. With `popped` false the callee's frame is still the
+    /// top one: pop it by the generic semantics of `Return`. With `popped`
+    /// true compiled code has popped it and the caller's frame is the top
+    /// one, written back but for the accumulator. Either way the poll
+    /// after a call returns (ADR 0019 J7) and any safe point are this
+    /// call's to make, and `Next` continues the caller at `pc + 1` with
+    /// the value returned.
+    ///
+    /// Only code compiled with a [`CallLayout`] calls this, so a runtime
+    /// that gives one implements it.
+    fn returned(&mut self, pc: u32, acc: V, popped: bool) -> Resume<V> {
+        let _ = (pc, acc, popped);
+        Resume::Exit(Exit::Interp)
+    }
+
+    /// The frame stack, the register file and the current realm, for code
+    /// compiled with a [`CallLayout`]. Called when compiled code is
+    /// entered; the addresses must stay valid, and the vectors and the
+    /// realm stay where they are, for the whole run. The default reports
+    /// none, and such code is then not entered.
+    fn call_view(&mut self) -> CallView {
+        CallView::NONE
+    }
+
+    /// The epoch the runtime's inline caches are valid in: compiled code
+    /// calls a function directly only while its block's caches are of this
+    /// epoch ([`Callee::shape_epoch`]). Asked on entry and after every call
+    /// out that continues compiled code.
+    fn shape_epoch(&self) -> u64 {
+        0
+    }
+
+    /// The lowest address the native stack pointer may be at when
+    /// compiled code calls a function directly: each such call puts a
+    /// machine frame on the native stack, and whatever the callee calls
+    /// out to runs below it. A call below the floor is the runtime's
+    /// ([`Runtime::call`]), which may unwind the machine frames first.
+    /// Asked on entry. The default allows no direct call.
+    fn stack_floor(&self) -> usize {
+        usize::MAX
+    }
+
+    /// Compiled code made `n` calls directly in the run that just ended.
+    fn direct_calls(&mut self, n: u64) {
+        let _ = n;
     }
 
     /// [`Runtime::slow`] for a global or environment load or store or the
@@ -255,6 +484,25 @@ pub trait Runtime<V: JitValue> {
     fn fast(&mut self, pc: u32, acc: V) -> Option<V> {
         let _ = (pc, acc);
         None
+    }
+
+    /// [`Runtime::fast`] for an `LdaGlobal` of code compiled with
+    /// [`CallLayout::globals`], whose `site` did not serve it: the runtime
+    /// may give the site the binding's address ([`GlobalSite::fill`]), so
+    /// that compiled code reads it itself until the stamp moves.
+    fn global(&mut self, pc: u32, acc: V, site: Option<&GlobalSite>) -> Option<V> {
+        let _ = site;
+        self.fast(pc, acc)
+    }
+
+    /// Where the runtime keeps the stamp of its global bindings, for code
+    /// compiled with [`CallLayout::globals`]: a `u64` that changes
+    /// whenever the address of any global binding's value may have (a
+    /// binding added or removed, in any realm). It must stay where it is
+    /// for the run. The default has none, and such code is then not
+    /// entered.
+    fn global_stamp(&mut self) -> *const u64 {
+        std::ptr::null()
     }
     /// The running frame's `this`, which compiled code loads itself for
     /// `LdaThis` (it is fixed for a frame's life). Asked when code that
@@ -377,14 +625,20 @@ pub const MAX_INSTRS: usize = 20_000;
 
 /// Whether `code` can be compiled: a check on the block alone, before any
 /// code is generated. Generators and async functions suspend their frames
-/// and class constructors bind `this` late; eval and module code run once;
+/// and derived class constructors bind `this` late (a base class's
+/// constructor has its `this` from the start, like any function called
+/// with `new`); eval and module code run once;
 /// direct eval and `super()` inspect the frame in ways compiled code does
 /// not model; `debugger` belongs to the interpreter (ADR 0019 J9).
 pub fn eligible(code: &CodeBlock) -> Result<(), Ineligible> {
     if code.function_kind != FunctionKind::Normal
         || !matches!(
             code.kind,
-            CodeKind::Script | CodeKind::Function | CodeKind::Arrow | CodeKind::Method
+            CodeKind::Script
+                | CodeKind::Function
+                | CodeKind::Arrow
+                | CodeKind::Method
+                | CodeKind::ClassConstructor
         )
         || code.is_derived_constructor
     {
@@ -434,19 +688,42 @@ pub fn profitable(code: &CodeBlock) -> bool {
 /// call, and entering compiled code (and leaving it for every call the
 /// block makes) costs more than a short block's dispatch saves.
 pub fn profitable_with(code: &CodeBlock, heap: bool) -> bool {
-    let has_loop = code
-        .instrs
+    profitable_for(code, heap, None)
+}
+
+/// Whether `code` has a loop (a backward branch).
+pub fn has_loop(code: &CodeBlock) -> bool {
+    code.instrs
         .iter()
-        .any(|i| codegen_branch_offset(i).is_some_and(|o| o <= 0));
-    if !has_loop {
+        .any(|i| codegen_branch_offset(i).is_some_and(|o| o <= 0))
+}
+
+/// [`profitable_with`], for code compiled with a [`CallLayout`] when
+/// `calls`: what the layout lets compiled code do itself costs nothing
+/// (environment slots, global bindings), and a `Call` costs one call out,
+/// not two, since a call of a compiled function is made in machine code.
+/// (What a site calls is not in the bytecode. A loop that calls natives is
+/// then judged worth compiling when it is not; the runtime's judgement of
+/// the running code gives it up.) With direct calls a block without a loop
+/// can be worth compiling too: it is entered by machine code, not through
+/// the runtime, once its callers are compiled.
+pub fn profitable_for(code: &CodeBlock, heap: bool, calls: Option<&CallLayout>) -> bool {
+    let direct = heap && calls.is_some_and(|c| c.direct);
+    if !direct && !has_loop(code) {
         return false;
     }
+    let envs = heap && calls.is_some_and(|c| c.env.is_some());
+    let globals = heap && calls.is_some_and(|c| c.globals);
     let mut cost = 0usize;
     for instr in code.instrs.iter() {
         cost += match instr {
             i if expands_inline(code, i) => 0,
             Instr::GetNamed { ic, .. } | Instr::SetNamed { ic, .. } if heap => named_site_cost(code, *ic),
             Instr::GetKeyed { .. } | Instr::SetKeyed { .. } if heap => 0,
+            Instr::LdaEnv { .. } | Instr::StaEnv { .. } if envs => 0,
+            Instr::LdaGlobal(_) if globals => 0,
+            Instr::LdaThis => 0,
+            Instr::Call { .. } if direct => 1,
             Instr::Call { .. }
             | Instr::CallSpread { .. }
             | Instr::Construct { .. }
@@ -583,22 +860,52 @@ pub fn exec_memory_kind() -> Option<ExecMemoryKind> {
     exec::memory_kind()
 }
 
+#[cfg(jit_host)]
+thread_local! {
+    /// The call thunks made on this thread, by value type and layouts.
+    #[allow(clippy::type_complexity)]
+    static THUNKS: std::cell::RefCell<Vec<(std::any::TypeId, HeapLayout, CallLayout, Rc<exec::ExecMemory>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The call thunk for a runtime's layouts (`codegen::compile_thunk`), made
+/// once per thread; `None` if it cannot be made, and calls are then the
+/// runtime's.
+#[cfg(jit_host)]
+fn call_thunk<V: JitValue>(
+    code: &CodeBlock,
+    heap: &HeapLayout,
+    calls: &CallLayout,
+) -> Option<Rc<exec::ExecMemory>> {
+    let key = std::any::TypeId::of::<V>();
+    THUNKS.with(|thunks| {
+        let mut thunks = thunks.borrow_mut();
+        if let Some(t) = thunks
+            .iter()
+            .find(|t| t.0 == key && t.1 == *heap && t.2 == *calls)
+        {
+            return Some(t.3.clone());
+        }
+        let bytes = codegen::compile_thunk(code, &exec::offsets::<V>(), heap, calls).ok()?;
+        let mem = Rc::new(exec::ExecMemory::new(&bytes)?);
+        thunks.push((key, *heap, *calls, mem.clone()));
+        Some(mem)
+    })
+}
+
 /// One code block's machine code.
 pub struct Compiled<V> {
     #[cfg_attr(not(jit_host), allow(dead_code))]
     mem: exec::ExecMemory,
     /// `entry[pc]`: compiled code can start at `pc`.
     entry: Box<[bool]>,
-    registers: usize,
-    /// Compiled with a [`HeapLayout`]: entered only with a heap view, and
-    /// (`needs_ic`) an inline-cache table.
-    needs_heap: bool,
-    needs_ic: usize,
-    /// Has an `LdaThis`: entered only with [`Runtime::this_value`].
-    needs_this: bool,
-    /// The safe points, side exits and entry guards ([`handoff`]), shared
-    /// with the frame handles of running frames.
-    points: Rc<Points>,
+    /// What the code needs to be entered and what the runtime reads of it
+    /// while it runs: the registers it addresses, whether it reads the heap
+    /// (compiled with a [`HeapLayout`]) and how many inline-cache sites,
+    /// whether it has an `LdaThis`, its safe points, side exits and entry
+    /// guards ([`handoff`]) and its global sites. Shared with the frame
+    /// handles of running frames.
+    info: Rc<exec::CodeInfo>,
     /// Size of the machine code in bytes.
     pub code_size: usize,
     /// Time spent generating it.
@@ -624,6 +931,18 @@ impl<V: JitValue> Compiled<V> {
         heap: Option<&HeapLayout>,
         spec: &Speculation,
     ) -> Result<Self, Ineligible> {
+        Self::compile_calling(code, heap, None, spec)
+    }
+
+    /// [`Compiled::compile_speculating`], with calls of compiled functions
+    /// made in machine code when the runtime describes its frame stack
+    /// (`calls`, which needs `heap` too); see [`CallLayout`].
+    pub fn compile_calling(
+        code: &CodeBlock,
+        heap: Option<&HeapLayout>,
+        calls: Option<&CallLayout>,
+        spec: &Speculation,
+    ) -> Result<Self, Ineligible> {
         eligible(code)?;
         if !available() {
             return Err(Ineligible::Unavailable);
@@ -631,14 +950,40 @@ impl<V: JitValue> Compiled<V> {
         if !exec::layout_matches::<V>() {
             return Err(Ineligible::Layout);
         }
-        Self::generate(code, heap, spec)
+        Self::generate(code, heap, calls.filter(|_| heap.is_some()), spec)
     }
 
     #[cfg(jit_host)]
-    fn generate(code: &CodeBlock, heap: Option<&HeapLayout>, spec: &Speculation) -> Result<Self, Ineligible> {
+    fn generate(
+        code: &CodeBlock,
+        heap: Option<&HeapLayout>,
+        calls: Option<&CallLayout>,
+        spec: &Speculation,
+    ) -> Result<Self, Ineligible> {
         let start = std::time::Instant::now();
-        let lowered =
-            codegen::compile(code, &exec::offsets::<V>(), heap, spec).map_err(Ineligible::Compile)?;
+        // The global sites exist before the code does: it addresses them.
+        let globals: Box<[GlobalSite]> = match calls {
+            Some(c) if c.globals => code
+                .instrs
+                .iter()
+                .filter(|i| matches!(i, Instr::LdaGlobal(_)))
+                .map(|_| GlobalSite::default())
+                .collect(),
+            _ => Box::new([]),
+        };
+        // One call thunk for the layouts: every call site calls it.
+        let has_call = code.instrs.iter().any(|i| matches!(i, Instr::Call { .. }));
+        let thunk = match (heap, calls) {
+            (Some(h), Some(c)) if c.direct && has_call => call_thunk::<V>(code, h, c),
+            _ => None,
+        };
+        let direct = calls.map(|layout| codegen::Calls {
+            layout,
+            globals: &globals,
+            thunk: thunk.as_ref().map_or(0, |t| t.address()),
+        });
+        let lowered = codegen::compile(code, &exec::offsets::<V>(), heap, direct.as_ref(), spec)
+            .map_err(Ineligible::Compile)?;
         let mem = exec::ExecMemory::new(&lowered.bytes).ok_or(Ineligible::Unavailable)?;
         let mut entry = vec![false; code.instrs.len()].into_boxed_slice();
         for &pc in &lowered.entries {
@@ -647,11 +992,23 @@ impl<V: JitValue> Compiled<V> {
         Ok(Compiled {
             mem,
             entry,
-            registers: code.register_count as usize,
-            needs_heap: heap.is_some(),
-            needs_ic: if heap.is_some() { code.ic_count as usize } else { 0 },
-            needs_this: code.instrs.iter().any(|i| matches!(i, Instr::LdaThis)),
-            points: Rc::new(lowered.points),
+            info: Rc::new(exec::CodeInfo {
+                registers: code.register_count as usize,
+                heap: heap.is_some(),
+                ic: if heap.is_some() {
+                    code.ic_count as usize
+                } else {
+                    0
+                },
+                this: code.instrs.iter().any(|i| matches!(i, Instr::LdaThis)),
+                calls: calls.is_some(),
+                envs: calls.is_some_and(|c| c.env.is_some()),
+                stamp: calls.is_some_and(|c| c.globals),
+                direct: lowered.cached == 0,
+                points: lowered.points,
+                globals,
+                _thunk: thunk,
+            }),
             code_size: lowered.bytes.len(),
             compile_time: start.elapsed(),
             _value: PhantomData,
@@ -659,13 +1016,34 @@ impl<V: JitValue> Compiled<V> {
     }
 
     #[cfg(not(jit_host))]
-    fn generate(_code: &CodeBlock, _heap: Option<&HeapLayout>, _spec: &Speculation) -> Result<Self, Ineligible> {
+    fn generate(
+        _code: &CodeBlock,
+        _heap: Option<&HeapLayout>,
+        _calls: Option<&CallLayout>,
+        _spec: &Speculation,
+    ) -> Result<Self, Ineligible> {
         Err(Ineligible::Unavailable)
     }
 
     /// The code's safe points, side exits and entry guards.
     pub fn points(&self) -> &Points {
-        &self.points
+        &self.info.points
+    }
+
+    pub(crate) fn info(&self) -> &Rc<exec::CodeInfo> {
+        &self.info
+    }
+
+    /// The address of the machine code.
+    pub(crate) fn entry_address(&self) -> usize {
+        self.mem.address()
+    }
+
+    /// Whether machine code may call this code directly
+    /// ([`CalleeTable::fill`]): it keeps no register in machine state, so
+    /// its frame needs no [`FrameHandle`] for the collector or a debugger.
+    pub fn direct(&self) -> bool {
+        self.info.direct
     }
 
     /// Whether compiled code can start at `pc`: the function's start, a
@@ -686,18 +1064,6 @@ impl<V: JitValue> Compiled<V> {
                 acc,
             };
         }
-        exec::enter(
-            &self.mem,
-            &self.points,
-            exec::Needs {
-                registers: self.registers,
-                heap: self.needs_heap,
-                ic: self.needs_ic,
-                this: self.needs_this,
-            },
-            rt,
-            pc,
-            acc,
-        )
+        exec::enter(&self.mem, &self.info, rt, pc, acc)
     }
 }

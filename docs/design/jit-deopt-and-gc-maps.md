@@ -1,6 +1,6 @@
 # JIT deoptimization and GC maps: the hand-off specification
 
-Status: implemented (TASK-101.3.1). Sections 1 to 7 are the specification the work was done against; section 8 records what was built where it differs in detail. The interfaces are in `crates/agnijs-js-jit/src/handoff.rs`, with the contract tests that were ignored until the work landed; the mechanism is in `exec.rs` (the only `unsafe`), the analysis in `analysis.rs`, the code generation in `codegen.rs`, and the VM's side in `crates/agnijs-js-vm/src/interp/jit.rs`. ADR 0020's addendum on this task is the short form.
+Status: implemented (TASK-101.3.1). Sections 1 to 7 are the specification the work was done against; section 8 records what was built where it differs in detail, and section 9 the calls machine code makes itself (TASK-101.3.3). The interfaces are in `crates/agnijs-js-jit/src/handoff.rs`, with the contract tests that were ignored until the work landed; the mechanism is in `exec.rs` (the only `unsafe`), the analysis in `analysis.rs`, the code generation in `codegen.rs`, and the VM's side in `crates/agnijs-js-vm/src/interp/jit.rs`. ADR 0020's addendum on this task is the short form.
 
 Read first:
 
@@ -24,7 +24,7 @@ Each of the following optimisations breaks one of the invariants, and must not l
 | JS registers or `acc` kept in machine registers across a call out | I1 | GC maps (section 4) |
 | Unboxed numbers kept across instructions | I1 (once boxed values mix) and I2 | both |
 | Inline IC hit paths reading the object arena directly | I2 if a shape miss jumps anywhere but `slow` at the same pc. With a miss path to `slow`, this stays baseline-safe. | deopt only if the miss path is dropped |
-| Direct calls between compiled functions (machine frames on the native stack) | I1, and the frame stack model | both, plus section 6 |
+| Direct calls between compiled functions (machine frames on the native stack) | I1, and the frame stack model | both, plus section 6. Not when the callee holds nothing in machine state and the frame stack stays the interpreter's: that is built (section 9). |
 | Inlining, or speculation on call targets or types without a generic fallback | I2 | deopt (section 3) |
 
 Inline IC hit paths with a full miss path need neither piece. They are implemented (TASK-101.3.2, below).
@@ -41,7 +41,7 @@ Compiled code never changes an object's structure. It only stores values into da
 
 GC attention is serviced inside compiled code: every call out that continues it checks the attention word and collects there (`JitRt::attention`), with the frame written back. Under GC stress (`Runtime::safe_point_due`) every back-edge also calls `Runtime::poll`, so compiled loops collect at each loop head as the interpreter does. The test `heap_values_survive_collections_at_every_call_out_from_compiled_code` (in `crates/agnijs-js-vm/tests/jit_inline_cache.rs`) runs inline loads and stores around allocating calls under `heap.stress` with a collection at every safe point. It checks the result against the interpreter's.
 
-Nothing here touches the birth-serial bound (section 6): compiled code still never recurses on the native stack.
+Nothing here touches the birth-serial bound (section 6). (Since TASK-101.3.3 compiled code does recurse on the native stack, with no Rust frame holding a heap value in between; section 9.3 says why the bound is still untouched.)
 
 ## 2. Frame layout
 
@@ -104,7 +104,7 @@ The collector is precise and non-moving, and it never scans the native stack (J6
 
 TASK-100.16 lets a collection run under native frames. A nested run loop records the heap's allocation serial (`Vm::retain_from`), and the collection treats every value born before it as a root. That covers whatever Rust locals hold below the loop.
 
-- **Baseline: unaffected.** Compiled code never recurses on the native stack. Calls exit to `Vm::jit_run`, which runs inside the same run loop as the interpreter, so `native_depth`, `run_depth` and `retain_from` change exactly as they do without the JIT. A native that calls back into JavaScript enters a nested `Vm::run`, and the compiled code under it is just another frame of that loop.
+- **Baseline: unaffected.** As first built, compiled code never recursed on the native stack: calls exited to `Vm::jit_run`, which runs inside the same run loop as the interpreter, so `native_depth`, `run_depth` and `retain_from` change exactly as they do without the JIT. A native that calls back into JavaScript enters a nested `Vm::run`, and the compiled code under it is just another frame of that loop. The calls machine code now makes itself, and the callees it runs from inside a call out, leave all three as they were (section 9.3).
 - **Optimised code that calls Rust which runs JavaScript.** Example: a direct call into a native that calls back. The native's nested run sets a new bound. Values the optimised frame holds in spill slots were born before that bound, so they are retained even without a map, but only while the nested loop runs. They are traced by the GC map at any collection, nested or not. The two mechanisms compose: the bound covers Rust locals, the map covers machine locations.
 - **Direct calls between compiled functions** put machine frames on the native stack with no run loop between them. Every such frame must be on the JIT-frame list (section 4). A collection in the callee traces the callers through their maps. `retain_from` does not change, because no Rust code with untracked locals sits between the frames. If an optimised tier ever adds Rust code with heap values in locals between two machine frames, that Rust code must either root them (the scoped root stack) or enter a nested run so the bound applies.
 - **Contract test.** `a_nested_run_under_optimised_code_keeps_the_birth_serial_bound`: optimised code calls a native that runs a callback which allocates until a collection. Values held in the optimised frame, and values the native holds in locals, both survive.
@@ -128,3 +128,46 @@ The implementation follows sections 2 to 6 with these differences and specifics.
 - **What is cached.** `analysis::choose_cache` picks up to `MAX_CACHED` (8) registers that loops read or write inline, by use count, speculated ones first. `liveness` computes, per pc, which cached registers may be read before written; it guards entry loads of speculated registers only where they are live, and lets a dead one take its payload unguarded. A block without loops caches nothing.
 - **What the VM guesses.** `Vm::jit_guess`: `number_candidates` (registers below 64 read by inline arithmetic or comparison inside a loop) minus `Tier::demoted`, kept only where the live frame holds a `Number` or `Undefined` (a local not yet assigned, dead at the entry). A guard failure demotes the register and drops the code (`Tier::code` is a `RefCell<Option<Rc<dyn Any>>>` now; every run holds its own `Rc`), and the block is compiled again at its next offer; after `MAX_DEOPTS` (4) failures it stops guessing. `Invalidated` is defined but nothing raises it yet: there is no speculation on prototypes or globals.
 - **Tests.** `handoff::tests` (mock runtime with a mock heap, birth-serial bound, fault and panic injection, debugger attach), `exec::tests` (handle reads, Miri-runnable), `analysis::tests`, and the VM's `tests/jit_deopt.rs` (speculation, guard exits, recompilation, giving up, collections under a callback from a speculated frame; run also under `AGNIJS_GC_STRESS=1`).
+
+## 9. Calls in machine code (TASK-101.3.3)
+
+A `Call` of a compiled function is made without leaving compiled code: machine code pushes the callee's interpreter frame, calls the callee's machine code on the native stack and pops the frame when it returns. This is the "direct calls between compiled functions" row of section 1, for the case that needs neither deoptimization nor a GC map: the frame stack stays the interpreter's, and the callee holds nothing in machine state. ADR 0020's addendum on the task is the short form. The code is `Lower::thunk` in `codegen.rs`, `calls.rs`, the `Shared` and `Ctx` halves of the context in `exec.rs`, and `JitRt` in the VM's `interp/jit.rs`.
+
+### 9.1 What machine code is trusted with
+
+Two invariants join I1 to I3. They keep the frame stack the single source of truth (J1) while machine code writes to it.
+
+- **I4. A frame machine code pushes is a frame the runtime built.** The runtime describes its frame stack, register file and function objects once, by `offset_of!` and address differences (`CallLayout`, computed like `HeapLayout`). For each callee it gives the callee table an *image*: a `Frame` it built in safe code for a plain call of a function of that code block in that realm. Machine code pushes a frame by copying the image's bytes into spare capacity of the frame vector and then writing only the fields that differ per call, each with a value of the field's own type read from the function object or the registers: the window's base, `this`, the argument count, the callee's id, the environment (twice) and the module. The image holds a reference to the code block, and the copy takes one by adding one to the count at the `Rc`'s word, which a probe of a live `Rc` checked is where the count is. So every frame in `Vm::frames` is a well-formed `Frame` whoever pushed it, and Rust drops it as usual when an unwind pops it.
+- **I5. Machine code never grows or frees what it does not own.** It pushes only into spare capacity of the frame vector and the register file (a call that needs more is the runtime's), re-reads each vector's buffer and length from its header at every use, and pops a frame only when the code block's count stays above zero (the last reference is the runtime's to drop). The headers and the current realm are fields of the VM, at addresses fixed for a run.
+
+What machine code does at a call is what `push_function_frame` and `do_return` do, in the same order, for the calls it takes: the caller's frame is written back first (pc and accumulator, J1), the function-entry poll and the poll after the return are counted on the interrupt counter (J7), and a callee's inline caches must be of the current shape epoch (what `push_frame` checks). Everything else is a guard that sends the call to `Runtime::call` from the same state:
+
+- a callee that is not a function object, or not in the table for its realm;
+- a poll due, or the attention word set (so nothing is called directly under GC stress, a debugger or a fuel budget);
+- the native stack below the runtime's floor;
+- no room in either vector, or the frame limit reached;
+- a primitive `this` for a function that would box it.
+
+### 9.2 What the collector and a debugger see
+
+- **Frames.** Every frame is in `Vm::frames` and every register in `Vm::regs`, as under the interpreter. A function called directly keeps no register in machine state (`Compiled::direct`: no cached register, so no spill area and no guess), so it has no `FrameHandle` and needs none. Its caller may keep registers in machine state: the call's safe point lists them exactly as a call through the runtime does, and the caller's handle is on the list. A function that does keep registers in machine state is never called directly. It is entered from inside the call out (ADR 0020, nested entry), which registers its handle.
+- **Leaving.** A callee that leaves compiled code any way but by returning (a fault, a frame it pushed and did not run, the interpreter wanted) returns its exit code to the caller's machine code, which hands it to a helper that materialises the caller's frame (`left`) and returns the same code, level by level, down to `exec::enter`. The interpreter frames were complete all along, so exceptions unwind as in the interpreter.
+- **A debugger.** Attaching sets the attention word, so no further call is made directly, and every frame on the handle list is materialised as before. Frames of functions called directly have nothing to materialise.
+
+### 9.3 The birth-serial bound
+
+Nothing changes it, for two reasons.
+
+- **Direct calls.** Between a caller's machine frame and its callee's there is the call thunk's machine frame and no Rust frame at all, so there is no Rust local to keep alive. This is the case section 6 foresaw ("no Rust code with untracked locals sits between the frames").
+- **A callee run from inside a call out.** When an instruction run by the runtime pushes one frame, the runtime runs that frame from inside the call out: its compiled code (`enter_callee`), or the interpreter's own loop when it has none (`interpret_callee`, a run loop that ends when that frame returns). The Rust frames between the caller's machine code and the callee (`call_out`, `JitRt::slow` or `call`, the entry) hold no heap value: the instruction's operands were in the caller's frame, which was written back, and the result goes into the frame. So a collection in the callee needs no retention bound for them, `native_depth` and `run_depth` are not touched, and `retain_from` stays the enclosing loop's.
+
+### 9.4 The native stack
+
+Machine frames now nest on the native stack, so the nesting is bounded by the stack pointer, not by a count of levels. The VM sets a floor `JIT_STACK` (96 KB in an optimised build) below the stack position at which compiled code was first entered with none running, or at the limit of the host's stack budget (`agnijs_js_parser::stack::limit`, `Engine::set_stack_budget`) when that is nearer, so machine frames never nest past what the host allowed the engine. Machine code calls directly only while the stack pointer is above the floor, and the runtime starts a callee from inside a call out only then. A call past the floor leaves compiled code the old way (`Exit::Frame`), which unwinds every machine frame; the frames continue from memory. The floor is per engine, not per run, so natives that re-enter JavaScript under compiled code use the same budget.
+
+### 9.5 Environment slots and global bindings
+
+Two more loads moved into machine code with the same discipline: a guard that fails runs the instruction by the runtime at the same pc (I2), and no address is kept across a call out (I3).
+
+- **Environment slots** (`LdaEnv`, `StaEnv`). The running frame is the top of the frame vector. Its innermost environment, each parent and the slot vector are read through `EnvLayout`; the arena base is in `HeapView` and refreshed with the object arena's. With the `jit` feature `Environment` is `#[repr(u8)]`, so that a declarative record is told by its first byte. Any record on the way that is not declarative, or a missing slot, is the runtime's.
+- **Global bindings** (`LdaGlobal`). A site records where the binding's value was when the runtime last resolved it (its slot in the global object's dictionary or in the realm's table of global lexicals), the realm, and the heap's *global stamp*. The stamp moves whenever such an address may have moved: a key added to or removed from any object in dictionary mode, and a global lexical declared. Machine code reads the value there only while the stamp and the current realm are the site's, and takes it only when it is a plain, non-empty value. An accessor installed since shows as a first byte above every value tag and a binding in its dead zone as the empty value, and both are the runtime's.

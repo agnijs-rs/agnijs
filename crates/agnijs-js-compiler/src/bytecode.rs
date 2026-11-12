@@ -1081,6 +1081,12 @@ pub struct Tier {
     pub demoted: Cell<u64>,
     /// How often the block's compiled code left through a failed guard.
     pub deopts: Cell<u32>,
+    /// Runs of the compiled code the VM started from its tier loop since
+    /// it last judged them, the work they did and what they cost
+    /// (TASK-101.3.3).
+    pub runs: Cell<u32>,
+    pub work: Cell<u32>,
+    pub cost: Cell<u32>,
 }
 
 #[cfg(feature = "tier")]
@@ -1089,6 +1095,16 @@ impl Tier {
     pub const COMPILED: u8 = 1;
     /// Not eligible, or compilation failed: stays in the interpreter.
     pub const NEVER: u8 = 2;
+    /// Not compiled yet, and without a loop: it warms up on calls of it,
+    /// where a block with loops warms up on their back-edges.
+    pub const CALLED: u8 = 3;
+    /// Compiled, but not worth entering from the interpreter (its runs
+    /// did too little): only compiled code calls it now.
+    pub const DIRECT: u8 = 4;
+    /// Not compiled, without a loop, and hot only in interpreted callers:
+    /// compiled when compiled code calls it often enough, and not counted
+    /// by the interpreter meanwhile.
+    pub const DEMAND: u8 = 5;
 }
 
 #[cfg(feature = "tier")]

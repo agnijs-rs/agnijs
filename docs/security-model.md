@@ -71,7 +71,7 @@ The engine crates forbid `unsafe` code at their crate roots, so the compiler rej
 
 The heap is index arenas with no raw pointers (ADR 0009; `gc.rs` and `heap.rs` say so in their module docs). Two crates do contain `unsafe`:
 
-- **`agnijs-js-jit`.** It sets `#![deny(unsafe_code)]` and allows it only in `exec.rs`: executable memory, the entry trampoline and the frame handle.
+- **`agnijs-js-jit`.** It sets `#![deny(unsafe_code)]` and allows it only in `exec.rs`: executable memory, the entry trampoline, the frame handle and the probes that find where a `Vec`, an `Rc` and an `Option` keep their words (run under Miri).
 - **`agnijs-capi`.** It is the FFI boundary.
 
 [Unsafe code in the FFI and JIT crates](#unsafe-code-in-the-ffi-and-jit-crates) says what that means for you. CI also runs the collector tests under Miri (`miri` job in `.github/workflows/ci.yml`).
@@ -178,6 +178,8 @@ The collection threshold is capped at the distance to the limit (`rearm_threshol
 
 The regex backtracker uses an explicit stack, so no pattern or input recurses on the native stack (`backtrack.rs`; `crates/agnijs-js-regex/tests/nesting.rs`).
 
+With the `jit` feature, compiled functions call each other on the native stack. Their frames nest at most `JIT_STACK` (96 KB in an optimised build, `interp/jit.rs`) below where compiled code was entered and never past the budget's limit; beyond that a call is made through the runtime, on the interpreter's frame stack (`machine_frames_do_not_nest_past_the_hosts_stack_budget` and `recursion_past_the_stack_bound_unwinds_and_goes_on` in `tests/jit_calls.rs`).
+
 **Changing it.** `Engine::set_stack_budget(Some(bytes))` sets the budget, and `stack_budget()` reads it. A `Context` reaches them through `context.engine()`. A larger budget on a larger thread accepts deeper nesting. The deepest nesting the default accepts, measured on Windows x64 in November 2026:
 
 | Input | Release build | Debug build |
@@ -275,7 +277,7 @@ Source maps are parsed defensively, and hostile maps are rejected without a pani
   - On Apple silicon it uses a `MAP_JIT` mapping that is written only while this thread's JIT write protection is lifted.
   - The instruction cache is flushed before the first call (`ExecMemory::new` and the `sys` and `macos` modules in `crates/agnijs-js-jit/src/exec.rs`).
 
-  The memory safety of the generated code rests on the code generator's correctness, which is tested differentially against the interpreter (`tests/jit_differential.rs`) and not proved. A JIT bug can be a memory-safety bug where an interpreter bug cannot. Leave the `jit` feature off for untrusted code unless you accept that. A fuel budget or an attached debugger keeps the JIT from running.
+  The memory safety of the generated code rests on the code generator's correctness, which is tested differentially against the interpreter (`tests/jit_differential.rs`, `tests/jit_calls.rs`) and not proved. Generated code reads and writes the interpreter's own frames, registers, environments and global bindings at offsets the VM computes in safe code (`HeapLayout`, `CallLayout`); `docs/design/jit-deopt-and-gc-maps.md` states the invariants it is trusted with (I1 to I5). A JIT bug can be a memory-safety bug where an interpreter bug cannot. Leave the `jit` feature off for untrusted code unless you accept that. A fuel budget or an attached debugger keeps the JIT from running.
 
 ### Panics in the Rust API
 

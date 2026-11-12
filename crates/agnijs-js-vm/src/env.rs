@@ -11,6 +11,12 @@ use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, ScopeInfo};
 use indexmap::IndexMap;
 use std::rc::Rc;
 
+/// With the `jit` feature the kind is a byte at the record's start, the
+/// variants numbered in declaration order (`#[repr(u8)]`), so that
+/// compiled code can tell a declarative record ([`KIND_DECLARATIVE`]) and
+/// read its slots (TASK-101.3.3). Without it the layout is the compiler's
+/// to choose, as before.
+#[cfg_attr(feature = "jit", repr(u8))]
 pub enum Environment {
     Declarative(DeclEnv),
     /// `with (obj)`, or the global object record behind the global
@@ -20,6 +26,11 @@ pub enum Environment {
     /// and the global object.
     Global(RealmId),
 }
+
+/// The kind byte of [`Environment::Declarative`] under `#[repr(u8)]`: the
+/// first variant's.
+#[cfg(feature = "jit")]
+pub(crate) const KIND_DECLARATIVE: u8 = 0;
 
 pub struct DeclEnv {
     pub slots: Vec<Value>,

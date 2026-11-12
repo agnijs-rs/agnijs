@@ -35,7 +35,7 @@ use agnijs_js_compiler::bytecode::{
 };
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types::{F64, I32, I64, I64X2};
+use cranelift_codegen::ir::types::{self, F64, I32, I64, I64X2};
 use cranelift_codegen::ir::{
     AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, StackSlot,
     StackSlotData, StackSlotKind, Type, UserFuncName, Value as Ir,
@@ -46,10 +46,11 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 
 use crate::analysis::{access, branch_offset, choose_cache, liveness, written, Access};
-use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN};
+use crate::calls::{GlobalSite, CALLEE, CALLEE_BITS, CALLEE_HASH, CALLEE_WAYS, GLOBAL};
+use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN, NO_POINT};
 use crate::handoff::{Location, Point, PointKind, Points};
 use crate::layout::*;
-use crate::{Arith, HeapLayout, Speculation};
+use crate::{Arith, CallLayout, EnvLayout, HeapLayout, Speculation};
 
 /// What [`compile`] produces.
 pub(crate) struct Lowered {
@@ -58,6 +59,19 @@ pub(crate) struct Lowered {
     pub entries: Vec<u32>,
     /// The safe points, side exits and entry guards of the code.
     pub points: Points,
+    /// How many registers the code keeps in machine state.
+    pub cached: usize,
+}
+
+/// What lets the code make calls itself: the runtime's frame stack, and
+/// the block's global sites, one per `LdaGlobal` in pc order, which the
+/// code addresses where they are (they outlive it).
+pub(crate) struct Calls<'a> {
+    pub layout: &'a CallLayout,
+    pub globals: &'a [GlobalSite],
+    /// The address of the call thunk ([`compile_thunk`]) for this layout,
+    /// 0 for none (every call is then the runtime's).
+    pub thunk: usize,
 }
 
 /// The host code generator, configured once per process.
@@ -202,11 +216,13 @@ fn ic_unroll(code: &CodeBlock) -> Vec<u8> {
 }
 
 /// Compile `code` against a context with field offsets `off`, with the
-/// inline-cache hit paths when `heap` describes the runtime's objects.
+/// inline-cache hit paths when `heap` describes the runtime's objects and
+/// calls made in machine code when `calls` describes its frame stack.
 pub(crate) fn compile(
     code: &CodeBlock,
     off: &Offsets,
     heap: Option<&HeapLayout>,
+    calls: Option<&Calls<'_>>,
     spec: &Speculation,
 ) -> Result<Lowered, String> {
     let isa = isa()?;
@@ -225,7 +241,15 @@ pub(crate) fn compile(
 
     let mut sig = Signature::new(cc);
     sig.params.push(AbiParam::new(ptr));
+    sig.params.push(AbiParam::new(ptr));
     sig.returns.push(AbiParam::new(I32));
+    let fn_sig = sig.clone();
+    let mut thunk_sig = sig.clone();
+    thunk_sig.params.push(AbiParam::new(I64));
+    thunk_sig.params.push(AbiParam::new(I32));
+    // Frames, environments and global sites are read as 64-bit words: on
+    // 64-bit hosts (the only ones there are).
+    let calls = calls.filter(|_| ptr == I64 && heap.is_some());
     let mut slow_sig = Signature::new(cc);
     slow_sig.params.push(AbiParam::new(ptr));
     slow_sig.params.push(AbiParam::new(I32));
@@ -246,6 +270,8 @@ pub(crate) fn compile(
         let slow_sig = b.import_signature(slow_sig);
         let poll_sig = b.import_signature(poll_sig);
         let arith_sig = b.import_signature(arith_sig);
+        let fn_sig = b.import_signature(fn_sig);
+        let thunk_sig = b.import_signature(thunk_sig);
         let regs = b.declare_var(ptr);
         let tag = b.declare_var(I64);
         let pay = b.declare_var(I64);
@@ -284,12 +310,20 @@ pub(crate) fn compile(
 
         b.switch_to_block(entry);
         let ctx = b.block_params(entry)[0];
+        let sh = b.block_params(entry)[1];
         let mut lower = Lower {
             b,
             code,
             off,
             ptr,
             ctx,
+            sh,
+            calls: calls.map(|c| *c.layout),
+            globals: calls.map_or(0, |c| c.globals.as_ptr() as usize),
+            global: 0,
+            thunk: calls.map_or(0, |c| c.thunk),
+            thunk_sig,
+            fn_sig,
             regs,
             tag,
             pay,
@@ -332,7 +366,109 @@ pub(crate) fn compile(
         bytes,
         entries: entries.into_iter().collect(),
         points,
+        cached: chosen.len(),
     })
+}
+
+/// Compile the call thunk for a runtime's layouts: machine code every
+/// `Call` of code compiled with them calls, as
+/// `extern "C" fn(*mut Ctx, *mut Shared, ops: u64, pc: u32) -> u32`, to
+/// make the call without leaving compiled code when it can, and through
+/// the runtime when it cannot ([`Lower::thunk`]). It answers as a runtime
+/// entry does: the pc to continue at, the accumulator and the register
+/// window being in the context, or an exit code. (`code` is any block:
+/// the thunk is not about one.)
+pub(crate) fn compile_thunk(
+    code: &CodeBlock,
+    off: &Offsets,
+    heap: &HeapLayout,
+    calls: &CallLayout,
+) -> Result<Vec<u8>, String> {
+    let isa = isa()?;
+    let ptr = isa.pointer_type();
+    if ptr != I64 {
+        return Err("the call thunk needs a 64-bit host".into());
+    }
+    let cc = isa.default_call_conv();
+    let mut fn_sig = Signature::new(cc);
+    fn_sig.params.push(AbiParam::new(ptr));
+    fn_sig.params.push(AbiParam::new(ptr));
+    fn_sig.returns.push(AbiParam::new(I32));
+    let mut sig = fn_sig.clone();
+    sig.params.push(AbiParam::new(I64));
+    sig.params.push(AbiParam::new(I32));
+    let mut slow_sig = Signature::new(cc);
+    slow_sig.params.push(AbiParam::new(ptr));
+    slow_sig.params.push(AbiParam::new(I32));
+    slow_sig.returns.push(AbiParam::new(I32));
+    let mut poll_sig = slow_sig.clone();
+    poll_sig.params.push(AbiParam::new(I32));
+    let mut arith_sig = Signature::new(cc);
+    arith_sig.params.push(AbiParam::new(I32));
+    arith_sig.params.push(AbiParam::new(F64));
+    arith_sig.params.push(AbiParam::new(F64));
+    arith_sig.returns.push(AbiParam::new(F64));
+
+    let mut func = Function::with_name_signature(UserFuncName::default(), sig.clone());
+    let mut fctx = FunctionBuilderContext::new();
+    {
+        let mut b = FunctionBuilder::new(&mut func, &mut fctx);
+        let slow_sig = b.import_signature(slow_sig);
+        let poll_sig = b.import_signature(poll_sig);
+        let arith_sig = b.import_signature(arith_sig);
+        let fn_sig = b.import_signature(fn_sig);
+        let thunk_sig = b.import_signature(sig);
+        let regs = b.declare_var(ptr);
+        let tag = b.declare_var(I64);
+        let pay = b.declare_var(I64);
+        // The context of the function being called.
+        let slot = b.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            off.ctx_size,
+            4,
+        ));
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let (ctx, sh) = (b.block_params(entry)[0], b.block_params(entry)[1]);
+        let (ops, pc) = (b.block_params(entry)[2], b.block_params(entry)[3]);
+        let mut lower = Lower {
+            b,
+            code,
+            off,
+            ptr,
+            ctx,
+            sh,
+            calls: Some(*calls),
+            globals: 0,
+            global: 0,
+            thunk: 0,
+            thunk_sig,
+            fn_sig,
+            regs,
+            tag,
+            pay,
+            cached: Vec::new(),
+            index: Vec::new(),
+            live_in: Vec::new(),
+            spill: None,
+            points: Vec::new(),
+            blocks: Vec::new(),
+            resume: Vec::new(),
+            slow_sig,
+            poll_sig,
+            arith_sig,
+            heap: Some(*heap),
+            unroll: Vec::new(),
+        };
+        // The caller's window and accumulator, as its call site left them
+        // in its context.
+        lower.reload();
+        lower.thunk(heap, calls, slot, ops, pc);
+        lower.b.seal_all_blocks();
+        lower.b.finalize(isa.frontend_config());
+    }
+    emit(func)
 }
 
 /// An operand of a binary operator.
@@ -374,7 +510,21 @@ struct Lower<'a, 'c> {
     code: &'c CodeBlock,
     off: &'c Offsets,
     ptr: Type,
+    /// This frame's context and the run's shared state (`exec::Ctx`,
+    /// `exec::Shared`): the function's two arguments.
     ctx: Ir,
+    sh: Ir,
+    /// The runtime's frame stack, for calls made in machine code.
+    calls: Option<CallLayout>,
+    /// The address of the block's first global site, and the index of the
+    /// next `LdaGlobal`'s.
+    globals: usize,
+    global: u32,
+    /// The call thunk's address (0 for none) and signature.
+    thunk: usize,
+    thunk_sig: SigRef,
+    /// The signature of compiled code.
+    fn_sig: SigRef,
     regs: Variable,
     tag: Variable,
     pay: Variable,
@@ -408,6 +558,12 @@ impl Lower<'_, '_> {
 
     fn dispatch(&mut self, entries: &BTreeSet<u32>) {
         let pc = self.b.ins().load(I32, flags(), self.ctx, self.off.pc);
+        // A call starts at pc 0: tested first, so that a function entered
+        // by calls pays one predictable branch for the dispatch.
+        let start = self.resume[0].unwrap();
+        let later = self.b.create_block();
+        self.b.ins().brif(pc, later, &[], start, &[]);
+        self.b.switch_to_block(later);
         let default = self.b.create_block();
         let mut sw = Switch::new();
         for &e in entries {
@@ -567,7 +723,10 @@ impl Lower<'_, '_> {
         self.flush_acc();
         let none = Access::Known(Vec::new());
         let id = self.point(pc, kind, dirty.then_some(&none));
-        let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.deopt);
+        let f = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_deopt);
         let a = self.b.ins().iconst(I32, id as i64);
         let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
         let r = self.b.inst_results(call)[0];
@@ -762,13 +921,13 @@ impl Lower<'_, '_> {
             self.b.ins().jump(blk, &[]);
             return;
         }
-        let c = self.b.ins().load(I32, flags(), self.ctx, self.off.counter);
+        let c = self.b.ins().load(I32, flags(), self.sh, self.off.s_counter);
         let c = self.b.ins().iadd_imm_u(c, 1);
-        self.b.ins().store(flags(), c, self.ctx, self.off.counter);
+        self.b.ins().store(flags(), c, self.sh, self.off.s_counter);
         let low = self.b.ins().band_imm_u(c, 0xfff);
         let due = self.b.ins().icmp_imm_u(IntCC::Equal, low, 0);
         // Or a safe point is wanted at every back-edge (GC stress).
-        let attend = self.b.ins().load(I32, flags(), self.ctx, self.off.attend);
+        let attend = self.b.ins().load(I32, flags(), self.sh, self.off.s_attend);
         let attend = self.b.ins().icmp_imm_u(IntCC::NotEqual, attend, 0);
         let due = self.b.ins().bor(due, attend);
         let poll = self.b.create_block();
@@ -779,8 +938,17 @@ impl Lower<'_, '_> {
         self.flush_acc();
         // A poll reads and writes no register, but may collect.
         let none = Access::Known(Vec::new());
-        self.point(pc, PointKind::SafePoint { next: vec![to as u32] }, Some(&none));
-        let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.poll);
+        self.point(
+            pc,
+            PointKind::SafePoint {
+                next: vec![to as u32],
+            },
+            Some(&none),
+        );
+        let f = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_poll);
         let a = self.b.ins().iconst(I32, pc as i64);
         let t = self.b.ins().iconst(I32, to as i64);
         let call = self.b.ins().call_indirect(self.poll_sig, f, &[self.ctx, a, t]);
@@ -800,10 +968,11 @@ impl Lower<'_, '_> {
     /// Run the instruction at `pc` by the runtime's generic semantics and
     /// continue where it says: `pc + 1`, the branch target, or out.
     fn slow(&mut self, pc: usize, to: Option<usize>) {
-        self.call_out(self.off.slow, pc, to);
+        self.call_out(self.off.s_slow, pc, to);
     }
 
-    /// [`Lower::slow`] through the runtime entry at `entry` in the context.
+    /// [`Lower::slow`] through the runtime entry at `entry` in the run's
+    /// shared state.
     fn call_out(&mut self, entry: i32, pc: usize, to: Option<usize>) {
         self.flush_acc();
         let mut succ = vec![pc + 1];
@@ -811,7 +980,7 @@ impl Lower<'_, '_> {
         let reads = access(&self.code.instrs[pc]);
         let next = succ.iter().map(|&s| s as u32).collect();
         self.point(pc, PointKind::SafePoint { next }, Some(&reads));
-        let f = self.b.ins().load(self.ptr, flags(), self.ctx, entry);
+        let f = self.b.ins().load(self.ptr, flags(), self.sh, entry);
         let a = self.b.ins().iconst(I32, pc as i64);
         let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
         let r = self.b.inst_results(call)[0];
@@ -877,6 +1046,17 @@ impl Lower<'_, '_> {
         }
         let lv = self.read(l);
         let rv = self.read(r);
+        if let Some(negated) = equality(op) {
+            let c = self.equal(pc, lv, rv, loose(op), None);
+            let c = if negated {
+                self.b.ins().bxor_imm_u(c, 1)
+            } else {
+                c
+            };
+            self.set_acc_bool(c);
+            self.next(pc);
+            return;
+        }
         let both = self.numbers(&[lv, rv]);
         self.fast_or_slow(pc, both, None);
         let x = self.f64(lv);
@@ -895,8 +1075,15 @@ impl Lower<'_, '_> {
             BinOp::Mod | BinOp::Exp => {
                 // The runtime's own number semantics, called in place: it
                 // reads no frame state, so nothing is flushed.
-                let a = if op == BinOp::Mod { Arith::Mod } else { Arith::Exp };
-                let f = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.arith);
+                let a = if op == BinOp::Mod {
+                    Arith::Mod
+                } else {
+                    Arith::Exp
+                };
+                let f = self
+                    .b
+                    .ins()
+                    .load(self.ptr, flags(), self.sh, self.off.s_arith);
                 let k = self.b.ins().iconst(I32, a as i64);
                 let call = self.b.ins().call_indirect(self.arith_sig, f, &[k, x, y]);
                 let z = self.b.inst_results(call)[0];
@@ -956,6 +1143,16 @@ impl Lower<'_, '_> {
         }
         let lv = self.read(l);
         let rv = self.read(r);
+        if let Some(negated) = equality(op) {
+            let c = self.equal(pc, lv, rv, loose(op), Some(to));
+            let c = if negated == when {
+                self.b.ins().bxor_imm_u(c, 1)
+            } else {
+                c
+            };
+            self.branch(pc, c, to);
+            return;
+        }
         let both = self.numbers(&[lv, rv]);
         self.fast_or_slow(pc, both, Some(to));
         let x = self.f64(lv);
@@ -963,6 +1160,77 @@ impl Lower<'_, '_> {
         let c = self.b.ins().fcmp(float_cc(op), x, y);
         let c = if when { c } else { self.b.ins().bxor_imm_u(c, 1) };
         self.branch(pc, c, to);
+    }
+
+    /// Whether `lv` and `rv` are equal, strictly or (`loose`) loosely,
+    /// decided here for every pair that needs neither the heap nor a
+    /// conversion: values of one type other than two strings or two
+    /// BigInts that are not the same one, values of different types under
+    /// `===`, and under `==` any pair with `null` or `undefined` in it.
+    /// The other pairs run the instruction at `pc` by the runtime.
+    fn equal(&mut self, pc: usize, lv: Val, rv: Val, loose: bool, to: Option<usize>) -> Ir {
+        let x = self.f64(lv);
+        let y = self.f64(rv);
+        let numbers = self.b.ins().fcmp(FloatCC::Equal, x, y);
+        if lv.tag.is_none() && rv.tag.is_none() {
+            return numbers;
+        }
+        let tag = |s: &mut Self, v: Val| match v.tag {
+            Some(t) => s.b.ins().band_imm_u(t, 0xff),
+            None => s.b.ins().iconst(I64, TAG_NUMBER as i64),
+        };
+        let ta = tag(self, lv);
+        let tb = tag(self, rv);
+        let same = self.b.ins().icmp(IntCC::Equal, ta, tb);
+        let is = |s: &mut Self, t: Ir, k: u8| s.b.ins().icmp_imm_u(IntCC::Equal, t, k as i64);
+        let number = is(self, ta, TAG_NUMBER);
+        let boolean = is(self, ta, TAG_BOOL);
+        let object = is(self, ta, TAG_OBJECT);
+        let symbol = is(self, ta, TAG_SYMBOL);
+        let string = is(self, ta, TAG_STRING);
+        let bigint = is(self, ta, TAG_BIGINT);
+        // A boolean is one byte of the payload, an id four.
+        let ba = self.b.ins().band_imm_u(lv.pay, 0xff);
+        let bb = self.b.ins().band_imm_u(rv.pay, 0xff);
+        let booleans = self.b.ins().icmp(IntCC::Equal, ba, bb);
+        let ia = self.b.ins().band_imm_u(lv.pay, 0xffff_ffff);
+        let ib = self.b.ins().band_imm_u(rv.pay, 0xffff_ffff);
+        let ids = self.b.ins().icmp(IntCC::Equal, ia, ib);
+        let heap = self.b.ins().bor(string, bigint);
+        let reference = self.b.ins().bor(object, symbol);
+        let by_id = self.b.ins().bor(reference, heap);
+        // Of one type: undefined, null and the empty value have one value.
+        let one = self.b.ins().iconst(types::I8, 1);
+        let e = self.b.ins().select(by_id, ids, one);
+        let e = self.b.ins().select(boolean, booleans, e);
+        let e = self.b.ins().select(number, numbers, e);
+        let equal = self.b.ins().band(same, e);
+        // Two strings or two BigInts that are not the same one are
+        // compared by the runtime.
+        let differ = self.b.ins().bxor_imm_u(ids, 1);
+        let by_content = self.b.ins().band(heap, differ);
+        let mut undecided = self.b.ins().band(same, by_content);
+        let mut result = equal;
+        if loose {
+            let nullish = |s: &mut Self, t: Ir| {
+                let u = is(s, t, TAG_UNDEFINED);
+                let n = is(s, t, TAG_NULL);
+                s.b.ins().bor(u, n)
+            };
+            let na = nullish(self, ta);
+            let nb = nullish(self, tb);
+            let both = self.b.ins().band(na, nb);
+            let either = self.b.ins().bor(na, nb);
+            result = self.b.ins().bor(equal, both);
+            // Different types, neither null nor undefined: a conversion.
+            let different = self.b.ins().bxor_imm_u(same, 1);
+            let neither = self.b.ins().bxor_imm_u(either, 1);
+            let converts = self.b.ins().band(different, neither);
+            undecided = self.b.ins().bor(undecided, converts);
+        }
+        let decided = self.b.ins().bxor_imm_u(undecided, 1);
+        self.fast_or_slow(pc, Some(decided), to);
+        result
     }
 
     /// `JumpIfTrue` / `JumpIfFalse`: ToBoolean inline for every type but
@@ -1059,8 +1327,15 @@ impl Lower<'_, '_> {
 
     /// The address of object `id` (a 64-bit word holding a `u32` id).
     fn object(&mut self, h: &HeapLayout, id: Ir) -> Ir {
-        let base = self.b.ins().load(self.ptr, flags(), self.ctx, self.off.objects);
-        let id = if self.ptr == I64 { id } else { self.b.ins().ireduce(self.ptr, id) };
+        let base = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_objects);
+        let id = if self.ptr == I64 {
+            id
+        } else {
+            self.b.ins().ireduce(self.ptr, id)
+        };
         let at = self.b.ins().imul_imm_u(id, h.obj_stride as i64);
         let o = self.b.ins().iadd(base, at);
         self.b.ins().iadd_imm_u(o, h.obj_offset as i64)
@@ -1225,7 +1500,10 @@ impl Lower<'_, '_> {
             self.check(is_proto, miss);
             let proto = self.load_u32(o, h.proto);
             let eproto = self.load_u32(e, std::mem::offset_of!(IcEntry, proto) as u32);
-            let epoch = self.b.ins().uload32(flags(), self.ctx, self.off.proto_epoch);
+            let epoch = self
+                .b
+                .ins()
+                .uload32(flags(), self.sh, self.off.s_proto_epoch);
             let eepoch = self.load_u32(e, std::mem::offset_of!(IcEntry, epoch) as u32);
             let p_ok = self.b.ins().icmp(IntCC::Equal, proto, eproto);
             let e_ok = self.b.ins().icmp(IntCC::Equal, epoch, eepoch);
@@ -1374,6 +1652,638 @@ impl Lower<'_, '_> {
         self.b.ins().store(flags(), vp, a, PAYLOAD_OFFSET as i32);
         self.next(pc);
         self.fill_slow(miss, pc);
+    }
+
+    // ---- calls ----------------------------------------------------------------
+    //
+    // A `Call` of a function the runtime's table has is made in machine
+    // code (TASK-101.3.3): the callee's frame is pushed on the runtime's own
+    // frame stack, its machine code is called on the native stack, and the
+    // frame is popped when it returns. Nothing of the calling function is
+    // outside its interpreter frame meanwhile but what the call's safe
+    // point lists (the same point a call through the runtime uses), and the
+    // callee keeps nothing in machine state at all, so the collector and a
+    // debugger see every frame as they do under the interpreter. Whatever
+    // the fast path cannot do, the runtime does: every guard that fails
+    // makes the call through `Runtime::call`, from the same state.
+    //
+    // The sequence is long, so there is one copy of it, the call thunk
+    // ([`compile_thunk`]), which every call site calls with the
+    // instruction's operands: a site is the safe point and a call.
+
+    /// The call through the runtime, after the call's safe point.
+    fn call_runtime(&mut self, pc: usize) {
+        let f = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_call);
+        let a = self.b.ins().iconst(I32, pc as i64);
+        let call = self.b.ins().call_indirect(self.slow_sig, f, &[self.ctx, a]);
+        let r = self.b.inst_results(call)[0];
+        self.continue_at(r, pc, &[pc + 1]);
+    }
+
+    fn call(&mut self, pc: usize, callee: u16, this: u16, args: u16, argc: u16) {
+        // The call's safe point, whichever way the call is made: the
+        // registers the call reads are in the file, the others this
+        // function holds are spilled and listed.
+        self.flush_acc();
+        let reads = access(&self.code.instrs[pc]);
+        let next = vec![pc as u32 + 1];
+        self.point(pc, PointKind::SafePoint { next }, Some(&reads));
+        if self.thunk == 0 || !self.calls.is_some_and(|c| c.direct) {
+            self.call_runtime(pc);
+            return;
+        }
+        // The thunk makes the call or has the runtime make it, and answers
+        // as a call out does: the pc to continue at, with the accumulator
+        // and the register window in the context, or an exit code.
+        let f = self.b.ins().iconst(I64, self.thunk as i64);
+        let ops = (callee as u64) | (this as u64) << 16 | (args as u64) << 32 | (argc as u64) << 48;
+        let ops = self.b.ins().iconst(I64, ops as i64);
+        let a = self.b.ins().iconst(I32, pc as i64);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.thunk_sig, f, &[self.ctx, self.sh, ops, a]);
+        let r = self.b.inst_results(call)[0];
+        self.continue_at(r, pc, &[pc + 1]);
+    }
+
+    /// Copy `size` bytes (a multiple of 8) from `src` to `dst`.
+    fn copy_bytes(&mut self, dst: Ir, src: Ir, size: u32) {
+        let unaligned = MemFlagsData::new().with_notrap();
+        let mut at = 0i32;
+        while at as u32 + 16 <= size {
+            let v = self.b.ins().load(I64X2, unaligned, src, at);
+            self.b.ins().store(unaligned, v, dst, at);
+            at += 16;
+        }
+        while at as u32 + 8 <= size {
+            let v = self.b.ins().load(I64, flags(), src, at);
+            self.b.ins().store(flags(), v, dst, at);
+            at += 8;
+        }
+    }
+
+    /// A field of `size` bytes (4 or 8) at `base + off`.
+    fn load_field(&mut self, base: Ir, off: u32, size: u32) -> Ir {
+        let ty = if size == 4 { I32 } else { I64 };
+        self.b
+            .ins()
+            .load(ty, MemFlagsData::new().with_notrap(), base, off as i32)
+    }
+
+    /// Register `r` (a 64-bit index) of the window at `regs`.
+    fn register(&mut self, regs: Ir, r: Ir) -> (Ir, Ir) {
+        let at = self.b.ins().imul_imm_u(r, SIZE as i64);
+        let a = self.b.ins().iadd(regs, at);
+        let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+        let p = self.b.ins().load(I64, flags(), a, PAYLOAD_OFFSET as i32);
+        (t, p)
+    }
+
+    /// Return what the runtime entry `entry` (two arguments) answers.
+    fn thunk_tail(&mut self, entry: i32, arg: Ir) {
+        let f = self.b.ins().load(self.ptr, flags(), self.sh, entry);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.slow_sig, f, &[self.ctx, arg]);
+        let r = self.b.inst_results(call)[0];
+        self.b.ins().return_(&[r]);
+    }
+
+    /// Return what `Runtime::returned` answers for the call at `pc`, the
+    /// callee's value being `(t, p)`.
+    fn thunk_returned(&mut self, pc: Ir, t: Ir, p: Ir, popped: bool) {
+        self.store_value(self.ctx, self.off.acc, t, p);
+        let f = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_ret);
+        let k = self.b.ins().iconst(I32, popped as i64);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.poll_sig, f, &[self.ctx, pc, k]);
+        let r = self.b.inst_results(call)[0];
+        self.b.ins().return_(&[r]);
+    }
+
+    /// The call thunk's body: the `Call` at `pc` (an `i32`) whose operands
+    /// are packed in `ops` (callee, `this` and first argument registers and
+    /// the argument count, sixteen bits each from the low end), for the
+    /// frame whose context is this function's.
+    fn thunk(&mut self, h: &HeapLayout, c: &CallLayout, slot: StackSlot, ops: Ir, pc: Ir) {
+        let size = c.frame_size as i64;
+        let miss = self.slow_block();
+        let callee = self.b.ins().band_imm_u(ops, 0xffff);
+        let this = self.b.ins().ushr_imm_u(ops, 16);
+        let this = self.b.ins().band_imm_u(this, 0xffff);
+        let args = self.b.ins().ushr_imm_u(ops, 32);
+        let args = self.b.ins().band_imm_u(args, 0xffff);
+        let argc = self.b.ins().ushr_imm_u(ops, 48);
+        let mine = self.b.use_var(self.regs);
+
+        // The callee: a function object whose code block the runtime's
+        // table has (an empty entry's key equals none), for the function's
+        // realm.
+        let (ft, fp) = self.register(mine, callee);
+        let is_obj = self.is_tag(ft, TAG_OBJECT);
+        self.check(is_obj, miss);
+        let id = self.b.ins().band_imm_u(fp, 0xffff_ffff);
+        let o = self.object(h, id);
+        let class = self.load_u8(o, h.class);
+        let is_fn = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, class, c.class_function as i64);
+        self.check(is_fn, miss);
+        let fd = self.b.ins().load(I64, flags(), o, c.function_data as i32);
+        let code_w = self.b.ins().load(I64, flags(), fd, c.fn_code as i32);
+        let table = self.b.ins().load(I64, flags(), self.sh, self.off.s_callees);
+        let mult = self.b.ins().iconst(I64, CALLEE_HASH as i64);
+        let hash = self.b.ins().imul(code_w, mult);
+        let bucket = self.b.ins().ushr_imm_u(hash, (64 - CALLEE_BITS) as i64);
+        let at = self
+            .b
+            .ins()
+            .imul_imm_u(bucket, CALLEE.size as i64 * CALLEE_WAYS as i64);
+        let first = self.b.ins().iadd(table, at);
+        let found = self.b.create_block();
+        self.b.append_block_param(found, I64);
+        for way in 0..CALLEE_WAYS {
+            let e = self
+                .b
+                .ins()
+                .iadd_imm_u(first, way as i64 * CALLEE.size as i64);
+            let key = self.b.ins().load(I64, flags(), e, CALLEE.code);
+            let same = self.b.ins().icmp(IntCC::Equal, code_w, key);
+            if way + 1 < CALLEE_WAYS {
+                let next = self.b.create_block();
+                self.b.ins().brif(same, found, &[e.into()], next, &[]);
+                self.b.switch_to_block(next);
+            } else {
+                self.b.ins().brif(same, found, &[e.into()], miss, &[]);
+            }
+        }
+        self.b.switch_to_block(found);
+        let s = self.b.block_params(found)[0];
+        let realm = self.b.ins().load(I32, flags(), fd, c.fn_realm as i32);
+        let entry_realm = self.b.ins().load(I32, flags(), s, CALLEE.realm);
+        let same_realm = self.b.ins().icmp(IntCC::Equal, realm, entry_realm);
+        self.check(same_realm, miss);
+
+        // No poll is due at the function's entry (ADR 0019 J7), no safe
+        // point is wanted, and the native stack is above the runtime's
+        // floor for one more machine frame.
+        let cnt = self.b.ins().load(I32, flags(), self.sh, self.off.s_counter);
+        let cnt = self.b.ins().iadd_imm_u(cnt, 1);
+        let low = self.b.ins().band_imm_u(cnt, 0xfff);
+        let not_due = self.b.ins().icmp_imm_u(IntCC::NotEqual, low, 0);
+        let attend = self.b.ins().load(I32, flags(), self.sh, self.off.s_attend);
+        let calm = self.b.ins().icmp_imm_u(IntCC::Equal, attend, 0);
+        let sp = self.b.ins().get_stack_pointer(I64);
+        let floor = self.b.ins().load(I64, flags(), self.sh, self.off.s_floor);
+        let shallow = self.b.ins().icmp(IntCC::UnsignedGreaterThan, sp, floor);
+        let ok = self.b.ins().band(not_due, calm);
+        let ok = self.b.ins().band(ok, shallow);
+        self.check(ok, miss);
+
+        // `this`: as passed, or (a function that takes the global object
+        // for a missing `this`) the global object the frame image holds. A
+        // primitive such a function would box is the runtime's.
+        let (tt, tp) = self.register(mine, this);
+        let mode = self.load_u8(fd, c.fn_this_mode);
+        let global = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, mode, c.this_mode_global as i64);
+        let ttag = self.b.ins().band_imm_u(tt, 0xff);
+        let t_obj = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, ttag, TAG_OBJECT as i64);
+        let t_undef = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, ttag, TAG_UNDEFINED as i64);
+        let t_null = self.b.ins().icmp_imm_u(IntCC::Equal, ttag, TAG_NULL as i64);
+        let nullish = self.b.ins().bor(t_undef, t_null);
+        let as_passed = self.b.ins().bxor_imm_u(global, 1);
+        let ok = self.b.ins().bor(as_passed, t_obj);
+        let ok = self.b.ins().bor(ok, nullish);
+        self.check(ok, miss);
+        let image = self.b.ins().load(I64, flags(), s, CALLEE.template);
+        let gt = self
+            .b
+            .ins()
+            .load(I64, flags(), image, c.frame_this as i32 + TAG_OFFSET as i32);
+        let gp = self.b.ins().load(
+            I64,
+            flags(),
+            image,
+            c.frame_this as i32 + PAYLOAD_OFFSET as i32,
+        );
+        let subst = self.b.ins().band(global, nullish);
+        let tt = self.b.ins().select(subst, gt, tt);
+        let tp = self.b.ins().select(subst, gp, tp);
+
+        // Room for the frame and its registers without growing either
+        // vector, and the callee's inline caches of the current epoch (what
+        // the runtime checks when it pushes a frame).
+        let fv = self.b.ins().load(I64, flags(), self.sh, self.off.s_frames);
+        let fl = self.b.ins().load(I64, flags(), fv, c.frames.len as i32);
+        let fcap = self.b.ins().load(I64, flags(), fv, c.frames.cap as i32);
+        let room = self.b.ins().icmp(IntCC::UnsignedLessThan, fl, fcap);
+        let under = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, fl, c.max_frames as i64);
+        let rv = self
+            .b
+            .ins()
+            .load(I64, flags(), self.sh, self.off.s_registers);
+        let rl = self.b.ins().load(I64, flags(), rv, c.registers.len as i32);
+        let rcap = self.b.ins().load(I64, flags(), rv, c.registers.cap as i32);
+        let n = self.b.ins().uload32(flags(), s, CALLEE.registers);
+        let nl = self.b.ins().iadd(rl, n);
+        let fits = self.b.ins().icmp(IntCC::UnsignedLessThanOrEqual, nl, rcap);
+        let epoch_at = self.b.ins().load(I64, flags(), s, CALLEE.shape_epoch);
+        let epoch = self.b.ins().load(I64, flags(), epoch_at, 0);
+        let now = self
+            .b
+            .ins()
+            .load(I64, flags(), self.sh, self.off.s_shape_epoch);
+        let fresh = self.b.ins().icmp(IntCC::Equal, epoch, now);
+        let ok = self.b.ins().band(room, under);
+        let ok = self.b.ins().band(ok, fits);
+        let ok = self.b.ins().band(ok, fresh);
+        self.check(ok, miss);
+
+        // ---- the call is made here from now on ----
+        self.b
+            .ins()
+            .store(flags(), cnt, self.sh, self.off.s_counter);
+        let made = self
+            .b
+            .ins()
+            .load(I64, flags(), self.sh, self.off.s_direct_calls);
+        let made = self.b.ins().iadd_imm_u(made, 1);
+        self.b
+            .ins()
+            .store(flags(), made, self.sh, self.off.s_direct_calls);
+
+        // The caller's frame, written back as before any call.
+        let frames = self.b.ins().load(I64, flags(), fv, c.frames.ptr as i32);
+        let at = self.b.ins().imul_imm_u(fl, size);
+        let nf = self.b.ins().iadd(frames, at);
+        let cf = self.b.ins().iadd_imm_s(nf, -size);
+        let after = self.b.ins().uextend(I64, pc);
+        let after = self.b.ins().iadd_imm_u(after, 1);
+        self.b.ins().store(flags(), after, cf, c.frame_pc as i32);
+        let (at, ap) = self.acc();
+        self.store_value(cf, c.frame_acc as i32, at, ap);
+
+        // The callee's frame: the image, then what differs per call. The
+        // image's reference to the code block is taken by counting it.
+        self.copy_bytes(nf, image, c.frame_size);
+        self.b.ins().store(flags(), rl, nf, c.frame_base as i32);
+        self.store_value(nf, c.frame_this as i32, tt, tp);
+        self.b.ins().store(flags(), argc, nf, c.frame_argc as i32);
+        let id32 = self.b.ins().ireduce(I32, id);
+        self.b.ins().store(flags(), id32, nf, c.frame_callee as i32);
+        let unaligned = MemFlagsData::new().with_notrap();
+        let env = self.load_field(fd, c.fn_env, c.env_size);
+        self.b.ins().store(unaligned, env, nf, c.frame_env as i32);
+        self.b
+            .ins()
+            .store(unaligned, env, nf, c.frame_base_env as i32);
+        let module = self.load_field(fd, c.fn_module, c.module_size);
+        self.b
+            .ins()
+            .store(unaligned, module, nf, c.frame_module as i32);
+        let count = self.b.ins().load(I64, flags(), code_w, 0);
+        let count = self.b.ins().iadd_imm_u(count, 1);
+        self.b.ins().store(flags(), count, code_w, 0);
+        let pushed = self.b.ins().iadd_imm_u(fl, 1);
+        self.b.ins().store(flags(), pushed, fv, c.frames.len as i32);
+
+        // Its registers: undefined, then the arguments it takes (as many
+        // as it has parameter registers for).
+        let file = self.b.ins().load(I64, flags(), rv, c.registers.ptr as i32);
+        let at = self.b.ins().imul_imm_u(rl, SIZE as i64);
+        let window = self.b.ins().iadd(file, at);
+        let zero = self.b.ins().iconst(I64, 0);
+        const { assert!(TAG_UNDEFINED == 0) };
+        let undefined = self.b.ins().scalar_to_vector(I64X2, zero);
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let cleared = self.b.create_block();
+        self.b.append_block_param(head, I64);
+        self.b.ins().jump(head, &[zero.into()]);
+        self.b.switch_to_block(head);
+        let i = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, i, n);
+        self.b.ins().brif(more, body, &[], cleared, &[]);
+        self.b.switch_to_block(body);
+        let at = self.b.ins().imul_imm_u(i, SIZE as i64);
+        let a = self.b.ins().iadd(window, at);
+        self.b.ins().store(unaligned, undefined, a, 0);
+        let i1 = self.b.ins().iadd_imm_u(i, 1);
+        self.b.ins().jump(head, &[i1.into()]);
+        self.b.switch_to_block(cleared);
+        self.b.ins().store(flags(), nl, rv, c.registers.len as i32);
+        let params = self.b.ins().uload32(flags(), s, CALLEE.param_regs);
+        let take = self.b.ins().umin(params, argc);
+        let first = self.b.ins().uload32(flags(), s, CALLEE.param_base);
+        let at = self.b.ins().imul_imm_u(first, SIZE as i64);
+        let dst = self.b.ins().iadd(window, at);
+        let at = self.b.ins().imul_imm_u(args, SIZE as i64);
+        let src = self.b.ins().iadd(mine, at);
+        let head = self.b.create_block();
+        let body = self.b.create_block();
+        let copied = self.b.create_block();
+        self.b.append_block_param(head, I64);
+        self.b.ins().jump(head, &[zero.into()]);
+        self.b.switch_to_block(head);
+        let j = self.b.block_params(head)[0];
+        let more = self.b.ins().icmp(IntCC::UnsignedLessThan, j, take);
+        self.b.ins().brif(more, body, &[], copied, &[]);
+        self.b.switch_to_block(body);
+        let at = self.b.ins().imul_imm_u(j, SIZE as i64);
+        let from = self.b.ins().iadd(src, at);
+        let to = self.b.ins().iadd(dst, at);
+        let v = self.b.ins().load(I64X2, unaligned, from, 0);
+        self.b.ins().store(unaligned, v, to, 0);
+        let j1 = self.b.ins().iadd_imm_u(j, 1);
+        self.b.ins().jump(head, &[j1.into()]);
+        self.b.switch_to_block(copied);
+
+        // The realm, the callee's context, and the call. The caller's
+        // window is kept as an offset: the register file may move under
+        // the callee.
+        let realm_at = self.b.ins().load(I64, flags(), self.sh, self.off.s_realm);
+        self.b.ins().store(flags(), realm, realm_at, 0);
+        let cc = self.b.ins().stack_addr(I64, slot, 0);
+        self.b.ins().store(flags(), window, cc, self.off.regs);
+        self.b.ins().store(flags(), self.sh, cc, self.off.shared);
+        let ic = self.b.ins().load(I64, flags(), s, CALLEE.ic);
+        self.b.ins().store(flags(), ic, cc, self.off.ic);
+        let info = self.b.ins().load(I64, flags(), s, CALLEE.info);
+        self.b.ins().store(flags(), info, cc, self.off.info);
+        let pc0 = self.b.ins().iconst(I32, 0);
+        self.b.ins().store(flags(), pc0, cc, self.off.pc);
+        let none = self.b.ins().iconst(I32, NO_POINT as i64);
+        self.b.ins().store(flags(), none, cc, self.off.point);
+        self.b.ins().store(flags(), zero, cc, self.off.spill);
+        self.b.ins().store(unaligned, undefined, cc, self.off.acc);
+        self.store_value(cc, self.off.this, tt, tp);
+        let delta = self.b.ins().isub(mine, file);
+        let entry = self.b.ins().load(I64, flags(), s, CALLEE.entry);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.fn_sig, entry, &[cc, self.sh]);
+        let r = self.b.inst_results(call)[0];
+        let returned = self.b.ins().icmp_imm_u(IntCC::Equal, r, EXIT_RETURN as i64);
+        let back = self.b.create_block();
+        let left = self.slow_block();
+        self.b.ins().brif(returned, back, &[], left, &[]);
+
+        // The callee left compiled code some other way: so does the
+        // caller, its frame materialised first.
+        self.b.switch_to_block(left);
+        self.thunk_tail(self.off.s_left, r);
+
+        // It returned: its frame is the top one. Popping it gives back its
+        // reference to the code block, which machine code does only while
+        // another holder remains; the last reference is the runtime's to
+        // drop.
+        self.b.switch_to_block(back);
+        let vt = self
+            .b
+            .ins()
+            .load(I64, flags(), cc, self.off.acc + TAG_OFFSET as i32);
+        let vp = self
+            .b
+            .ins()
+            .load(I64, flags(), cc, self.off.acc + PAYLOAD_OFFSET as i32);
+        let fl = self.b.ins().load(I64, flags(), fv, c.frames.len as i32);
+        let frames = self.b.ins().load(I64, flags(), fv, c.frames.ptr as i32);
+        let at = self.b.ins().imul_imm_u(fl, size);
+        let end = self.b.ins().iadd(frames, at);
+        let top = self.b.ins().iadd_imm_s(end, -size);
+        let code_w = self.b.ins().load(I64, flags(), top, c.frame_code as i32);
+        let count = self.b.ins().load(I64, flags(), code_w, 0);
+        let held = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, count, 1);
+        let pop = self.b.create_block();
+        let unpopped = self.slow_block();
+        self.b.ins().brif(held, pop, &[], unpopped, &[]);
+        self.b.switch_to_block(unpopped);
+        self.thunk_returned(pc, vt, vp, false);
+
+        self.b.switch_to_block(pop);
+        let count = self.b.ins().iadd_imm_s(count, -1);
+        self.b.ins().store(flags(), count, code_w, 0);
+        let popped = self.b.ins().iadd_imm_s(fl, -1);
+        self.b.ins().store(flags(), popped, fv, c.frames.len as i32);
+        let base = self.b.ins().load(I64, flags(), top, c.frame_base as i32);
+        self.b
+            .ins()
+            .store(flags(), base, rv, c.registers.len as i32);
+        let caller = self.b.ins().iadd_imm_s(top, -size);
+        let realm = self
+            .b
+            .ins()
+            .load(I32, flags(), caller, c.frame_realm as i32);
+        self.b.ins().store(flags(), realm, realm_at, 0);
+        // The poll after a call returns (J7), and any safe point the callee
+        // left wanted.
+        let cnt = self.b.ins().load(I32, flags(), self.sh, self.off.s_counter);
+        let cnt = self.b.ins().iadd_imm_u(cnt, 1);
+        let low = self.b.ins().band_imm_u(cnt, 0xfff);
+        let due = self.b.ins().icmp_imm_u(IntCC::Equal, low, 0);
+        let attend = self.b.ins().load(I32, flags(), self.sh, self.off.s_attend);
+        let wanted = self.b.ins().icmp_imm_u(IntCC::NotEqual, attend, 0);
+        let due = self.b.ins().bor(due, wanted);
+        let on = self.b.create_block();
+        let poll = self.slow_block();
+        self.b.ins().brif(due, poll, &[], on, &[]);
+        self.b.switch_to_block(poll);
+        self.thunk_returned(pc, vt, vp, true);
+
+        // The caller goes on at the next instruction, from its context: the
+        // value returned, and its window where the register file is now.
+        self.b.switch_to_block(on);
+        self.b
+            .ins()
+            .store(flags(), cnt, self.sh, self.off.s_counter);
+        let file = self.b.ins().load(I64, flags(), rv, c.registers.ptr as i32);
+        let mine = self.b.ins().iadd(file, delta);
+        self.b.ins().store(flags(), mine, self.ctx, self.off.regs);
+        self.store_value(self.ctx, self.off.acc, vt, vp);
+        let next = self.b.ins().iadd_imm_u(pc, 1);
+        self.b.ins().return_(&[next]);
+
+        // Not a call the thunk makes: the runtime's.
+        self.b.switch_to_block(miss);
+        self.thunk_tail(self.off.s_call, pc);
+    }
+
+    // ---- bindings ---------------------------------------------------------------
+    //
+    // Environment slots and global bindings read in machine code
+    // (TASK-101.3.3). Both are loads from the runtime's own storage, found
+    // afresh by each instruction: the frame stack and the arenas may move
+    // under any call out. Whatever is not as the fast path expects (an
+    // environment that is not a declarative record with that slot, a global
+    // site of another stamp or realm, a binding that is empty or not a
+    // plain value) is the runtime's, through the same entry as before.
+
+    /// The address of the top frame: the one this code is running.
+    fn top_frame(&mut self, c: &CallLayout) -> Ir {
+        let fv = self.b.ins().load(I64, flags(), self.sh, self.off.s_frames);
+        let fl = self.b.ins().load(I64, flags(), fv, c.frames.len as i32);
+        let frames = self.b.ins().load(I64, flags(), fv, c.frames.ptr as i32);
+        let at = self.b.ins().imul_imm_u(fl, c.frame_size as i64);
+        let end = self.b.ins().iadd(frames, at);
+        self.b.ins().iadd_imm_s(end, -(c.frame_size as i64))
+    }
+
+    /// The address of binding `slot` of the environment `depth` levels out
+    /// from the frame's innermost one, or a jump to `miss`.
+    fn env_slot(
+        &mut self,
+        c: &CallLayout,
+        e: &EnvLayout,
+        depth: u16,
+        slot: u16,
+        miss: Block,
+    ) -> Ir {
+        let top = self.top_frame(c);
+        let envs = self.b.ins().load(I64, flags(), self.sh, self.off.s_envs);
+        // An optional environment id: the frame's, then each parent's.
+        let mut option = self.b.ins().iadd_imm_u(top, c.frame_env as i64);
+        let mut env = None;
+        for _ in 0..=depth {
+            let tag = self.b.ins().uload8(I64, flags(), option, e.opt_tag as i32);
+            let some = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, tag, e.opt_some as i64);
+            self.check(some, miss);
+            let id = self.b.ins().uload32(flags(), option, e.opt_id as i32);
+            let at = self.b.ins().imul_imm_u(id, e.stride as i64);
+            let a = self.b.ins().iadd(envs, at);
+            let a = self.b.ins().iadd_imm_u(a, e.offset as i64);
+            let kind = self.b.ins().uload8(I64, flags(), a, e.kind as i32);
+            let declarative = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, kind, e.declarative as i64);
+            self.check(declarative, miss);
+            option = self.b.ins().iadd_imm_u(a, e.parent as i64);
+            env = Some(a);
+        }
+        let env = env.expect("at least the innermost environment");
+        let len = self.b.ins().load(I64, flags(), env, e.slots_len as i32);
+        let has = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedGreaterThan, len, slot as i64);
+        self.check(has, miss);
+        let slots = self.b.ins().load(I64, flags(), env, e.slots_ptr as i32);
+        self.b.ins().iadd_imm_u(slots, slot as i64 * SIZE as i64)
+    }
+
+    /// `LdaEnv` (`acc = slot`) or `StaEnv` (`slot = acc`).
+    fn env_access(&mut self, pc: usize, depth: u16, slot: u16, store: bool) {
+        // Deep chains stay with the runtime: each level is a few loads.
+        let layout = self
+            .calls
+            .and_then(|c| c.env.map(|e| (c, e)))
+            .filter(|_| depth <= 8);
+        let Some((c, e)) = layout else {
+            self.call_out(self.off.s_fast, pc, None);
+            return;
+        };
+        let miss = self.slow_block();
+        let a = self.env_slot(&c, &e, depth, slot, miss);
+        if store {
+            let (t, p) = self.acc();
+            self.store_value(a, 0, t, p);
+        } else {
+            let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+            let p = self.b.ins().load(I64, flags(), a, PAYLOAD_OFFSET as i32);
+            self.set_acc(t, p);
+        }
+        self.next(pc);
+        self.b.switch_to_block(miss);
+        self.call_out(self.off.s_fast, pc, None);
+    }
+
+    /// `LdaGlobal`: the binding's value where its site says it is, while
+    /// the site is of the current realm and the runtime's current stamp.
+    fn lda_global(&mut self, pc: usize) {
+        let k = self.global;
+        self.global += 1;
+        if !self.calls.is_some_and(|c| c.globals) || self.globals == 0 {
+            self.call_out(self.off.s_fast, pc, None);
+            return;
+        }
+        let miss = self.slow_block();
+        let at = self.globals + k as usize * std::mem::size_of::<GlobalSite>();
+        let s = self.b.ins().iconst(I64, at as i64);
+        let stamp_at = self
+            .b
+            .ins()
+            .load(I64, flags(), self.sh, self.off.s_global_stamp);
+        let stamp = self.b.ins().load(I64, flags(), stamp_at, 0);
+        let filled = self.b.ins().load(I64, flags(), s, GLOBAL.stamp);
+        let current = self.b.ins().icmp(IntCC::Equal, stamp, filled);
+        let realm_at = self.b.ins().load(I64, flags(), self.sh, self.off.s_realm);
+        let realm = self.b.ins().load(I32, flags(), realm_at, 0);
+        let site_realm = self.b.ins().load(I32, flags(), s, GLOBAL.realm);
+        let same_realm = self.b.ins().icmp(IntCC::Equal, realm, site_realm);
+        let ok = self.b.ins().band(current, same_realm);
+        self.check(ok, miss);
+        let a = self.b.ins().load(I64, flags(), s, GLOBAL.addr);
+        let t = self.b.ins().load(I64, flags(), a, TAG_OFFSET as i32);
+        let tag = self.b.ins().band_imm_u(t, 0xff);
+        // A plain value, and not the empty one (a binding not yet
+        // initialised); an accessor's first byte is above every tag.
+        let value = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, tag, TAG_EMPTY as i64);
+        self.check(value, miss);
+        let p = self.b.ins().load(I64, flags(), a, PAYLOAD_OFFSET as i32);
+        self.set_acc(t, p);
+        self.next(pc);
+
+        // The runtime's cached read, which may fill the site.
+        self.b.switch_to_block(miss);
+        self.flush_acc();
+        let none = Access::Known(Vec::new());
+        let next = vec![pc as u32 + 1];
+        self.point(pc, PointKind::SafePoint { next }, Some(&none));
+        let f = self
+            .b
+            .ins()
+            .load(self.ptr, flags(), self.sh, self.off.s_global);
+        let a = self.b.ins().iconst(I32, pc as i64);
+        let site = self.b.ins().iconst(I32, k as i64);
+        let call = self
+            .b
+            .ins()
+            .call_indirect(self.poll_sig, f, &[self.ctx, a, site]);
+        let r = self.b.inst_results(call)[0];
+        self.continue_at(r, pc, &[pc + 1]);
     }
 
     // ---- instructions -------------------------------------------------------
@@ -1626,8 +2536,13 @@ impl Lower<'_, '_> {
                 return Ok(());
             }
 
-            Instr::Call { .. } => {
-                self.call_out(self.off.call, pc, None);
+            Instr::Call {
+                callee,
+                this,
+                args,
+                argc,
+            } => {
+                self.call(pc, callee, this, args, argc);
                 return Ok(());
             }
             // The frame's `this`, fixed for the run, is in the context.
@@ -1637,8 +2552,20 @@ impl Lower<'_, '_> {
                 let p = self.b.ins().load(I64, flags(), self.ctx, o + PAYLOAD_OFFSET as i32);
                 self.set_acc(t, p);
             }
-            Instr::LdaGlobal(_) | Instr::LdaEnv { .. } | Instr::StaEnv { .. } | Instr::LdaCallee => {
-                self.call_out(self.off.fast, pc, None);
+            Instr::LdaGlobal(_) => {
+                self.lda_global(pc);
+                return Ok(());
+            }
+            Instr::LdaEnv { depth, slot } => {
+                self.env_access(pc, depth, slot, false);
+                return Ok(());
+            }
+            Instr::StaEnv { depth, slot } => {
+                self.env_access(pc, depth, slot, true);
+                return Ok(());
+            }
+            Instr::LdaCallee => {
+                self.call_out(self.off.s_fast, pc, None);
                 return Ok(());
             }
 
@@ -1660,6 +2587,20 @@ impl Lower<'_, '_> {
         self.next(pc);
         Ok(())
     }
+}
+
+/// For an equality operator, whether it is the negated one (`!=`,
+/// `!==`).
+fn equality(op: BinOp) -> Option<bool> {
+    match op {
+        BinOp::Eq | BinOp::StrictEq => Some(false),
+        BinOp::Ne | BinOp::StrictNe => Some(true),
+        _ => None,
+    }
+}
+
+fn loose(op: BinOp) -> bool {
+    matches!(op, BinOp::Eq | BinOp::Ne)
 }
 
 fn float_cc(op: BinOp) -> FloatCC {

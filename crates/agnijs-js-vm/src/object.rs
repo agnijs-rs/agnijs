@@ -290,7 +290,10 @@ pub enum ConstructorKind {
     Derived,
 }
 
+/// `#[repr(u8)]`: compiled code reads it in a function's data (one byte,
+/// the variant's number).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
 pub enum ThisMode {
     /// Arrow functions: `this` comes from the environment.
     Lexical,
@@ -378,6 +381,7 @@ pub struct HostObjectData {
 /// them; they are the declaration-order numbers the others follow).
 pub mod class_tag {
     pub const ARRAY: u8 = 1;
+    pub const FUNCTION: u8 = 2;
     pub const STRING: u8 = 8;
     pub const ARGUMENTS: u8 = 11;
     pub const TYPED_ARRAY: u8 = 28;
@@ -394,7 +398,7 @@ pub mod class_tag {
 pub enum Class {
     Ordinary,
     Array(ArrayData) = class_tag::ARRAY,
-    Function(Box<FunctionData>),
+    Function(Box<FunctionData>) = class_tag::FUNCTION,
     Native(Box<NativeData>),
     Bound(Box<BoundData>),
     /// An object with [[ErrorData]]; the payload is its captured stack
@@ -885,6 +889,8 @@ impl Heap {
             );
         }
         let grown = dict.len() * DICT_ENTRY_BYTES;
+        #[cfg(feature = "jit")]
+        self.move_global_stamp();
         let o = self.objects.get_mut(obj.0);
         o.dict = Some(Box::new(dict));
         let overflow = o.take_slots();
@@ -992,6 +998,10 @@ impl Heap {
                 if o.dict.is_none() && o.slot_count() >= DICT_THRESHOLD {
                     self.make_dictionary(obj);
                 }
+                #[cfg(feature = "jit")]
+                if self.obj(obj).dict.is_some() {
+                    self.move_global_stamp();
+                }
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     d.insert(key, prop);
@@ -1031,6 +1041,15 @@ impl Heap {
             }
             _ => {
                 self.note_structure_change(obj);
+                #[cfg(feature = "jit")]
+                if self
+                    .obj(obj)
+                    .dict
+                    .as_ref()
+                    .is_some_and(|d| !d.contains_key(&key))
+                {
+                    self.move_global_stamp();
+                }
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     d.insert(key, prop);
@@ -1110,6 +1129,10 @@ impl Heap {
             }
             _ => {
                 self.note_structure_change(obj);
+                #[cfg(feature = "jit")]
+                if self.obj(obj).dict.is_some() {
+                    self.move_global_stamp();
+                }
                 let o = self.obj_mut(obj);
                 if let Some(d) = &mut o.dict {
                     return d.shift_remove(&key).is_some();
