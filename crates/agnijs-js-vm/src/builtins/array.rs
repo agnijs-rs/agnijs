@@ -816,6 +816,10 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if len > 1.0 && (len - 1.0) * sep.len() as f64 > vm.max_string_length() as f64 {
         return vm.string_too_long();
     }
+    // Or the memory limit (TASK-103.25).
+    if len > 1.0 {
+        vm.check_memory((len - 1.0) as usize * sep.len())?;
+    }
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
@@ -1281,6 +1285,9 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let args: [Value; 0] = [];
     if len > 1.0 && len - 1.0 > vm.max_string_length() as f64 {
         return vm.string_too_long();
+    }
+    if len > 1.0 {
+        vm.check_memory((len - 1.0) as usize)?;
     }
     let mut b = StrBuilder::new();
     let mut k = 0.0;

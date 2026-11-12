@@ -603,6 +603,32 @@ impl Heap {
         }
     }
 
+    /// Whether `bytes` of new storage would take the heap past the memory
+    /// limit (TASK-103.25). A built-in asks before it allocates a large
+    /// block, because the dispatch loop's check comes only after the call.
+    ///
+    /// A built-in cannot collect, so the garbage allocated since the last
+    /// collection may still be freed: the request is refused when the live
+    /// bytes of the last collection plus the request pass the limit, or
+    /// when everything counted (garbage included) passes twice the limit.
+    /// The first bound refuses what cannot fit, the second bounds what one
+    /// call can take however many blocks it allocates, and neither refuses
+    /// a program that frees what it allocates.
+    #[inline]
+    pub fn would_exceed(&self, bytes: usize) -> bool {
+        match self.memory_limit {
+            None => false,
+            Some(limit) => {
+                self.live_bytes.saturating_add(bytes) > limit
+                    || self
+                        .live_bytes
+                        .saturating_add(self.allocated_since_gc)
+                        .saturating_add(bytes)
+                        > limit.saturating_mul(2)
+            }
+        }
+    }
+
     pub fn set_memory_limit(&mut self, bytes: Option<usize>) {
         self.memory_limit = bytes;
         self.rearm_threshold();
@@ -947,6 +973,14 @@ impl Heap {
             len: total as u32,
             one_byte,
         })))
+    }
+
+    /// The bytes flattening `id` will allocate, if it is a rope.
+    pub fn rope_flat_bytes(&self, id: StrId) -> Option<usize> {
+        match &self.strings.get(id.0).repr {
+            Repr::Rope { len, one_byte, .. } => Some(*len as usize * if *one_byte { 1 } else { 2 }),
+            _ => None,
+        }
     }
 
     /// Make the string flat (not a rope). Iterative, so deep ropes built by

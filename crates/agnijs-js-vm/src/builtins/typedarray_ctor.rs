@@ -812,6 +812,9 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if len > 1 && (len - 1).saturating_mul(sep.len()) > vm.max_string_length() {
         return vm.string_too_long();
     }
+    if len > 1 {
+        vm.check_memory((len - 1) * sep.len())?;
+    }
     let mut b = StrBuilder::new();
     for k in 0..len {
         vm.poll_interrupt()?;

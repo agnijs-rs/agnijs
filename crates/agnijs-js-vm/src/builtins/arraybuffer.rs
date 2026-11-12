@@ -49,6 +49,9 @@ fn zeroed(vm: &mut Vm, len: f64) -> JsResult<Vec<u8>> {
         return vm.range_error("Array buffer allocation failed");
     }
     let n = len as usize;
+    // The memory limit counts the backing store (`Class::payload_bytes`)
+    // from the object's allocation on; refuse it before allocating.
+    vm.check_memory(n)?;
     let mut v = Vec::new();
     if v.try_reserve_exact(n).is_err() {
         return vm.range_error("Array buffer allocation failed");
@@ -295,10 +298,33 @@ fn ab_resize(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if new_len > max as f64 {
         return vm.range_error("new length exceeds maxByteLength");
     }
-    if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(o).class {
-        b.bytes.resize(new_len as usize, 0);
-    }
+    resize_bytes(vm, o, new_len as usize)?;
     Ok(Value::Undefined)
+}
+
+/// Grow or shrink a buffer's store to exactly `new_len` bytes, counting the
+/// growth towards the memory limit and refusing it first when it does not
+/// fit (TASK-103.25). The store keeps no spare capacity, so the bytes the
+/// heap counts (`Class::payload_bytes`) are the bytes it holds.
+fn resize_bytes(vm: &mut Vm, o: ObjId, new_len: usize) -> JsResult<()> {
+    let cur = buffer_byte_length(vm, o);
+    if new_len > cur {
+        vm.check_memory(new_len - cur)?;
+    }
+    let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(o).class else {
+        return Ok(());
+    };
+    if new_len > cur {
+        if b.bytes.try_reserve_exact(new_len - cur).is_err() {
+            return vm.range_error("Array buffer allocation failed");
+        }
+        b.bytes.resize(new_len, 0);
+        vm.heap.note_growth(new_len - cur);
+    } else {
+        b.bytes.truncate(new_len);
+        b.bytes.shrink_to_fit();
+    }
+    Ok(())
 }
 
 fn slice_impl(vm: &mut Vm, a: &CallArgs, shared: bool) -> JsResult<Value> {
@@ -453,9 +479,7 @@ fn sab_grow(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if new_len < cur as f64 {
         return vm.range_error("a SharedArrayBuffer cannot shrink");
     }
-    if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(o).class {
-        b.bytes.resize(new_len as usize, 0);
-    }
+    resize_bytes(vm, o, new_len as usize)?;
     Ok(Value::Undefined)
 }
 

@@ -722,6 +722,36 @@ fn the_memory_limit_stops_runaway_allocation() {
     free_engine(e);
 }
 
+/// TASK-103.25: the limit counts ArrayBuffer stores and collection
+/// entries, and refuses a single oversized allocation before making it.
+#[test]
+fn the_memory_limit_counts_buffers_and_collections_and_refuses_huge_requests() {
+    let mut o = options();
+    o.memory_limit = 16 << 20;
+    let e = engine_with(&o);
+    for src in [
+        "var bufs = []; for (let i = 0; i < 64; i++) bufs.push(new ArrayBuffer(4 << 20));",
+        "var m = new Map(); for (let i = 0; i < 2e6; i++) m.set(i, i);",
+        "'x'.repeat(2 ** 30)",
+        "new ArrayBuffer(4294967295)",
+    ] {
+        let (st, _) = eval_status(e, src);
+        assert_eq!(st, AGNIJS_OUT_OF_MEMORY, "{src}: {}", last_error());
+    }
+    eval(e, "bufs = null; m = null");
+    assert_eq!(eval_display(e, "1 + 1"), "2");
+    // memory_usage reports a buffer's store.
+    assert_eq!(agnijs_set_memory_limit(e, 0), AGNIJS_OK);
+    eval(e, "globalThis.held = new ArrayBuffer(8 << 20)");
+    let mut m = AgnijsMemoryUsage {
+        struct_size: std::mem::size_of::<AgnijsMemoryUsage>() as u32,
+        ..Default::default()
+    };
+    assert_eq!(unsafe { agnijs_memory_usage(e, &mut m) }, AGNIJS_OK);
+    assert!(m.heap_bytes >= 8 << 20, "{}", m.heap_bytes);
+    free_engine(e);
+}
+
 #[test]
 fn a_fuel_budget_stops_an_infinite_loop_at_the_same_instruction_every_time() {
     let run = || {

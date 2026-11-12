@@ -103,11 +103,15 @@ const WORK: &str = "function work() { let keep = 0;
 const LIVE_LIMIT: f64 = 120_000.0;
 
 fn assert_collected_under(src: &str) {
+    assert_collected_under_bound(src, LIVE_LIMIT);
+}
+
+fn assert_collected_under_bound(src: &str, bound: f64) {
     let mut vm = engine(0);
     let v = run(&mut vm, &format!("{WORK}\nvar live = -1, sum = 0;\n{src}\nsum === 300000 ? live : -sum"));
     let live = num(v);
     assert!(live >= 0.0, "work() did not run as expected: {live}");
-    assert!(live < LIVE_LIMIT, "{live} objects still live under the native frame: {src}");
+    assert!(live < bound, "{live} objects still live under the native frame: {src}");
 }
 
 #[test]
@@ -136,10 +140,18 @@ fn garbage_of_earlier_callbacks_is_collected_during_later_ones() {
         format!("var a = new Array(150000).fill(0); a.some((_, i) => {BODY});"),
         format!("var a = new Array(150000).fill(0); a.every((_, i) => {{ {BODY} return true; }});"),
         format!("var a = new Array(150000).fill(0); a.find((_, i) => {BODY});"),
+    ] {
+        assert_collected_under(&src);
+    }
+    // The 150k entries of a Map or Set count in the live bytes (TASK-103.25),
+    // about 11 MiB, and the collection threshold grows with the live bytes,
+    // so more garbage builds up between collections than beside a small
+    // heap. Without a collection under the frame all 300k would be live.
+    for src in [
         format!("var m = new Map(); for (var j = 0; j < 150000; j++) m.set(j, 0); m.forEach((_, i) => {BODY});"),
         format!("var s = new Set(); for (var j = 0; j < 150000; j++) s.add(j); s.forEach((i) => {BODY});"),
     ] {
-        assert_collected_under(&src);
+        assert_collected_under_bound(&src, 150_000.0);
     }
 }
 

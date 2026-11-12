@@ -17,7 +17,16 @@ pub struct MapData {
     pub index: hashbrown::HashMap<MapKey, usize>,
     pub live: usize,
     pub weak: bool,
+    /// Bytes the live keys hold outside the index (string and BigInt
+    /// contents), for `heap_bytes`.
+    key_bytes: usize,
 }
+
+/// What one live entry costs in the memory limit (TASK-103.25): its slot
+/// in `entries` and its key and position in `index` (with hashbrown's
+/// control byte), not counting the contents of a string or BigInt key.
+pub const MAP_ENTRY_BYTES: usize =
+    std::mem::size_of::<Option<(Value, Value)>>() + std::mem::size_of::<(MapKey, usize)>() + 1;
 
 /// A SameValueZero-normalised key: `-0` is `+0`, NaN equals NaN, strings
 /// compare by content.
@@ -40,7 +49,31 @@ impl MapData {
             index: hashbrown::HashMap::new(),
             live: 0,
             weak,
+            key_bytes: 0,
         }
+    }
+
+    /// The bytes a key holds outside the index.
+    fn key_payload(key: &MapKey) -> usize {
+        match key {
+            MapKey::String(u) => u.len() * 2,
+            MapKey::BigInt(b) => b.len(),
+            _ => 0,
+        }
+    }
+
+    /// What a new entry with this key adds to `heap_bytes`.
+    pub fn entry_bytes(key: &MapKey) -> usize {
+        MAP_ENTRY_BYTES + Self::key_payload(key)
+    }
+
+    /// The bytes the live entries hold, which the memory limit and
+    /// `memory_usage` count with the collection object (TASK-103.25).
+    /// The tombstones a Map or Set keeps for its iterators after a
+    /// deletion are not counted (see `docs/security-model.md`); a WeakMap
+    /// or WeakSet, which has no iterators, drops them (`remove`).
+    pub fn heap_bytes(&self) -> usize {
+        self.live * MAP_ENTRY_BYTES + self.key_bytes
     }
 
     /// Strong collections trace keys and values. Weak ones trace nothing
@@ -74,6 +107,7 @@ impl MapData {
             }
             return false;
         }
+        self.key_bytes += Self::key_payload(&key);
         self.index.insert(key, self.entries.len());
         self.entries.push(Some((k, v)));
         self.live += 1;
@@ -81,14 +115,43 @@ impl MapData {
     }
 
     pub fn remove(&mut self, key: &MapKey) -> bool {
-        match self.index.remove(key) {
-            Some(i) => {
+        match self.index.remove_entry(key) {
+            Some((key, i)) => {
+                self.key_bytes -= Self::key_payload(&key);
                 self.entries[i] = None;
                 self.live -= 1;
+                if self.weak {
+                    self.compact_if_sparse();
+                }
                 true
             }
             None => false,
         }
+    }
+
+    /// A weak collection has no iterators, so nothing holds a position in
+    /// `entries`: once tombstones outnumber the live entries, drop them
+    /// and renumber the index. Without this, a WeakMap whose keys keep
+    /// dying would grow by a slot per key it ever held.
+    fn compact_if_sparse(&mut self) {
+        let dead = self.entries.len() - self.live;
+        if dead <= 16 || dead <= self.live {
+            return;
+        }
+        let mut renumber = vec![0usize; self.entries.len()];
+        let mut next = 0;
+        for (i, e) in self.entries.iter().enumerate() {
+            if e.is_some() {
+                renumber[i] = next;
+                next += 1;
+            }
+        }
+        self.entries.retain(Option::is_some);
+        self.entries.shrink_to_fit();
+        for i in self.index.values_mut() {
+            *i = renumber[*i];
+        }
+        self.index.shrink_to_fit();
     }
 
     pub fn clear(&mut self) {
@@ -97,6 +160,7 @@ impl MapData {
         }
         self.index.clear();
         self.live = 0;
+        self.key_bytes = 0;
     }
 
     /// A compacted copy in insertion order (no live iterators point into
@@ -324,6 +388,15 @@ fn data(vm: &mut Vm, o: ObjId) -> &mut MapData {
     }
 }
 
+/// Insert or overwrite an entry of collection `o`, counting a new entry
+/// towards the next collection and the memory limit (TASK-103.25).
+fn map_insert(vm: &mut Vm, o: ObjId, key: MapKey, k: Value, v: Value) {
+    let bytes = MapData::entry_bytes(&key);
+    if data(vm, o).set(key, k, v) {
+        vm.heap.note_growth(bytes);
+    }
+}
+
 fn data_ref(vm: &Vm, o: ObjId) -> &MapData {
     match &vm.heap.obj(o).class {
         Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m,
@@ -515,7 +588,7 @@ fn map_group_by(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let key = normalize(key);
         let mk = map_key(vm, key);
         let arr = Value::Object(vm.new_array(items));
-        data(vm, o).set(mk, key, arr);
+        map_insert(vm, o, mk, key, arr);
     }
     Ok(Value::Object(o))
 }
@@ -550,7 +623,7 @@ fn map_set(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Map, "set")?;
     let key = normalize(a.arg(0));
     let k = map_key(vm, key);
-    data(vm, o).set(k, key, a.arg(1));
+    map_insert(vm, o, k, key, a.arg(1));
     Ok(a.this)
 }
 
@@ -562,7 +635,7 @@ fn map_get_or_insert(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if let Some(v) = data(vm, o).get(&k) {
         return Ok(v);
     }
-    data(vm, o).set(k, key, a.arg(1));
+    map_insert(vm, o, k, key, a.arg(1));
     Ok(a.arg(1))
 }
 
@@ -580,7 +653,7 @@ fn map_get_or_insert_computed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return Ok(v);
     }
     let v = vm.call_value(f, Value::Undefined, &[key])?;
-    data(vm, o).set(k, key, v);
+    map_insert(vm, o, k, key, v);
     Ok(v)
 }
 
@@ -720,7 +793,7 @@ fn set_add(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "add")?;
     let v = normalize(a.arg(0));
     let k = map_key(vm, v);
-    data(vm, o).set(k, v, Value::Undefined);
+    map_insert(vm, o, k, v, Value::Undefined);
     Ok(a.this)
 }
 
@@ -845,29 +918,33 @@ fn raw_entry(vm: &Vm, o: ObjId, i: usize) -> Option<Option<Value>> {
     d.entries.get(i).map(|e| e.map(|(k, _)| k))
 }
 
-fn new_set_from(vm: &mut Vm, md: MapData) -> Value {
+/// The result Set of a Set method, allocated before the method calls back
+/// into JavaScript so that what it adds counts towards the memory limit.
+/// It needs no rooting: a run loop entered after its allocation retains it.
+fn new_set_from(vm: &mut Vm, md: MapData) -> ObjId {
     let proto = vm.intrinsic(Intrinsic::SetPrototype);
-    Value::Object(vm.alloc(ObjectData::new(Some(proto), Class::Set(Box::new(md)))))
+    vm.alloc(ObjectData::new(Some(proto), Class::Set(Box::new(md))))
 }
 
 fn set_union(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "union")?;
     let rec = get_set_record(vm, a.arg(0))?;
     let (iter, next) = keys_iterator(vm, &rec)?;
-    let mut result = data_ref(vm, o).copy();
+    let copy = data_ref(vm, o).copy();
+    let result = new_set_from(vm, copy);
     while let Some(v) = vm.iterator_step_value(iter, next)? {
         vm.poll_interrupt()?;
         let v = normalize(v);
         let k = map_key(vm, v);
-        result.set(k, v, Value::Undefined);
+        map_insert(vm, result, k, v, Value::Undefined);
     }
-    Ok(new_set_from(vm, result))
+    Ok(Value::Object(result))
 }
 
 fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "intersection")?;
     let rec = get_set_record(vm, a.arg(0))?;
-    let mut result = MapData::new(false);
+    let result = new_set_from(vm, MapData::new(false));
     let this_size = data_ref(vm, o).live as f64;
     if this_size <= rec.size {
         let mut i = 0;
@@ -877,7 +954,7 @@ fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             if let Some(e) = slot {
                 if call_has(vm, &rec, e)? {
                     let k = map_key(vm, e);
-                    result.set(k, e, Value::Undefined);
+                    map_insert(vm, result, k, e, Value::Undefined);
                 }
             }
         }
@@ -888,17 +965,18 @@ fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let v = normalize(v);
             let k = map_key(vm, v);
             if data_ref(vm, o).has(&k) {
-                result.set(k, v, Value::Undefined);
+                map_insert(vm, result, k, v, Value::Undefined);
             }
         }
     }
-    Ok(new_set_from(vm, result))
+    Ok(Value::Object(result))
 }
 
 fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "difference")?;
     let rec = get_set_record(vm, a.arg(0))?;
-    let mut result = data_ref(vm, o).copy();
+    let copy = data_ref(vm, o).copy();
+    let result = new_set_from(vm, copy);
     let this_size = data_ref(vm, o).live as f64;
     if this_size <= rec.size {
         let mut i = 0;
@@ -908,7 +986,7 @@ fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             if let Some(e) = slot {
                 if call_has(vm, &rec, e)? {
                     let k = map_key(vm, e);
-                    result.remove(&k);
+                    data(vm, result).remove(&k);
                 }
             }
         }
@@ -917,28 +995,29 @@ fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         while let Some(v) = vm.iterator_step_value(iter, next)? {
             vm.poll_interrupt()?;
             let k = map_key(vm, normalize(v));
-            result.remove(&k);
+            data(vm, result).remove(&k);
         }
     }
-    Ok(new_set_from(vm, result))
+    Ok(Value::Object(result))
 }
 
 fn set_symmetric_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "symmetricDifference")?;
     let rec = get_set_record(vm, a.arg(0))?;
     let (iter, next) = keys_iterator(vm, &rec)?;
-    let mut result = data_ref(vm, o).copy();
+    let copy = data_ref(vm, o).copy();
+    let result = new_set_from(vm, copy);
     while let Some(v) = vm.iterator_step_value(iter, next)? {
         vm.poll_interrupt()?;
         let v = normalize(v);
         let k = map_key(vm, v);
         if data_ref(vm, o).has(&k) {
-            result.remove(&k);
+            data(vm, result).remove(&k);
         } else {
-            result.set(k, v, Value::Undefined);
+            map_insert(vm, result, k, v, Value::Undefined);
         }
     }
-    Ok(new_set_from(vm, result))
+    Ok(Value::Object(result))
 }
 
 fn set_is_subset_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1042,7 +1121,7 @@ fn weakmap_set(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("Invalid value used as weak map key");
     }
     let k = map_key(vm, key);
-    data(vm, o).set(k, key, a.arg(1));
+    map_insert(vm, o, k, key, a.arg(1));
     Ok(a.this)
 }
 
@@ -1057,7 +1136,7 @@ fn weakmap_get_or_insert(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if let Some(v) = data(vm, o).get(&k) {
         return Ok(v);
     }
-    data(vm, o).set(k, key, a.arg(1));
+    map_insert(vm, o, k, key, a.arg(1));
     Ok(a.arg(1))
 }
 
@@ -1077,7 +1156,7 @@ fn weakmap_get_or_insert_computed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> 
         return Ok(v);
     }
     let v = vm.call_value(f, Value::Undefined, &[key])?;
-    data(vm, o).set(k, key, v);
+    map_insert(vm, o, k, key, v);
     Ok(v)
 }
 
@@ -1088,7 +1167,7 @@ fn weakset_add(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.type_error("Invalid value used in weak set");
     }
     let k = map_key(vm, v);
-    data(vm, o).set(k, v, Value::Undefined);
+    map_insert(vm, o, k, v, Value::Undefined);
     Ok(a.this)
 }
 

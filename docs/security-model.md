@@ -2,7 +2,7 @@
 
 This page says what an embedder can rely on when AgniJS runs code it does not trust, what it cannot rely on, and what it must do itself. Each claim names the code or the test behind it. Where the engine falls short of what a sandbox needs, the gap is stated next to the claim with the task that tracks it. Read those gaps before you rely on a limit.
 
-AgniJS is pre-release. This page describes `main` as of TASK-103.28 (November 2026).
+AgniJS is pre-release. This page describes `main` as of TASK-103.25 (November 2026).
 
 ## Threat model
 
@@ -112,23 +112,42 @@ Only the interpreter's frame caps, the native stack budget, the maximum string l
 **How it is enforced.** Allocations add their size to a counter (`Heap::charge` and `note_growth` in `heap.rs`). The counter covers:
 
 - object headers, slots, elements and dictionaries (`ObjectData::extra_bytes` in `object.rs`);
+- ArrayBuffer and SharedArrayBuffer backing stores, from allocation on and as a resizable buffer grows (`Class::payload_bytes` in `object.rs`, `resize_bytes` in `builtins/arraybuffer.rs`);
+- the live entries of Map, Set, WeakMap and WeakSet, at `MAP_ENTRY_BYTES` each (the entry slot plus the key index, 73 bytes on 64-bit targets) plus the contents of string and BigInt keys, which the index copies (`MapData::heap_bytes` and `map_insert` in `builtins/collections.rs`);
 - strings, including flattened ropes;
 - environments, symbols and BigInts.
 
-The collection threshold is capped at the distance to the limit (`rearm_threshold`), so a collection runs before the limit is declared passed. The check itself runs at the dispatch loop's safe points: `attention_slow` in `interp/mod.rs`, which also applies under native frames. Tests:
+`memory_usage` (`agnijs_memory_usage`) and the live size the collector computes after each sweep use the same sizes, so a buffer or a collection that dies leaves the count at the next collection.
+
+The collection threshold is capped at the distance to the limit (`rearm_threshold`), so a collection runs before the limit is declared passed. The check itself runs at the dispatch loop's safe points: `attention_slow` in `interp/mod.rs`, which also applies under native frames.
+
+A built-in that allocates a large block in one step checks the limit before it allocates (`Vm::check_memory` and `Heap::would_exceed` in `heap.rs`), and fails with the same `OutOfMemory` error, which JavaScript cannot catch:
+
+- every ArrayBuffer, SharedArrayBuffer and typed-array buffer allocation, including `slice` and `transfer` (`zeroed` in `builtins/arraybuffer.rs`), and `resize` and `grow`;
+- `repeat`, `padStart` and `padEnd`, for the whole result;
+- `Array.prototype.join`, `toLocaleString` and the typed-array `join`, for the separators up front, and every builder that checks the [string length](#string-length) as it grows (`Vm::check_string_len` checks the limit too), for each piece;
+- concatenation that makes a rope (`Vm::concat`), for the flat string the rope becomes when it is read, so doubling a string cannot pass the limit as unread ropes.
+
+A built-in cannot run the collector, so it does not know how much of what was allocated since the last collection is garbage. It refuses a request when the live size of the last collection plus the request passes the limit, or when everything counted since, garbage included, plus the request passes twice the limit. The first rule refuses what cannot fit. The second bounds what one call can take, however many blocks it allocates. Neither refuses a program that drops what it allocates: a loop that makes and drops a 1 MiB buffer 200 times runs to the end under a 16 MiB limit.
+
+Tests:
 
 - `memory_limits_are_enforced` (conformance kit);
 - `memory_limit_faults_instead_of_growing` and `a_memory_limit_stops_a_loop_that_only_grows_arrays` (`tests/gc.rs`);
 - `a_memory_limit_stops_a_huge_string_and_a_runaway_script` and `the_memory_limit_applies_inside_jobs_and_can_be_raised_again` (`tests/host_driven.rs`);
 - `the_memory_limit_still_applies_under_a_native_frame` (`tests/gc_native_frames.rs`);
-- `the_memory_limit_stops_runaway_allocation` (C API);
-- `the_memory_limit_stops_a_growing_heap` (CLI).
+- `the_memory_limit_stops_runaway_allocation` and `the_memory_limit_counts_buffers_and_collections_and_refuses_huge_requests` (C API);
+- `the_memory_limit_stops_a_growing_heap` (CLI);
+- `crates/agnijs-js-vm/tests/memory_limit.rs`: a 16 MiB limit stops 256 MiB of ArrayBuffers, SharedArrayBuffers or typed arrays, resizable growth, a Map or Set of 2,000,000 entries, 2,000,000 WeakMap or WeakSet entries over a thousand keys, long string keys, a 1 GiB `repeat`, `padStart`, `padEnd`, `join` and doubling by `+`, templates and `concat`; dead buffers and entries leave the count and `memory_usage`; the same built-ins work under the limit;
+- `crates/agnijs-js-bench/tests/memory_limit_peak.rs`: a global allocator measures what the process allocates while a 16 MiB limit stops 256 MiB of ArrayBuffers, a 2,000,000-entry Map, a 1 GiB `repeat` and a 4 GiB ArrayBuffer. Each stays under 48 MiB, and the allocator refuses anything past 192 MiB, so a regression fails the test instead of allocating gigabytes.
 
 **What it does not cover.**
 
-- **Storage nothing charges.** ArrayBuffer and SharedArrayBuffer backing stores are not counted, and neither are the entries of Map, Set, WeakMap and WeakSet. `memory_usage` leaves them out too. A probe with a 16 MiB limit allocated 256 MiB of ArrayBuffers and a Map of 2,000,000 entries without an error. TASK-103.25.
-- **Overshoot inside one call.** The check runs between instructions, after a built-in has allocated. One call can allocate up to 2 GiB for a string (the [maximum string length](#string-length), 2^30 two-byte units) or 4 GiB for an ArrayBuffer (`MAX_BUFFER_BYTES` in `builtins/arraybuffer.rs`) before the limit is noticed. A builder such as `join` checks the maximum after each piece it appends, so for a moment it can hold the maximum plus one piece: up to 4 GiB. TASK-103.25.
-- **The process allocator.** Rust's allocator aborts the process when the operating system refuses memory. The limit is meant to be reached well before that, but the gaps above can get there first.
+- **Approximate sizes.** The counter uses fixed per-value sizes, not what the allocator really holds. A vector's spare capacity, the allocator's rounding and the engine's own tables (shapes, bytecode, inline caches, the intern table) are not counted. Expect the process to use more than the limit, by a factor that depends on the workload; the peak test above measured under three times the limit.
+- **Map and Set tombstones.** A deleted Map or Set entry leaves an empty slot in insertion order so that live iterators keep their place, and the slot stays until the collection dies. The count covers live entries only, so `for (;;) { m.set(k, v); m.delete(k); }` grows the process by 32 bytes per round without reaching the limit. WeakMap and WeakSet have no iterators and drop their empty slots. Bound such a script with fuel or a deadline. TASK-103.32.
+- **Native temporaries.** A built-in's working buffers that are not the block it returns, such as the UTF-16 copy `repeat` and the pad methods build before they store a one-byte result, or a sort's scratch array, are checked (where listed above) but not counted afterwards. They are freed when the call returns.
+- **Built-ins that allocate many small values in one call.** `split`, `Object.keys`, `Array.from` over a native iterator and similar calls are bounded by the input they read, which is already counted, but can make several times its size in new values before the next safe point.
+- **The process allocator.** Rust's allocator aborts the process when the operating system refuses memory. The limit is meant to be reached well before that, but the gaps above, or a limit set close to what the process can get, can get there first.
 - **Engines and realms.** The limit is per engine, and realms in one engine share it.
 
 ### Fuel (instruction budget)
@@ -325,7 +344,7 @@ Some failures are outside the engine's control:
 For code you do not trust:
 
 1. **One engine per trust domain**, and one process per domain where a crash or a side channel matters.
-2. **A memory limit** (`set_memory_limit`), set well below what the process can afford. It does not yet count ArrayBuffers or collection entries (TASK-103.25), so also cap the process with the operating system (a job object, cgroup or `RLIMIT_AS`) or run the engine in a child process you can kill.
+2. **A memory limit** (`set_memory_limit`), set well below what the process can afford: the count is approximate, and the process can use a few times the limit (see [Memory limit](#memory-limit)). For a hard bound, also cap the process with the operating system (a job object, cgroup or `RLIMIT_AS`) or run the engine in a child process you can kill.
 3. **A wall-clock deadline** through `Host::interrupt` (or `agnijs_engine_request_interrupt` from a watchdog thread). The regex matchers and native loops poll it, so it stops a long match or a loop over a huge array too. Add **fuel** (`set_fuel`) when you need a deterministic bound; fuel does not count work inside native calls, so keep the deadline as well.
 4. **A native stack bound.** Every engine sets one by default; call in with the budget plus headroom free (768 KiB by default), and do not opt out with `set_stack_budget(None)`.
 5. **The regex policy.** Keep `Auto`, or pick `LinearWhenEligible`, and keep the default `linear-regex` feature. Screen untrusted patterns that use backreferences or lookaround.

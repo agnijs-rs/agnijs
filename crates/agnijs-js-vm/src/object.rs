@@ -463,6 +463,21 @@ pub struct ArrayData {
 }
 
 impl Class {
+    /// Bytes the payload holds for the program's data, which the memory
+    /// limit and `memory_usage` count with the object (TASK-103.25): an
+    /// ArrayBuffer's or SharedArrayBuffer's store and the entries of the
+    /// four collections. Growth after allocation is counted where it
+    /// happens (`resize_bytes` in `builtins/arraybuffer.rs`, `map_insert`
+    /// in `builtins/collections.rs`).
+    #[inline]
+    pub fn payload_bytes(&self) -> usize {
+        match self {
+            Class::ArrayBuffer(b) => b.bytes.len(),
+            Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m.heap_bytes(),
+            _ => 0,
+        }
+    }
+
     /// Whether the payload lives in its own heap block.
     pub fn is_boxed(&self) -> bool {
         !matches!(
@@ -677,9 +692,12 @@ impl ObjectData {
 
     /// Approximate bytes of the storage that grows after allocation, at the
     /// sizes the heap counts growth with (inline slots are part of the
-    /// object).
+    /// object), and of the class payloads that hold the program's data
+    /// (`Class::payload_bytes`).
+    #[inline]
     pub fn extra_bytes(&self) -> usize {
-        self.overflow.len() * SLOT_BYTES
+        self.class.payload_bytes()
+            + self.overflow.len() * SLOT_BYTES
             + self
                 .dict
                 .as_ref()

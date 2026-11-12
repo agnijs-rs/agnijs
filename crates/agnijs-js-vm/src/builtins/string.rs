@@ -607,6 +607,8 @@ fn pad(vm: &mut Vm, a: &CallArgs, at_start: bool) -> JsResult<Value> {
     if max_len > vm.max_string_length() as f64 {
         return vm.range_error("Invalid string length");
     }
+    // The units are built as UTF-16: two bytes each.
+    vm.check_memory(max_len as usize * 2)?;
     let fill_len = max_len as usize - len;
     let mut fill = Vec::with_capacity(fill_len);
     while fill.len() < fill_len {
@@ -647,6 +649,8 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if (len as f64) * n > vm.max_string_length() as f64 {
         return vm.range_error("Invalid string length");
     }
+    // The units are built as UTF-16: two bytes each.
+    vm.check_memory(len * n as usize * 2)?;
     let u = units_of(vm, s);
     let mut out = Vec::with_capacity(len * n as usize);
     for _ in 0..n as usize {

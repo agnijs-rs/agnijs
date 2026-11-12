@@ -622,11 +622,27 @@ impl Vm {
         self.range_error("Invalid string length")
     }
 
-    /// A RangeError unless `len` code units fit in one string.
+    /// A RangeError unless `len` code units fit in one string, and the
+    /// memory-limit error unless at least `len` bytes fit under the limit
+    /// (a builder checks as it grows, and every string costs at least a
+    /// byte per unit).
     #[inline]
     pub fn check_string_len(&mut self, len: usize) -> JsResult<()> {
         if len > self.heap.max_string_len {
             return self.string_too_long();
+        }
+        self.check_memory(len)
+    }
+
+    /// The memory-limit error (`Fault::OutOfMemory`, which JavaScript
+    /// cannot catch) if `bytes` of new storage would take the heap past
+    /// the limit (`Heap::would_exceed`). Built-ins that allocate a large
+    /// block call this first, so one call cannot overshoot the limit by
+    /// the size of the block (TASK-103.25).
+    #[inline]
+    pub fn check_memory(&mut self, bytes: usize) -> JsResult<()> {
+        if self.heap.would_exceed(bytes) {
+            return Err(Fault::OutOfMemory);
         }
         Ok(())
     }
@@ -652,8 +668,24 @@ impl Vm {
     #[inline]
     pub fn concat(&mut self, a: StrId, b: StrId) -> JsResult<StrId> {
         match self.heap.concat(a, b) {
-            Some(s) => Ok(s),
+            Some(s) => {
+                if self.heap.memory_limit.is_some() {
+                    self.check_rope(s)?;
+                }
+                Ok(s)
+            }
             None => self.string_too_long(),
+        }
+    }
+
+    /// A long concatenation is a rope, which allocates its flat buffer only
+    /// when it is read; the memory limit counts that buffer now, so
+    /// doubling a string does not get past the limit as ropes.
+    #[cold]
+    fn check_rope(&mut self, s: StrId) -> JsResult<()> {
+        match self.heap.rope_flat_bytes(s) {
+            Some(bytes) => self.check_memory(bytes),
+            None => Ok(()),
         }
     }
 
