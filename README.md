@@ -47,6 +47,10 @@ cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --
 node scripts/check-licenses.mjs                                                       # dependency license check
 ```
 
+## Running untrusted code
+
+The engine has no ambient authority: script reaches only what the host grants. Memory, fuel, interrupt, stack and regex limits are opt-in, and some have known gaps. Read [`docs/security-model.md`](docs/security-model.md) for the threat model, what each limit covers, and the embedder checklist before running code you do not trust.
+
 ## Features and binary size
 
 `agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3.6 MB instead of about 20.5 MB, stripped (QuickJS-NG is about 1.2 MB, Boa about 10.8 MB). A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.

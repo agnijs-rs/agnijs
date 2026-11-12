@@ -126,6 +126,8 @@ The stack text is `Error.stack` in the V8 format (`    at f (file:line:column)` 
 
 ## Memory, interrupts and the stack
 
+For what these limits do and do not cover when the script is hostile, see [security-model.md](security-model.md).
+
 - **Memory limit.** `memory_limit` (or `agnijs_set_memory_limit`) caps the heap. Running past it ends the script with `AGNIJS_OUT_OF_MEMORY`, and the engine stays usable.
 - **Interrupts.** The `interrupt` hook is polled while JavaScript runs; return nonzero to stop with `AGNIJS_INTERRUPTED`. `agnijs_engine_request_interrupt` does the same from any thread.
 - **Stack budget.** Every call runs under a native stack budget (`stack_budget`, default `AGNIJS_DEFAULT_STACK_BUDGET` = 512 KiB, minimum `AGNIJS_MIN_STACK_BUDGET` = 64 KiB). Deeply nested source, deep JSON, proxy chains and deep native recursion fail with a `SyntaxError` or `RangeError` "Maximum call stack size exceeded" instead of overflowing your thread's stack.

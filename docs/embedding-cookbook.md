@@ -236,7 +236,7 @@ fn main() {
 
 ## Plug in your own host
 
-`Context::with_host` takes the engine interface's `Host` trait: console sink, clock, time zone, module loading, interrupt polling. Here the console is captured and a runaway loop is interrupted.
+`Context::with_host` takes the engine interface's `Host` trait: console sink, clock, time zone, module loading, interrupt polling. Here the console is captured and a runaway loop is interrupted. Before running code you do not trust, read [security-model.md](security-model.md): it covers the limits to set, what they do not cover, and an example sandbox host.
 
 ```rust
 use agnijs::{api::ConsoleLevel, Context, Error, Host};
