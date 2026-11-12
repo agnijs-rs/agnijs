@@ -1,11 +1,11 @@
 ---
 id: TASK-103.16
 title: agnijs command line tool with a REPL
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T05:17:00Z'
-updated_date: '2026-11-12T02:23:00Z'
+updated_date: '2026-11-12T03:24:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -21,8 +21,8 @@ A small agnijs binary with run, eval and repl subcommands, using the debugger an
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 agnijs run file.js, eval and repl work on Windows, macOS and Linux; the REPL has history and multi-line input
-- [ ] #2 --inspect connects Chrome DevTools through the CDP adapter, and the CLI is covered by tests in CI
+- [x] #1 agnijs run file.js, eval and repl work on Windows, macOS and Linux; the REPL has history and multi-line input
+- [x] #2 --inspect connects Chrome DevTools through the CDP adapter, and the CLI is covered by tests in CI
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -52,3 +52,32 @@ Implemented as crates/agnijs-cli (binary agnijs) on agnijs::Context + agnijs-js-
 - Pre-existing, not mine: clippy bool_assert_comparison in crates/agnijs/tests/embed.rs:207.
 - Not done: npm distribution (@agnijs-rs/cli) needs maintainer credentials. Interactive TTY REPL checked through the pipe path only; rustyline handles the TTY.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added crates/agnijs-cli, the `agnijs` binary, built on the public embedding layer (agnijs::Context, Engine/Host) with agnijs-js-resolve for modules.
+- Commands: run (a file or stdin), eval (-p prints), repl, compile (bytecode) and snapshot.
+- Script or module mode is decided by flag, extension, package.json type, or syntax.
+- Errors: uncaught errors print a code frame and a source-mapped V8 stack.
+- Exit codes: 0 ok, 1 uncaught, 2 usage or unusable input, 3 limits, 13 unsettled TLA, 130 interrupted.
+- Flags: --fuel, --max-memory, --seed, --regex-matcher, --snapshot, --inspect/--inspect-brk (CDP).
+- REPL: history file, multi-line input, top-level await, a Node-like inspector.
+- agnijs API: Context::from_engine and Context::from_snapshot.
+
+Verification:
+- 22 integration tests spawn the binary, including a CDP client on --inspect-brk (pause at the first statement, breakpoint, evaluateOnCallFrame, consoleAPICalled), plus 2 unit tests.
+- The new CI job cli passed on ubuntu, windows and macos, run 43142575256 at b8d20aa (all jobs green).
+- test262: 0 regressions in every mode (agnijs, --precompile, --snapshot, quickjs, parse+intl402, only-intl402, both regex matcher policies).
+- clippy -D warnings is clean for agnijs-cli.
+
+Limitations:
+- --inspect is tested against the protocol, not against a real Chrome window.
+- The interactive TTY REPL is tested only through the pipe path.
+
+Follow-ups, not filed:
+- engine: eval_bytecode panics on module bytecode with imports (modules.rs:558)
+- engine: host-level SyntaxErrors lose their position
+- npm @agnijs-rs/cli distribution needs maintainer credentials
+- the existing clippy lint in crates/agnijs/tests/embed.rs:207
+<!-- SECTION:FINAL_SUMMARY:END -->
