@@ -651,7 +651,7 @@ fn json_stringify(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let r = serialize_property(vm, &mut st, key, wrapper, &mut out);
     vm.pop_roots(mark);
     match r? {
-        true => Ok(vm.string_from_builder(out)),
+        true => vm.string_from_builder(out),
         false => Ok(Value::Undefined),
     }
 }
@@ -665,6 +665,7 @@ fn serialize_property(
     out: &mut StrBuilder,
 ) -> JsResult<bool> {
     vm.check_stack()?;
+    vm.check_string_len(out.len())?;
     let mut value = vm.get(holder, key)?;
     if matches!(value, Value::Object(_) | Value::BigInt(_)) {
         let tojson_key = PropKey::Str(vm.names.toJSON);

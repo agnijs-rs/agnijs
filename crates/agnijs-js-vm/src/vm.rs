@@ -608,8 +608,60 @@ impl Vm {
         Value::String(self.heap.alloc_str(s))
     }
 
-    pub fn str_from_units(&mut self, units: Vec<u16>) -> Value {
-        Value::String(self.heap.alloc_str_utf16(units))
+    /// Lower the maximum string length below [`crate::MAX_STRING_LENGTH`]
+    /// (never above it), so tests can reach it without gigabytes.
+    #[doc(hidden)]
+    pub fn set_max_string_length(&mut self, units: usize) {
+        self.heap.max_string_len = units.min(crate::MAX_STRING_LENGTH);
+    }
+
+    /// The RangeError for a string past the maximum length.
+    #[cold]
+    #[inline(never)]
+    pub fn string_too_long<T>(&mut self) -> JsResult<T> {
+        self.range_error("Invalid string length")
+    }
+
+    /// A RangeError unless `len` code units fit in one string.
+    #[inline]
+    pub fn check_string_len(&mut self, len: usize) -> JsResult<()> {
+        if len > self.heap.max_string_len {
+            return self.string_too_long();
+        }
+        Ok(())
+    }
+
+    /// The RangeError the heap's backstop left (`Heap::string_too_long`),
+    /// if any, clearing it.
+    #[cold]
+    pub(crate) fn take_string_too_long(&mut self) -> JsResult<()> {
+        if !std::mem::take(&mut self.heap.string_too_long) {
+            return Ok(());
+        }
+        self.refresh_attention();
+        self.string_too_long()
+    }
+
+    /// The longest string allowed, in code units.
+    #[inline]
+    pub fn max_string_length(&self) -> usize {
+        self.heap.max_string_len
+    }
+
+    /// `a` followed by `b`, or a RangeError past the maximum length.
+    #[inline]
+    pub fn concat(&mut self, a: StrId, b: StrId) -> JsResult<StrId> {
+        match self.heap.concat(a, b) {
+            Some(s) => Ok(s),
+            None => self.string_too_long(),
+        }
+    }
+
+    /// A string from UTF-16 code units, or a RangeError past the maximum
+    /// length.
+    pub fn str_from_units(&mut self, units: Vec<u16>) -> JsResult<Value> {
+        self.check_string_len(units.len())?;
+        Ok(Value::String(self.heap.alloc_str_utf16(units)))
     }
 
     /// A property key from an existing string id (interning it).
@@ -1017,6 +1069,9 @@ impl Vm {
         }
         if self.fuel_on {
             a |= crate::heap::ATTENTION_FUEL;
+        }
+        if self.heap.string_too_long {
+            a |= crate::heap::ATTENTION_STRING;
         }
         if self.heap.stress
             || self.gc_requested

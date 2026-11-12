@@ -796,6 +796,11 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let s = vm.to_string(a.arg(0))?;
         vm.heap.units(s).to_vec()
     };
+    // The separators alone may pass the maximum (`Array(2 ** 31).join()`):
+    // refuse before building anything.
+    if len > 1.0 && (len - 1.0) * sep.len() as f64 > vm.max_string_length() as f64 {
+        return vm.string_too_long();
+    }
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
@@ -808,10 +813,11 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let s = vm.to_string(v)?;
             let u = vm.heap.units(s);
             b.push_units(&u);
+            vm.check_string_len(b.len())?;
         }
         k += 1.0;
     }
-    Ok(vm.string_from_builder(b))
+    vm.string_from_builder(b)
 }
 
 fn proto_map(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1239,6 +1245,9 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let args = [a.arg(0), a.arg(1)];
     #[cfg(not(feature = "intl"))]
     let args: [Value; 0] = [];
+    if len > 1.0 && len - 1.0 > vm.max_string_length() as f64 {
+        return vm.string_too_long();
+    }
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
@@ -1252,10 +1261,11 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let s = vm.to_string(r)?;
             let u = vm.heap.units(s);
             b.push_units(&u);
+            vm.check_string_len(b.len())?;
         }
         k += 1.0;
     }
-    Ok(vm.string_from_builder(b))
+    vm.string_from_builder(b)
 }
 
 fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

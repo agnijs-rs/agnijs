@@ -393,7 +393,7 @@ fn regexp_escape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         i += n;
     }
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 fn is_ascii_digit(c: u32) -> bool {
@@ -834,7 +834,7 @@ fn source_getter(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
     };
     let units = vm.heap.units(src).to_vec();
-    Ok(vm.str_from_units(escape_regexp_pattern(&units)))
+    vm.str_from_units(escape_regexp_pattern(&units))
 }
 
 /// EscapeRegExpPattern: a source text that re-parses to the same pattern
@@ -915,7 +915,7 @@ fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     out.extend(vm.heap.units(p).iter());
     out.push(b'/' as u16);
     out.extend(vm.heap.units(f).iter());
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 /// Annex B `RegExp.prototype.compile(pattern, flags)`.
@@ -1213,6 +1213,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 )?;
             }
         }
+        vm.check_string_len(accumulated.len())?;
         if append {
             next_source_position = position + match_length;
         } else {
@@ -1222,7 +1223,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if next_source_position < length_s {
         accumulated.push_units(&vm.heap.units(s).slice(next_source_position, length_s));
     }
-    Ok(vm.string_from_builder(accumulated))
+    vm.string_from_builder(accumulated)
 }
 
 fn symbol_search(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1259,7 +1260,7 @@ fn symbol_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         flags
     } else {
         let y = vm.heap.char_str(b'y' as u16);
-        vm.heap.concat(flags, y)
+        vm.concat(flags, y)?
     };
     let splitter = vm.construct_value(c, &[Value::Object(rx), Value::String(new_flags)], c)?;
     let Value::Object(sp) = splitter else { unreachable!() };

@@ -226,6 +226,7 @@ fn encode(vm: &mut Vm, s: Value, extra: fn(u16) -> bool) -> JsResult<Value> {
     let mut out = StrBuilder::with_capacity(units.len());
     let mut k = 0;
     while k < units.len() {
+        vm.check_string_len(out.len())?;
         let c = units[k];
         if is_uri_unescaped(c) || extra(c) {
             out.push(c);
@@ -250,7 +251,7 @@ fn encode(vm: &mut Vm, s: Value, extra: fn(u16) -> bool) -> JsResult<Value> {
         }
         k += 1;
     }
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 fn hex_val(u: u16) -> Option<u32> {
@@ -334,7 +335,7 @@ fn decode(vm: &mut Vm, s: Value, preserve: fn(u16) -> bool) -> JsResult<Value> {
             out.push_code_point(cp);
         }
     }
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 fn reserved_plus_hash(c: u16) -> bool {
@@ -366,6 +367,7 @@ fn global_escape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let units = vm.heap.units(s).to_vec();
     let mut out = StrBuilder::with_capacity(units.len());
     for &c in &units {
+        vm.check_string_len(out.len())?;
         if c < 128 && ((c as u8).is_ascii_alphanumeric() || b"@*_+-./".contains(&(c as u8))) {
             out.push(c);
         } else if c < 256 {
@@ -374,7 +376,7 @@ fn global_escape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             out.push_str(&format!("%u{c:04X}"));
         }
     }
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 fn global_unescape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -406,7 +408,7 @@ fn global_unescape(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         out.push(c);
         k += 1;
     }
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 // ---- console ---------------------------------------------------------------------------

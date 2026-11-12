@@ -736,6 +736,11 @@ impl Vm {
         if self.debug_hot {
             self.debug_check(fi);
         }
+        if self.heap.string_too_long {
+            // A built-in made a string past the maximum length through a
+            // path that does not check it; the heap stored an empty one.
+            self.take_string_too_long()?;
+        }
         // The stress interval is counted inside maybe_collect.
         self.maybe_collect();
         if let Some(limit) = self.heap.memory_limit {

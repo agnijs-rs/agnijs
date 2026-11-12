@@ -561,7 +561,7 @@ impl Vm {
                     .expect("DefineMethod with a non-function");
                 let pk = self.to_property_key(k)?;
                 let kv = self.key_to_value(pk);
-                self.set_function_name(f, kv, None);
+                self.set_function_name(f, kv, None)?;
                 if let Some(fd) = self.heap.obj_mut(f).function_mut() {
                     fd.home_object = Some(o);
                 }
@@ -592,7 +592,7 @@ impl Vm {
                     .expect("DefineGetter with a non-function");
                 let pk = self.to_property_key(k)?;
                 let kv = self.key_to_value(pk);
-                self.set_function_name(f, kv, Some(if is_getter { "get" } else { "set" }));
+                self.set_function_name(f, kv, Some(if is_getter { "get" } else { "set" }))?;
                 if let Some(fd) = self.heap.obj_mut(f).function_mut() {
                     fd.home_object = Some(o);
                 }
@@ -639,7 +639,7 @@ impl Vm {
                         NamePrefix::Get => Some("get"),
                         NamePrefix::Set => Some("set"),
                     };
-                    self.set_function_name(f, kv, p);
+                    self.set_function_name(f, kv, p)?;
                 }
             }
             Instr::SetPrototypeLiteral { obj } => {
@@ -720,7 +720,7 @@ impl Vm {
                         PrivateKind::Getter => Some("get"),
                         PrivateKind::Setter => Some("set"),
                     };
-                    self.set_function_name(fo, desc, prefix);
+                    self.set_function_name(fo, desc, prefix)?;
                 }
                 let s = self.heap.sym_mut(n);
                 s.private = match (kind, s.private) {
@@ -1705,7 +1705,7 @@ impl Vm {
                         .map(Value::String)
                         .unwrap_or(Value::Undefined),
                 };
-                self.set_function_name(f, name, None);
+                self.set_function_name(f, name, None)?;
             }
         }
         match key {

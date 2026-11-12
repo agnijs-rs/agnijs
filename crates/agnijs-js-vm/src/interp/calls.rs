@@ -671,7 +671,7 @@ impl Vm {
             fd.home_object = Some(proto);
         }
         if !name.is_empty() {
-            self.set_function_name(f, name, None);
+            self.set_function_name(f, name, None)?;
         }
         let pk = PropKey::Str(self.names.prototype);
         self.heap
@@ -683,7 +683,12 @@ impl Vm {
     }
 
     /// SetFunctionName(F, name, prefix).
-    pub fn set_function_name(&mut self, f: ObjId, name: Value, prefix: Option<&str>) {
+    pub fn set_function_name(
+        &mut self,
+        f: ObjId,
+        name: Value,
+        prefix: Option<&str>,
+    ) -> JsResult<()> {
         let base: Value = match name {
             Value::Symbol(s) => {
                 let sd = self.heap.sym(s);
@@ -711,7 +716,7 @@ impl Vm {
                     unreachable!()
                 };
                 let p = self.heap.alloc_str(&format!("{p} "));
-                Value::String(self.heap.concat(p, b))
+                Value::String(self.concat(p, b)?)
             }
             None => base,
         };
@@ -722,6 +727,7 @@ impl Vm {
         } else {
             self.heap.add_own_property(f, key, prop);
         }
+        Ok(())
     }
 
     /// BoundFunctionCreate.

@@ -111,7 +111,7 @@ fn this_segments(vm: &mut Vm, this: Value, method: &str) -> JsResult<(ObjId, Str
 /// CreateSegmentDataObject(segmenter, string, startIndex, endIndex)
 fn segment_data_object(vm: &mut Vm, units: &[u16], string: StrId, s: &Segment) -> JsResult<Value> {
     let o = vm.new_object();
-    let seg = vm.str_from_units(units[s.start..s.end].to_vec());
+    let seg = vm.str_from_units(units[s.start..s.end].to_vec())?;
     put_value(vm, o, "segment", seg)?;
     put_value(vm, o, "index", Value::Number(s.start as f64))?;
     put_value(vm, o, "input", Value::String(string))?;

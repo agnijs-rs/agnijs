@@ -6,6 +6,15 @@
 use crate::value::StrId;
 use std::cell::Cell;
 
+/// The longest string the engine makes, in UTF-16 code units: 2^30
+/// (TASK-103.26). Every operation that would make a longer one throws
+/// `RangeError: Invalid string length`, as V8 (2^29 - 24) and SpiderMonkey
+/// (2^30 - 2) do past theirs. 2^30 is the cap `repeat` and `padEnd` always
+/// had; twice it still fits the `u32` a rope keeps its length in, so a
+/// concatenation is checked before its length could wrap; and a flat
+/// string of it is 1 GiB one-byte or 2 GiB two-byte.
+pub const MAX_STRING_LENGTH: usize = 1 << 30;
+
 pub enum Repr {
     One(Box<[u8]>),
     Two(Box<[u16]>),

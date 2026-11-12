@@ -30,6 +30,7 @@ pub mod vm;
 
 pub use debug::make_debuggee;
 pub use engine::{make_engine, make_engine_from_snapshot};
+pub use string::MAX_STRING_LENGTH;
 pub use vm::Vm;
 
 #[cfg(test)]

@@ -459,7 +459,14 @@ impl Vm {
         self.handles.reclaim();
         let saved = self.current_realm;
         self.current_realm = realm;
-        let r = f(self);
+        let mut r = f(self);
+        if self.heap.string_too_long {
+            // A string past the maximum length was refused after the last
+            // safe point; the host must not see the empty one stored.
+            if let (Err(fault), true) = (self.take_string_too_long(), r.is_ok()) {
+                r = Err(fault);
+            }
+        }
         self.current_realm = saved;
         let r = match r {
             Ok(v) => Ok(v),

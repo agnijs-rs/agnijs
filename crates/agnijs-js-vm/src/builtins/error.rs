@@ -228,7 +228,7 @@ pub fn error_proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return Ok(Value::String(name));
     }
     let sep = vm.heap.alloc_str(": ");
-    let s = vm.heap.concat(name, sep);
-    let s = vm.heap.concat(s, msg);
+    let s = vm.concat(name, sep)?;
+    let s = vm.concat(s, msg)?;
     Ok(Value::String(s))
 }

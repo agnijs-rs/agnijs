@@ -15,7 +15,7 @@ use crate::bigint::BigIntData;
 use crate::env::Environment;
 use crate::object::{FunctionData, KeyTable, ObjectData, Shape};
 
-use crate::string::{Repr, StringData, Units};
+use crate::string::{MAX_STRING_LENGTH, Repr, StringData, Units};
 use crate::symbol::SymbolData;
 use crate::object::KeyTableId;
 use crate::value::{BigId, EnvId, ObjId, PropSlot, ShapeId, StrId, SymId, Value};
@@ -316,6 +316,9 @@ pub const ATTENTION_DEBUG: u32 = 2;
 /// Attention bit: a fuel budget is set (`Vm::set_fuel`), so every
 /// instruction is charged one unit at the loop head.
 pub const ATTENTION_FUEL: u32 = 4;
+/// Attention bit: a string past the maximum length was refused
+/// (`Heap::string_too_long`); the safe point throws its RangeError.
+pub const ATTENTION_STRING: u32 = 8;
 /// One dense element (a `Value`).
 pub(crate) const ELEMENT_BYTES: usize = 16;
 /// One shape-described property slot past the inline ones (a `PropSlot`).
@@ -431,6 +434,14 @@ pub struct Heap {
     /// nested run loop's entry; see `gc.rs`). Garbage until a collection
     /// at an outer level frees it; left out of the pacing basis.
     pub retained_bytes: usize,
+    /// The longest string allowed: [`MAX_STRING_LENGTH`], or less in
+    /// tests (`Vm::set_max_string_length`).
+    pub(crate) max_string_len: usize,
+    /// An allocation past `max_string_len` was refused by the backstop in
+    /// `alloc_string` (some path that does not check the length itself):
+    /// the next safe point, or the return to the host, throws the
+    /// RangeError. [`ATTENTION_STRING`] is set while it is.
+    pub(crate) string_too_long: bool,
 }
 
 impl Default for Heap {
@@ -479,6 +490,8 @@ impl Heap {
             alloc_serial: 1,
             serial_at_gc: 0,
             retained_bytes: 0,
+            max_string_len: MAX_STRING_LENGTH,
+            string_too_long: false,
         }
     }
 
@@ -781,11 +794,34 @@ impl Heap {
 
     // ---- strings -------------------------------------------------------------
 
-    fn alloc_string(&mut self, data: StringData) -> StrId {
+    fn alloc_string(&mut self, mut data: StringData) -> StrId {
+        // The backstop for any path that did not check the length itself:
+        // an oversize string is never stored, and the next safe point
+        // throws (`Heap::string_too_long`).
+        if data.len() > self.max_string_len {
+            self.refuse_long_string(&mut data);
+        }
+        self.store_string(data)
+    }
+
+    /// Store a string the caller has already checked against the maximum
+    /// length (`concat` and `substring`, on hot paths).
+    #[inline]
+    fn store_string(&mut self, data: StringData) -> StrId {
         self.charge(STRING_BYTES + data.byte_len());
         self.strings_allocated += 1;
         let s = self.next_serial();
         StrId(self.strings.alloc(data, s))
+    }
+
+    /// Replace `data`, past the maximum length, with the empty string, and
+    /// leave the RangeError for the next safe point.
+    #[cold]
+    #[inline(never)]
+    fn refuse_long_string(&mut self, data: &mut StringData) {
+        self.string_too_long = true;
+        self.attention |= ATTENTION_STRING;
+        *data = StringData::new(Repr::One(Box::default()));
     }
 
     /// A string from UTF-16 code units; stored one-byte when possible.
@@ -857,7 +893,8 @@ impl Heap {
             }
             Repr::Rope { .. } => unreachable!("flattened above"),
         };
-        self.alloc_string(StringData::new(repr))
+        // No longer than `id`, so within the maximum length.
+        self.store_string(StringData::new(repr))
     }
 
     #[inline]
@@ -870,17 +907,23 @@ impl Heap {
     }
 
     /// Concatenate two strings. Short results are copied; long ones become
-    /// a rope flattened on first access.
-    pub fn concat(&mut self, a: StrId, b: StrId) -> StrId {
+    /// a rope flattened on first access. `None` when the result would be
+    /// longer than the maximum (`Vm::concat` throws the RangeError), so a
+    /// rope's `u32` length never wraps: two lengths within the maximum
+    /// add up to at most 2^31.
+    pub fn concat(&mut self, a: StrId, b: StrId) -> Option<StrId> {
         let la = self.str_len(a);
         let lb = self.str_len(b);
         if la == 0 {
-            return b;
+            return Some(b);
         }
         if lb == 0 {
-            return a;
+            return Some(a);
         }
         let total = la + lb;
+        if total > self.max_string_len {
+            return None;
+        }
         if total < 64 {
             self.flatten(a);
             self.flatten(b);
@@ -890,20 +933,20 @@ impl Heap {
                 let mut v = Vec::with_capacity(total);
                 v.extend_from_slice(ua.as_one_byte().unwrap());
                 v.extend_from_slice(ub.as_one_byte().unwrap());
-                return self.alloc_str_latin1(v);
+                return Some(self.store_string(StringData::new(Repr::One(v.into_boxed_slice()))));
             }
             let mut v = Vec::with_capacity(total);
             v.extend(ua.iter());
             v.extend(ub.iter());
-            return self.alloc_string(StringData::new(Repr::Two(v.into_boxed_slice())));
+            return Some(self.store_string(StringData::new(Repr::Two(v.into_boxed_slice()))));
         }
         let one_byte = self.strings.get(a.0).is_one_byte() && self.strings.get(b.0).is_one_byte();
-        self.alloc_string(StringData::new(Repr::Rope {
+        Some(self.store_string(StringData::new(Repr::Rope {
             left: a,
             right: b,
             len: total as u32,
             one_byte,
-        }))
+        })))
     }
 
     /// Make the string flat (not a rope). Iterative, so deep ropes built by

@@ -220,7 +220,7 @@ fn string_iterator_next(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if let Class::StringIterator { index: i, .. } = &mut vm.heap.obj_mut(o).class {
         *i = (index + size) as u32;
     }
-    let v = vm.str_from_units(units);
+    let v = vm.str_from_units(units)?;
     Ok(vm.create_iter_result(v, false))
 }
 

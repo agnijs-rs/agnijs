@@ -526,19 +526,27 @@ impl Vm {
 
     // ---- operators ----------------------------------------------------------------------
 
+    #[inline]
     pub fn op_add(&mut self, l: Value, r: Value) -> JsResult<Value> {
         if let (Value::Number(a), Value::Number(b)) = (l, r) {
             return Ok(Value::Number(a + b));
         }
         if let (Value::String(a), Value::String(b)) = (l, r) {
-            return Ok(Value::String(self.heap.concat(a, b)));
+            return self.concat(a, b).map(Value::String);
         }
+        self.op_add_slow(l, r)
+    }
+
+    /// `op_add` past the number and string fast paths, out of line so the
+    /// fast paths stay small enough to inline (TASK-103.26).
+    #[inline(never)]
+    fn op_add_slow(&mut self, l: Value, r: Value) -> JsResult<Value> {
         let lp = self.to_primitive(l, Hint::Default)?;
         let rp = self.to_primitive(r, Hint::Default)?;
         if lp.is_string() || rp.is_string() {
             let a = self.to_string(lp)?;
             let b = self.to_string(rp)?;
-            return Ok(Value::String(self.heap.concat(a, b)));
+            return Ok(Value::String(self.concat(a, b)?));
         }
         let ln = self.to_numeric(lp)?;
         let rn = self.to_numeric(rp)?;
@@ -736,14 +744,16 @@ impl Vm {
     }
 
     /// Concatenate a Rust string and a JS string.
-    pub fn concat_str(&mut self, prefix: &str, s: StrId) -> StrId {
+    pub fn concat_str(&mut self, prefix: &str, s: StrId) -> JsResult<StrId> {
         let p = self.heap.alloc_str(prefix);
-        self.heap.concat(p, s)
+        self.concat(p, s)
     }
 
-    /// Build a JS string from UTF-16 units.
-    pub fn string_from_builder(&mut self, b: StrBuilder) -> Value {
-        Value::String(self.heap.alloc_str_builder(b))
+    /// Build a JS string from UTF-16 units, or a RangeError past the
+    /// maximum length.
+    pub fn string_from_builder(&mut self, b: StrBuilder) -> JsResult<Value> {
+        self.check_string_len(b.len())?;
+        Ok(Value::String(self.heap.alloc_str_builder(b)))
     }
 
     /// Trim JS whitespace from a string value's units.

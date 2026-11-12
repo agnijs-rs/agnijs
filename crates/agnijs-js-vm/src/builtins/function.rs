@@ -163,7 +163,7 @@ fn proto_bind(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     } else {
         Value::String(vm.names.empty)
     };
-    vm.set_function_name(f, name, Some("bound"));
+    vm.set_function_name(f, name, Some("bound"))?;
     Ok(Value::Object(f))
 }
 
@@ -180,7 +180,7 @@ pub fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 // Source from a JavaScript string: put its lone surrogates
                 // back (TASK-100.15).
                 let units = source.units(span.start as usize, span.end as usize);
-                return Ok(vm.str_from_units(units));
+                return vm.str_from_units(units);
             }
             let text = &source.text;
             let start = (span.start as usize).min(text.len());

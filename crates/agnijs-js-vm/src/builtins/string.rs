@@ -174,7 +174,7 @@ fn string_from_char_code(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if out.len() == 1 {
         return Ok(Value::String(vm.heap.char_str(out[0])));
     }
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 fn string_from_code_point(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -187,7 +187,7 @@ fn string_from_code_point(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         b.push_code_point(n as u32);
     }
-    Ok(vm.string_from_builder(b))
+    vm.string_from_builder(b)
 }
 
 fn string_raw(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -215,9 +215,10 @@ fn string_raw(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let u = vm.heap.units(sub);
             b.push_units(&u);
         }
+        vm.check_string_len(b.len())?;
         i += 1.0;
     }
-    Ok(vm.string_from_builder(b))
+    vm.string_from_builder(b)
 }
 
 // ---- prototype -----------------------------------------------------------------------
@@ -270,7 +271,7 @@ fn proto_concat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut s = this_str(vm, a, "concat")?;
     for &v in a.args {
         let r = vm.to_string(v)?;
-        s = vm.heap.concat(s, r);
+        s = vm.concat(s, r)?;
     }
     Ok(Value::String(s))
 }
@@ -399,7 +400,7 @@ fn proto_to_well_formed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         i += 1;
     }
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 fn proto_locale_compare(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -580,7 +581,7 @@ fn proto_normalize(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let u = units_of(vm, s);
     let out = normalize_units(&u, &form);
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 fn pad(vm: &mut Vm, a: &CallArgs, at_start: bool) -> JsResult<Value> {
@@ -599,7 +600,7 @@ fn pad(vm: &mut Vm, a: &CallArgs, at_start: bool) -> JsResult<Value> {
     if filler.is_empty() {
         return Ok(Value::String(s));
     }
-    if max_len > (1u64 << 30) as f64 {
+    if max_len > vm.max_string_length() as f64 {
         return vm.range_error("Invalid string length");
     }
     let fill_len = max_len as usize - len;
@@ -618,7 +619,7 @@ fn pad(vm: &mut Vm, a: &CallArgs, at_start: bool) -> JsResult<Value> {
         v.extend_from_slice(&fill);
         v
     };
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 fn proto_pad_end(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -639,7 +640,7 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if n == 0.0 || len == 0 {
         return Ok(Value::String(vm.names.empty));
     }
-    if (len as f64) * n > (1u64 << 30) as f64 {
+    if (len as f64) * n > vm.max_string_length() as f64 {
         return vm.range_error("Invalid string length");
     }
     let u = units_of(vm, s);
@@ -647,7 +648,7 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     for _ in 0..n as usize {
         out.extend_from_slice(&u);
     }
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 /// GetSubstitution(matched, str, position, captures, namedCaptures,
@@ -674,6 +675,7 @@ pub fn get_substitution(
     let t_len = vm.heap.str_len(template);
     let mut i = 0;
     while i < t_len {
+        vm.check_string_len(out.len())?;
         let t = vm.heap.units_flat(template);
         // The text up to the next `$` is copied whole.
         let next = (i..t_len).find(|&k| t.at(k) == 0x24).unwrap_or(t_len);
@@ -829,7 +831,7 @@ fn proto_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     out.push_units(&vm.heap.units_flat(s).slice(0, pos));
     string_replacement(vm, s, search, pos, replace_value, template, &mut out)?;
     out.push_units(&vm.heap.units(s).slice(end, s_len));
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -888,6 +890,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut end_of_last = 0;
     let mut out = StrBuilder::with_capacity(s_len + 16);
     for p in positions {
+        vm.check_string_len(out.len())?;
         out.push_units(&vm.heap.units(s).slice(end_of_last, p));
         string_replacement(vm, s, search, p, replace_value, template, &mut out)?;
         end_of_last = p + search_len;
@@ -895,7 +898,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if end_of_last < s_len {
         out.push_units(&vm.heap.units(s).slice(end_of_last, s_len));
     }
-    Ok(vm.string_from_builder(out))
+    vm.string_from_builder(out)
 }
 
 fn proto_slice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1085,12 +1088,12 @@ fn latin1_case(c: u8, upper: bool) -> Option<u8> {
 
 /// toLowerCase / toUpperCase. One-byte text maps byte by byte (the string
 /// itself when nothing changes); other text takes the full mapping.
-fn case_convert(vm: &mut Vm, s: StrId, upper: bool) -> Value {
+fn case_convert(vm: &mut Vm, s: StrId, upper: bool) -> JsResult<Value> {
     vm.heap.flatten(s);
     if let Units::One(b) = vm.heap.units_flat(s) {
         let first = b.iter().position(|&c| latin1_case(c, upper) != Some(c));
         let Some(first) = first else {
-            return Value::String(s);
+            return Ok(Value::String(s));
         };
         let mut out = Vec::with_capacity(b.len());
         out.extend_from_slice(&b[..first]);
@@ -1105,7 +1108,7 @@ fn case_convert(vm: &mut Vm, s: StrId, upper: bool) -> Value {
             }
         }
         if ok {
-            return Value::String(vm.heap.alloc_str_latin1(out));
+            return Ok(Value::String(vm.heap.alloc_str_latin1(out)));
         }
     }
     let out = case_map_units(vm.heap.units_flat(s), upper);
@@ -1215,7 +1218,7 @@ fn is_final_sigma(units: &Units<'_>, i: usize) -> bool {
 
 fn proto_to_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "toLowerCase")?;
-    Ok(case_convert(vm, s, false))
+    case_convert(vm, s, false)
 }
 
 /// ECMA-402 TransformCase: the requested locale's case mapping (the host
@@ -1230,14 +1233,14 @@ fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<V
     };
     let u = units_of(vm, s);
     let out = agnijs_js_intl::casemap::map_utf16(&u, &tag, upper);
-    Ok(vm.str_from_units(out))
+    vm.str_from_units(out)
 }
 
 /// Without ECMA-402: the locale-independent mapping; the locales go unread.
 #[cfg(not(feature = "intl"))]
 fn locale_case(vm: &mut Vm, a: &CallArgs, name: &str, upper: bool) -> JsResult<Value> {
     let s = this_str(vm, a, name)?;
-    Ok(case_convert(vm, s, upper))
+    case_convert(vm, s, upper)
 }
 
 fn proto_to_locale_lower_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1250,7 +1253,7 @@ fn proto_to_locale_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_upper_case(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_str(vm, a, "toUpperCase")?;
-    Ok(case_convert(vm, s, true))
+    case_convert(vm, s, true)
 }
 
 fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -1311,7 +1314,7 @@ fn create_html(vm: &mut Vm, a: &CallArgs, tag: &str, attribute: Option<&str>) ->
     let su = vm.heap.units(s);
     b.push_units(&su);
     b.push_str(&format!("</{tag}>"));
-    Ok(vm.string_from_builder(b))
+    vm.string_from_builder(b)
 }
 
 fn html_anchor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

@@ -2,7 +2,7 @@
 
 This page says what an embedder can rely on when AgniJS runs code it does not trust, what it cannot rely on, and what it must do itself. Each claim names the code or the test behind it. Where the engine falls short of what a sandbox needs, the gap is stated next to the claim with the task that tracks it. Read those gaps before you rely on a limit.
 
-AgniJS is pre-release. This page describes `main` as of TASK-103.27 (November 2026).
+AgniJS is pre-release. This page describes `main` as of TASK-103.26 (November 2026).
 
 ## Threat model
 
@@ -103,7 +103,7 @@ This guards against accidents, not attackers: see [Bytecode and snapshots are tr
 
 ## Limits
 
-Only the interpreter's frame caps, the native stack budget and the regex routing are on by default. A host that runs untrusted code sets the others.
+Only the interpreter's frame caps, the native stack budget, the maximum string length and the regex routing are on by default. A host that runs untrusted code sets the others.
 
 ### Memory limit
 
@@ -127,8 +127,7 @@ The collection threshold is capped at the distance to the limit (`rearm_threshol
 **What it does not cover.**
 
 - **Storage nothing charges.** ArrayBuffer and SharedArrayBuffer backing stores are not counted, and neither are the entries of Map, Set, WeakMap and WeakSet. `memory_usage` leaves them out too. A probe with a 16 MiB limit allocated 256 MiB of ArrayBuffers and a Map of 2,000,000 entries without an error. TASK-103.25.
-- **Overshoot inside one call.** The check runs between instructions, after a built-in has allocated. One call can allocate up to 2 GiB for a string (`repeat`, `padEnd`, the 2^30-unit cap in `builtins/string.rs`) or 4 GiB for an ArrayBuffer (`MAX_BUFFER_BYTES` in `builtins/arraybuffer.rs`) before the limit is noticed. `Array.prototype.join` has no cap at all. TASK-103.25.
-- **String length.** Ropes cost 16 bytes whatever their length, and `Heap::concat` stores the length as `u32` with no check. Doubling a string past 2^32 code units gives it `length` 0 (probe: `let s='x'.repeat(1<<20); for(let i=0;i<12;i++) s=s+s; s.length` is 0). TASK-103.26.
+- **Overshoot inside one call.** The check runs between instructions, after a built-in has allocated. One call can allocate up to 2 GiB for a string (the [maximum string length](#string-length), 2^30 two-byte units) or 4 GiB for an ArrayBuffer (`MAX_BUFFER_BYTES` in `builtins/arraybuffer.rs`) before the limit is noticed. A builder such as `join` checks the maximum after each piece it appends, so for a moment it can hold the maximum plus one piece: up to 4 GiB. TASK-103.25.
 - **The process allocator.** Rust's allocator aborts the process when the operating system refuses memory. The limit is meant to be reached well before that, but the gaps above can get there first.
 - **Engines and realms.** The limit is per engine, and realms in one engine share it.
 
@@ -198,6 +197,23 @@ Doubling the budget roughly doubles each depth. A debug build uses about ten tim
 - **An opted-out engine.** With `None` and no budget of the host's own, deeply nested input overflows the thread's stack and ends the process.
 - **AddressSanitizer's fake stacks.** The budget reads the stack position from a local's address. AddressSanitizer's use-after-return detection, on by default on Linux, moves locals into heap memory, and the budget then runs out at random depths. Run sanitizer builds with `ASAN_OPTIONS=detect_stack_use_after_return=0`, as CI does.
 - **Other engines.** The QuickJS engine behind the same interface keeps its own limits and returns `Unsupported` from `set_stack_budget`.
+
+### String length
+
+**What it is.** No string is longer than 2^30 UTF-16 code units (`MAX_STRING_LENGTH` in `crates/agnijs-js-vm/src/string.rs`). An operation that would make a longer one throws a catchable `RangeError: Invalid string length` instead. It is always on and cannot be changed. The value sits between V8 (2^29 - 24) and SpiderMonkey (2^30 - 2). Two maximal lengths add up without wrapping the `u32` a rope stores, and a flat string at the maximum takes at most 2 GiB.
+
+**How it is enforced.**
+
+- **Concatenation.** `Heap::concat` returns `None` past the maximum, before it builds a rope, and `Vm::concat` throws. That covers `+`, `+=`, template literals, `String.prototype.concat` and every other concatenation, so a rope's length cannot wrap.
+- **Builders.** Built-ins that grow a string piece by piece check the length as they go (`Vm::check_string_len`): `Array.prototype.join`, `toString` and `toLocaleString`, the typed array versions, `replace`, `replaceAll` and `RegExp.prototype[Symbol.replace]` (including `$` substitutions), `String.raw`, `JSON.stringify`, `encodeURI`, `encodeURIComponent` and `escape`. A `join` whose separators alone pass the maximum (`new Array(2 ** 31).join()`) throws before it builds anything. `repeat`, `padStart` and `padEnd` check the final length up front, and strings made from code units (`fromCharCode`, `fromCodePoint`, case mappings, `normalize`) are checked before they are allocated.
+- **A backstop.** Every other string allocation checks the length too (`Heap::alloc_string`); only concatenation and substrings, which are already within the maximum, skip it. A path the checks above miss gets the empty string, and the `RangeError` is raised at the next safe point of the dispatch loop, or when the call from the host returns.
+
+Tests in `crates/agnijs-js-vm/tests/string_length.rs`: doubling a string past the maximum, one unit past it by each kind of concatenation, the refused `join`, every path above with the maximum lowered to 1,000 units for the test, and the error the host sees.
+
+**What it does not cover.**
+
+- **The backstop's empty string.** A built-in that reaches the backstop carries on with the empty string until the next safe point, so its result is discarded but its other effects happen. Every built-in known to make a string this long checks before the backstop.
+- **Memory.** The maximum bounds one string, not the heap. Many strings near it are the memory limit's job.
 
 ### Regular expressions (ReDoS)
 
