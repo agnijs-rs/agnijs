@@ -1,0 +1,32 @@
+# The comparison probes of docs/binary-size.md: QuickJS-NG (through
+# rquickjs) and Boa, each in the same probe as agnijs-js-vm's size_probe
+# example (one context, evaluate the command-line script, print the
+# result) and built with the same `size` profile. A workspace of its own,
+# with its own Cargo.lock, so the pins below never touch the engine's
+# dependency graph. Built by `node scripts/size-report.mjs --compare`.
+[workspace]
+resolver = "2"
+members = ["quickjs-probe", "boa-probe"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+# The rquickjs the engine workspace's QuickJS-NG backend and benchmarks
+# use (Cargo.lock: rquickjs 0.14.0), with no optional features: the probe
+# needs none.
+rquickjs = { version = "=0.14.0", default-features = false }
+# Boa with its default features (float16, xsum, temporal) and annex-b, the
+# web-compatibility syntax AgniJS also implements.
+boa_engine = { version = "=0.22.0", features = ["annex-b"] }
+
+# The same as the engine workspace's [profile.size].
+[profile.size]
+inherits = "release"
+debug = 0
+strip = "symbols"
+lto = "fat"
+codegen-units = 1

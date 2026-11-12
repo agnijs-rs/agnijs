@@ -1,11 +1,11 @@
 ---
 id: TASK-103.5
 title: Binary size report, feature flags and compact Intl data
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T02:14:00Z'
-updated_date: '2026-11-10T23:16:00Z'
+updated_date: '2026-11-12T04:40:00Z'
 labels:
   - ready-for-agent
 dependencies: []
@@ -21,7 +21,7 @@ Publish real size numbers and shrink them: stripped release binary size of the e
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A size report with method and numbers for several configurations (full, no Intl, trimmed Intl, no debugger) on a release build, and the comparison with QuickJS-NG and Boa
+- [x] #1 A size report with method and numbers for several configurations (full, no Intl, trimmed Intl, no debugger) on a release build, and the comparison with QuickJS-NG and Boa
 - [x] #2 Documented cargo features and a data-trimming recipe let an embedder choose a smaller build, with CI checking that the configurations build and pass the relevant baselines
 <!-- AC:END -->
 
@@ -33,6 +33,8 @@ Publish real size numbers and shrink them: stripped release binary size of the e
 3. Trim ICU4X data with ICU4X's ICU4X_DATA_DIR mechanism and a datagen wrapper (tools/gen-icu4x-data.js); fix the seam provider's glob imports so custom data compiles.
 4. Compare with QuickJS-NG (rquickjs) and Boa under the same probe and profile.
 5. docs/binary-size.md, ADR 0015 addendum, README; a CI size-profiles job.
+
+6. (2026-11-11) Close AC1: debugger and CDP probes, the pinned QuickJS-NG/Boa comparison workspace tools/size-compare, a linker-map measurement of the debugger code left in the default build (the no-debugger row, since there is no feature and adding one would change engine code), and a fresh run of every configuration on one commit.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -42,4 +44,12 @@ Sizes (size profile: release, stripped, fat LTO, cgu 1; win-x64 / wasm32): defau
 Verification: default main 42231/42231, --precompile 42231/42231, intl402 981/981; no Intl main and --precompile 42231/42231; intl402 981/981 on datagen recommended and modern; main 42231/42231 on en-only data; intl_feature tests in default, no-intl and en-only builds; agnijs-capi tests with and without intl; benches within noise of 3b555d0 (0 slower beyond 5%).
 Not done: a no-debugger configuration. The debugger interface (agnijs-js-debugger) and the VM's debug hooks are compiled into every build and there is no feature to drop them; the CDP adapter is already a separate crate the engine does not link. Hermes is not compared (C++/CMake, no Rust embedding).
 Commit deb40af on main.
+
+2026-11-11, re-measured at 8dc7f41 (rustc 1.99.0, win-x64, [profile.size], stripped), all from one run of node scripts/size-report.mjs --debugger --compare --debugger-residue plus three --data sets (icu4x-datagen 2.4.0): full 20,469,760 B; full with debugger in use 20,470,784; full with debugger and CDP 20,815,360; no Intl 3,627,520; 6 locales 9,408,000; 6 locales no models 7,086,080; en no models 6,341,120; QuickJS-NG rquickjs 0.14.0 1,236,480; Boa 0.22.0 10,810,880; Boa intl_bundled 25,994,752. No debugger: derived, not built; the default probe's MSVC linker map still holds 548 debugger symbols (agnijs_js_debugger, agnijs_js_vm::debug), 141.0 kB out of line, so a no-debugger build is at least 20.33 MB (inlined hook checks not counted). Engine core grew 0.35 MB since deb40af; Intl shares unchanged. wasm32 not re-measured (doc keeps the deb40af numbers, labelled). Script fix: --debugger-residue passes /MAP through cargo rustc to the final link only (RUSTFLAGS reached build scripts and broke them) and the table now prints before that step, with byte counts. Probes smoke-run (Intl format, debugger breakpoint pause, QuickJS, Boa). No engine code changed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Size report for AgniJS is complete in docs/binary-size.md: method, reproduction commands, numbers and caveats for full (20.47 MB), full with debugger in use (20.47) and with debugger plus CDP (20.82), no debugger (derived from a linker map: at least 20.33, at most 141 kB saved), three trimmed-Intl builds (9.41 / 7.09 / 6.34 MB) and no Intl (3.63 MB), all stripped release ([profile.size]) builds on win-x64 at 8dc7f41, with QuickJS-NG via rquickjs 0.14.0 (1.24 MB) and Boa 0.22.0 (10.81 MB, 25.99 MB with intl_bundled) in the same probe and profile from a pinned workspace in tools/size-compare. scripts/size-report.mjs gains --debugger, --compare and --debugger-residue. AC2 was already met (features, data-trimming recipe, size-profiles CI job). Risks and follow-ups: there is no cargo feature to drop the debugger, so the no-debugger row is a bound and not a build; the measured gain is small (0.7% of full, 3.9% of no-Intl). wasm32 numbers were not re-measured. Hermes is not compared (no Rust embedding).
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,0 +1,13 @@
+[package]
+name = "boa-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# ECMA-402 on ICU4X with Boa's bundled data.
+intl = ["boa_engine/intl_bundled"]
+
+[dependencies]
+boa_engine.workspace = true

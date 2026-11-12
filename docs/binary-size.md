@@ -5,23 +5,44 @@ What the engine costs in a shipped binary, which parts an embedder can leave out
 ## Method
 
 - **The binary.** `crates/agnijs-js-vm/examples/size_probe.rs` is a whole program: one realm, one script read from the command line, its completion value printed. The script is not known at build time, so every built-in stays reachable. The linker can drop only code that no script could reach. The parser, compiler, interpreter, GC, all built-ins, the regex engine and (by default) Intl are in it.
+- **The debugger probes.** `crates/agnijs-js-vm/examples/size_probe_debugger.rs` is the same program made as a `Debuggee`. When `AGNIJS_PROBE_DEBUG` is set, it attaches a client that logs each pause, sets a breakpoint and pauses on exceptions. `crates/agnijs-js-cdp/examples/size_probe_cdp.rs` also starts the Chrome DevTools Protocol server when `AGNIJS_PROBE_INSPECT` names an address. Both decide at run time, so the whole debugger, and in the second case the whole adapter, stays reachable.
+- **The comparison probes.** `tools/size-compare` is a workspace of its own, with its own `Cargo.lock`, so its pins never touch the engine's dependency graph. It holds the same program for QuickJS-NG (through `rquickjs` =0.14.0, the version the engine's QuickJS-NG backend and benchmarks lock, with no optional features) and for Boa (`boa_engine` =0.22.0 with `annex-b`, and optionally `intl_bundled`). It uses the same `size` profile.
 - **The profile.** `[profile.size]` in the root `Cargo.toml` is the release profile with `debug = 0`, `strip = "symbols"`, `lto = "fat"` and `codegen-units = 1`. It keeps `panic = "unwind"`, so a C API can still turn a panic into an error with `catch_unwind`. `opt-level` stays at 3: these are the sizes of the build that runs at full speed. `opt-level = "s"` or `panic = "abort"` would shrink them further, and the second gives up the C API's panic safety.
-- **The script.** `node scripts/size-report.mjs [--wasm] [--data name=<ICU4X_DATA_DIR> ...]` builds the probe in each configuration, each in its own target directory under `$CARGO_TARGET_DIR/size-report`, and prints the table. CI runs it in the `size-profiles` job and adds the table to the job summary.
-- **The platform.** The numbers below were measured on 2026-11-10 with rustc 1.99.0, for x86_64-pc-windows-msvc and wasm32-unknown-unknown. The wasm file is the raw `cargo build` output, with no `wasm-opt`. 1 MB is 10^6 bytes.
+- **The script.** `node scripts/size-report.mjs [--wasm] [--data name=<ICU4X_DATA_DIR> ...] [--debugger] [--compare] [--debugger-residue]` builds each probe in each configuration and prints the table, in MB and in bytes. Builds run one at a time, and each feature and data combination gets its own target directory under `$CARGO_TARGET_DIR/size-report`. The size is that of the stripped executable `cargo` writes. CI runs the script in the `size-profiles` job and adds the table to the job summary.
+- **The debugger residue.** `--debugger-residue` (MSVC only) links the default probe once more with `/MAP` and adds up the symbols of `agnijs_js_debugger` and `agnijs_js_vm::debug` that are still in it. A symbol's size is the distance to the next symbol in its section. Code the optimizer inlined into other functions counts where it landed, so this is the debugger's out-of-line share only.
+- **The platform.** The numbers below were measured on 2026-11-11 at commit 8dc7f41, with rustc 1.99.0 on x86_64-pc-windows-msvc. The trimmed data was generated with icu4x-datagen 2.4.0 through `crates/agnijs-js-intl/tools/gen-icu4x-data.js`. 1 MB is 10^6 bytes.
+
+To reproduce them (the build takes about an hour and some 20 GB of target directories):
+
+```
+node crates/agnijs-js-intl/tools/gen-icu4x-data.js --out icu/six --locales en,de,fr,es,ja,zh
+node crates/agnijs-js-intl/tools/gen-icu4x-data.js --out icu/six-nomodels --locales en,de,fr,es,ja,zh --segmenter-models none
+node crates/agnijs-js-intl/tools/gen-icu4x-data.js --out icu/en-nomodels --locales en --segmenter-models none
+node scripts/size-report.mjs --debugger --compare --debugger-residue \
+  --data "6 locales=icu/six" --data "6 locales, no segmenter models=icu/six-nomodels" \
+  --data "en, no segmenter models=icu/en-nomodels"
+```
 
 ## Results
 
-| Configuration | native (win-x64) | wasm32 | of which Intl (native) |
-| --- | --- | --- | --- |
-| Default: `intl`, crate-default ICU4X data | 20.12 MB | 18.75 MB | 16.84 MB |
-| `intl`, datagen `recommended` (the same set, regenerated) | 20.12 MB | 18.75 MB | 16.84 MB |
-| `intl`, 6 locales (en, de, fr, es, ja, zh) | 9.06 MB | 8.31 MB | 5.78 MB |
-| `intl`, 6 locales, no segmenter models | 6.74 MB | 5.99 MB | 3.46 MB |
-| `intl`, en | 8.31 MB | 7.61 MB | 5.03 MB |
-| `intl`, en, no segmenter models | 5.99 MB | 5.29 MB | 2.71 MB |
-| No Intl (`--no-default-features --features linear-regex`) | 3.28 MB | 2.86 MB | 0 |
+Native, x86_64-pc-windows-msvc, stripped:
 
-The "of which Intl" column is the difference from the no-Intl build. Regenerating `recommended` with datagen builds to the same size as the crate-default data, which shows that the recipe below has no overhead of its own.
+| Configuration | Size | Bytes | of which Intl |
+| --- | --- | --- | --- |
+| Full: default features (`intl`, crate-default ICU4X data) | 20.47 MB | 20,469,760 | 16.84 MB |
+| Full, debugger in use | 20.47 MB | 20,470,784 | 16.84 MB |
+| Full, debugger and CDP server | 20.82 MB | 20,815,360 | 16.84 MB |
+| No debugger (derived, see below) | at least 20.33 MB | 20,469,760 − at most 141,000 | 16.84 MB |
+| Trimmed Intl: 6 locales (en, de, fr, es, ja, zh) | 9.41 MB | 9,408,000 | 5.78 MB |
+| Trimmed Intl: 6 locales, no segmenter models | 7.09 MB | 7,086,080 | 3.46 MB |
+| Trimmed Intl: en, no segmenter models | 6.34 MB | 6,341,120 | 2.71 MB |
+| No Intl (`--no-default-features --features linear-regex`) | 3.63 MB | 3,627,520 | 0 |
+
+- **Of which Intl** is the difference from the no-Intl build.
+- **Full** is ICU4X's `recommended` locale set. On 2026-11-10 (commit deb40af), regenerating `recommended` with datagen built to the same size as the crate-default data, so the recipe below adds nothing of its own. An `en` build with the segmenter models was then 2.32 MB larger than one without them.
+- **No debugger.** No cargo feature leaves the debugger out (see [Debugger and CDP](#debugger-and-cdp)), so this row is derived rather than built. The default probe does not use the debugger, so the linker has already dropped most of it. The linker map of the default probe still holds 548 debugger symbols with 141.0 kB of code and data. That is the most that leaving out the out-of-line debugger code would save; the debug hooks inlined into the interpreter are not counted. A program that uses the debugger costs 1 kB more than one that does not, and the CDP server 0.35 MB more.
+- **wasm32-unknown-unknown.** The wasm32 builds were not re-measured here (the size-profiles CI job prints them with `--wasm`). On 2026-11-10 they were 18.75 MB full, 2.86 MB with no Intl and 5.29 MB with en and no segmenter models, as raw `cargo build` output with no `wasm-opt`: about 1.4 MB and 0.7 MB below the native sizes of the time.
+- The engine core grew by 0.35 MB between deb40af (20.12 MB full, 3.28 MB with no Intl) and 8dc7f41: source maps, the CLI work and the fixes in between. The Intl shares did not change.
 
 Where the default build's Intl bytes go, from the sizes ICU4X records on each baked marker (about 14 MB of data in all, the rest being code):
 
@@ -36,21 +57,28 @@ Almost all of these scale with the locale count, which is why a one-locale build
 
 ### Comparison
 
-The same probe (one context, evaluate the command-line script, print the result), built with the same `size` profile on the same machine:
+The same probe (one context, evaluate the command-line script, print the result), built with the same `size` profile on the same machine and the same day:
 
-| Engine | Intl | native (win-x64) |
-| --- | --- | --- |
-| QuickJS-NG via `rquickjs` 0.14 (C, built by `cc`) | none (QuickJS has no `Intl`) | 1.21 MB |
-| Boa 0.22 (`annex-b`) | none | 10.81 MB |
-| Boa 0.22 (`annex-b`, `intl_bundled`) | ICU4X, its bundled data | 25.99 MB |
-| AgniJS, no Intl | none | 3.28 MB |
-| AgniJS, en, no segmenter models | ICU4X, trimmed | 5.99 MB |
-| AgniJS, default | ICU4X, recommended locales | 20.12 MB |
+| Engine | Intl | Size | Bytes |
+| --- | --- | --- | --- |
+| QuickJS-NG via `rquickjs` 0.14.0 (C, built by `cc` with MSVC) | none (QuickJS has no `Intl`) | 1.24 MB | 1,236,480 |
+| Boa 0.22.0 (`annex-b`) | none | 10.81 MB | 10,810,880 |
+| Boa 0.22.0 (`annex-b`, `intl_bundled`) | ICU4X, its bundled data | 25.99 MB | 25,994,752 |
+| AgniJS, no Intl | none | 3.63 MB | 3,627,520 |
+| AgniJS, en, no segmenter models | ICU4X, trimmed | 6.34 MB | 6,341,120 |
+| AgniJS, full | ICU4X, recommended locales | 20.47 MB | 20,469,760 |
 
-- QuickJS-NG is the smallest engine by far: about 2 MB less than AgniJS without Intl. It has no ECMA-402, so a QuickJS app that needs locale formatting ships its own.
-- Without Intl, AgniJS is about a third of Boa's size. With Intl, it is about 6 MB smaller than Boa with its bundled data. Trimmed to one locale, AgniJS with ECMA-402 is still smaller than Boa without it.
+- QuickJS-NG is the smallest engine by far: about 2.4 MB less than AgniJS with no Intl, or about a third of its size. It has no ECMA-402, so a QuickJS app that needs locale formatting ships its own.
+- With no Intl, AgniJS is about a third of Boa's size. With Intl, it is about 5.5 MB smaller than Boa with its bundled data. Trimmed to one locale, AgniJS with ECMA-402 is still smaller than Boa without it.
 - Neither comparison engine builds for wasm32-unknown-unknown as configured here: `rquickjs-sys` needs a C compiler for wasm, and Boa's `getrandom` needs its `wasm_js` feature. Their wasm numbers are left out rather than built in a different setup.
 - Hermes is not measured. It is C++ with a CMake build and has no Rust embedding to put in the same probe.
+
+### Caveats
+
+- These are the sizes of a whole minimal program. A real app adds its own code and shares the standard library, so the engine's share of an app is a little less than these sizes.
+- Sizes vary by target and toolchain. These are Windows MSVC executables; ELF and Mach-O builds differ by a few percent, and the size-profiles CI job prints the Linux numbers.
+- The QuickJS-NG probe compiles QuickJS-NG's C with the host's C compiler (here MSVC through `cc`). Clang or GCC at `-Os` would give a different size.
+- The no-debugger row is a bound from a linker map, not a build. It is the out-of-line share only.
 
 ## Profiles
 
@@ -93,7 +121,9 @@ The bundled tables in `agnijs-js-intl/src/cldr_tables.rs` (unit and currency nam
 
 ### Debugger and CDP
 
-The Chrome DevTools Protocol adapter is its own crate (`agnijs-js-cdp`, ADR 0017). The engine does not depend on it, so an app links it only by naming it, and it is in none of the builds above. The debugger interface (`agnijs-js-debugger`, about 740 lines of plain types) and the VM's debug hooks are compiled into every build. No cargo feature drops them yet, so there is no "no debugger" row.
+The Chrome DevTools Protocol adapter is its own crate (`agnijs-js-cdp`, ADR 0017). The engine does not depend on it, so an app links it only by naming it, and it is in none of the builds above except the "debugger and CDP server" row. Linking it and starting the server costs 0.35 MB.
+
+The debugger interface (`agnijs-js-debugger`) and the VM's debug hooks are compiled into every build, and no cargo feature drops them. Measured, there is little to gain: a program that never makes a `Debuggee` still carries 141 kB of out-of-line debugger code (0.7% of the full build, 3.9% of the no-Intl build), and one that attaches a debugger costs 1 kB more. A feature that left the debugger out could save that 141 kB and the inlined hook checks, and would change engine code. That is why there is none yet.
 
 ## Recipe: trimming the data
 

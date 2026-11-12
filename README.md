@@ -49,7 +49,7 @@ node scripts/check-licenses.mjs                                                 
 
 ## Features and binary size
 
-`agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3 MB instead of about 20 MB, stripped. A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.
+`agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3.6 MB instead of about 20.5 MB, stripped (QuickJS-NG is about 1.2 MB, Boa about 10.8 MB). A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.
 
 Rust 1.85 or newer. Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
 
