@@ -12,7 +12,11 @@
 //! made through the Rust API are bounded by default too.
 //!
 //! The stack pointer is approximated by the address of a local, which is
-//! safe code; stacks grow downwards on every supported target.
+//! safe code; stacks grow downwards on every supported target. Under
+//! AddressSanitizer, run with `ASAN_OPTIONS=detect_stack_use_after_return=0`:
+//! its fake stacks (on by default on Linux) put locals in heap memory,
+//! where their addresses say nothing about the stack, and the budget then
+//! runs out at random depths.
 
 use std::cell::Cell;
 

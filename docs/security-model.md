@@ -194,6 +194,7 @@ Doubling the budget roughly doubles each depth. A debug build uses about ten tim
 
 - **Too little stack at the call.** The budget is measured from where the host calls in, not from the thread's real limit, which safe code cannot read. A call made with less than budget plus headroom free can still overflow. Call in near the top of a thread, or lower the budget.
 - **An opted-out engine.** With `None` and no budget of the host's own, deeply nested input overflows the thread's stack and ends the process.
+- **AddressSanitizer's fake stacks.** The budget reads the stack position from a local's address. AddressSanitizer's use-after-return detection, on by default on Linux, moves locals into heap memory, and the budget then runs out at random depths. Run sanitizer builds with `ASAN_OPTIONS=detect_stack_use_after_return=0`, as CI does.
 - **Other engines.** The QuickJS engine behind the same interface keeps its own limits and returns `Unsupported` from `set_stack_budget`.
 
 ### Regular expressions (ReDoS)

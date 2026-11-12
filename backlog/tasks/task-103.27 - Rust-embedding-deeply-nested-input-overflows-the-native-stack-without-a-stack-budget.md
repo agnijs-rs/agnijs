@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12T06:25:00Z'
-updated_date: '2026-11-12T09:45:00Z'
+updated_date: '2026-11-12T10:04:00Z'
 labels:
   - ready-for-agent
   - security
@@ -51,6 +51,8 @@ Red: the new crates/agnijs-js-vm/tests/stack_budget.rs died with STATUS_STACK_OV
 Sizing: kept 512 KiB (same as the C API), so 1 MiB threads (Windows main thread, the CLI) stay protected. Measured deepest nesting the default accepts (Windows x64): release array 160, object 133, function 185, regex groups 256 (the limit), JSON.parse 1202; debug array 18, object 14, function 50, regex 116, JSON 263. The regexp test that runs patterns at the 256-group limit on a 2 MiB thread now sets a 1.5 MiB budget (debug builds need it). test262 runner keeps the default: 0 regressions.
 
 Gates (worktree at b3f3226 + this change, Windows x64): cargo test --workspace --locked --no-fail-fast all ok; test262 default 43192/43192 passed, --precompile 43192, --snapshot 43192, --only-intl402 981, 0 regressions each; QuickJS-NG baseline 0 regressions (43157 tests, 84 baseline failures); C API with fault-injection ok (56 tests), release fuzz ok (5), clippy -D warnings clean for agnijs-capi and agnijs-cli, no new clippy warnings in touched files of the other crates; cbindgen header: no drift; GC-stress test262 slice (AGNIJS_GC_STRESS=16) 5959/5959, 0 regressions; AGNIJS_GC_STRESS=1 on the new vm stack_budget and regexp tests and the CI capi stress set: ok. rustfmt applied to my hunks only (the files are not rustfmt-clean elsewhere).
+
+CI follow-up: the sanitizers job (ASan over tests/gc.rs) failed with spurious 'Maximum call stack size exceeded' at shallow depth. AddressSanitizer's use-after-return fake stacks (on by default on Linux) put the local whose address stack_position() reads into heap memory, so the budget compared unrelated addresses (this already affected the C API's budget under ASan; the default budget made every engine hit it). The job now sets ASAN_OPTIONS=detect_stack_use_after_return=0; stack.rs and docs/security-model.md say so. Reading the real stack pointer would need inline asm, which agnijs-js-regex forbids (#![forbid(unsafe_code)]), or a new dependency.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

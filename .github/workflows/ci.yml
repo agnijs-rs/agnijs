@@ -360,6 +360,11 @@ jobs:
         env:
           RUSTFLAGS: -Zsanitizer=address
           RUSTDOCFLAGS: -Zsanitizer=address
+          # Fake stacks for use-after-return detection (on by default on
+          # Linux) move locals off the thread's stack, so the stack budget,
+          # which reads its position from a local's address, would see
+          # unrelated addresses (agnijs-js-regex src/stack.rs).
+          ASAN_OPTIONS: detect_stack_use_after_return=0
 
   licenses:
     # Every dependency must be under a license compatible with MIT OR
