@@ -27,7 +27,7 @@
 pub mod server;
 pub mod ws;
 
-pub use server::CdpServer;
+pub use server::{CdpOptions, CdpServer};
 
 use agnijs_engine_api::{ConsoleLevel, Error, PropertyKey, RealmId, Value};
 use agnijs_js_debugger::{

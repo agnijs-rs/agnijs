@@ -275,13 +275,15 @@ The debugger is a separate capability: `agnijs_js_vm::make_debuggee` returns a `
 - read and write every variable;
 - call every capability the host granted.
 
-`CdpServer` (`crates/agnijs-js-cdp/src/server.rs`) has no authentication. Today it also has these weaknesses (TASK-103.29):
+`CdpServer` (`crates/agnijs-js-cdp/src/server.rs`) has no authentication. It refuses what a web page in a browser on the same machine could send it, the class of bug Node fixed for CVE-2018-7160 (TASK-103.29):
 
-- **No header checks.** It does not check the `Host` or `Origin` header, and its target id is `agnijs-<port>`. Any web page in a browser on the same machine can open `ws://127.0.0.1:9229/agnijs-9229` and drive the engine. With DNS rebinding it can read `/json/list` too. For `agnijs --inspect`, that includes reading files through the module loader.
-- **Any address.** It binds whatever address it is given. The CLI defaults to `127.0.0.1` but accepts `--inspect=0.0.0.0:9229` without a warning.
-- **Unbounded messages.** It reassembles fragmented WebSocket messages without a total limit. Each frame is capped at 64 MiB (`ws.rs`).
+- **Host check.** Every route, the `/json` discovery routes and the WebSocket upgrade, answers 403 unless the `Host` header is an IP literal or `localhost`, with an optional port. A DNS-rebinding page sends its own host name, so it cannot read `/json/list`.
+- **Origin check.** Only browsers send `Origin`. A request that carries one gets 403 unless it is the DevTools front end's (`devtools://devtools`, `chrome-devtools://devtools`) or one the embedder allows with `CdpOptions::allow_origin`. Clients that are not browsers (VS Code, `chrome://inspect`, scripts) send none.
+- **Random target id.** The WebSocket path is a random version 4 UUID per server, not derived from the port. Any other path gets 404.
+- **Loopback only.** `CdpServer::listen` refuses an address that is not loopback (`PermissionDenied`). `CdpServer::listen_with` and `CdpOptions::allow_remote(true)` opt in. The CLI defaults to `127.0.0.1`; given `--inspect=0.0.0.0:9229` it opts in and prints a warning.
+- **Bounded messages.** A reassembled WebSocket message may be at most 64 MiB (`CdpOptions::max_message_size`), and so may each frame. A frame that would pass the limit is refused before its payload is read, and the server closes the connection with status 1009. The HTTP request head is capped at 64 KiB.
 
-Never expose the endpoint where untrusted code or people can reach it. Do not leave it listening while browsing. Never enable it in production builds.
+These checks stop a web page, not a local process: any program on the machine can still connect and run code. Never expose the endpoint where untrusted code or people can reach it, and never enable it in production builds.
 
 Source maps are parsed defensively, and hostile maps are rejected without a panic (`hostile_maps_are_rejected_without_panicking` in `crates/agnijs-js-debugger/tests/source_map.rs`). The engine never fetches a map itself.
 
@@ -321,7 +323,7 @@ For code you do not trust:
 7. **Only the capabilities the script needs.** Validate and bound every host function. Confine `Host::load_module` to an allow-list or directory. Do not hand script objects from another realm or tenant.
 8. **A fixed clock and seed** (`now_ms`, `random_seed` or `set_random_seed`) when you want neither wall time nor entropy exposed. See [determinism.md](determinism.md).
 9. **No untrusted bytecode or snapshots.** Authenticate anything that crossed a trust boundary before `eval_bytecode`, `ModuleSource::Bytecode` or `make_engine_from_snapshot`.
-10. **No debugger in production.** Never bind CDP to a non-loopback address, and do not leave it listening (TASK-103.29).
+10. **No debugger in production.** Never bind CDP to a non-loopback address, and do not leave it listening.
 11. **The `jit` feature off** unless you accept code-generator bugs as memory-safety bugs.
 12. **Treat a panic as fatal to the engine.** Discard it after a caught panic. A C API engine reports `AGNIJS_ERR_POISONED`.
 

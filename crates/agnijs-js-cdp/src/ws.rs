@@ -101,11 +101,18 @@ pub struct Frame {
     pub payload: Vec<u8>,
 }
 
-/// Largest message accepted from a client.
-const MAX_PAYLOAD: u64 = 64 << 20;
+/// Largest frame, and largest reassembled message, [`read_frame`] and
+/// [`read_message`] accept.
+pub const MAX_PAYLOAD: u64 = 64 << 20;
 
 /// Read one frame. Masked payloads (every client frame) are unmasked.
 pub fn read_frame(r: &mut impl Read) -> io::Result<Frame> {
+    read_frame_limited(r, MAX_PAYLOAD)
+}
+
+/// Read one frame whose payload is at most `max` bytes. A longer one is an
+/// `InvalidData` error, raised before its payload is read or allocated.
+pub fn read_frame_limited(r: &mut impl Read, max: u64) -> io::Result<Frame> {
     let mut head = [0u8; 2];
     r.read_exact(&mut head)?;
     let fin = head[0] & 0x80 != 0;
@@ -124,7 +131,7 @@ pub fn read_frame(r: &mut impl Read) -> io::Result<Frame> {
         }
         n => n as u64,
     };
-    if len > MAX_PAYLOAD {
+    if len > max {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "frame too large"));
     }
     let mut mask = [0u8; 4];
@@ -179,13 +186,21 @@ pub fn write_frame(
 }
 
 /// Read frames until a complete text message, answering pings. `None`
-/// when the peer closed the connection.
+/// when the peer closed the connection. A message longer than
+/// [`MAX_PAYLOAD`] in total is an `InvalidData` error.
 pub fn read_message(stream: &mut (impl Read + Write)) -> io::Result<Option<String>> {
     let mut message: Vec<u8> = Vec::new();
     loop {
-        let frame = read_frame(stream)?;
+        let room = MAX_PAYLOAD.saturating_sub(message.len() as u64).max(125);
+        let frame = read_frame_limited(stream, room)?;
         match frame.opcode {
             OP_TEXT | OP_BINARY | OP_CONTINUATION => {
+                if message.len() as u64 + frame.payload.len() as u64 > MAX_PAYLOAD {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "message too large",
+                    ));
+                }
                 message.extend_from_slice(&frame.payload);
                 if frame.fin {
                     return String::from_utf8(message)
@@ -233,6 +248,17 @@ mod tests {
         ] {
             assert_eq!(base64_encode(input.as_bytes()), out);
         }
+    }
+
+    #[test]
+    fn a_frame_over_the_limit_is_refused_before_its_payload_is_read() {
+        let mut wire = Vec::new();
+        write_frame(&mut wire, OP_TEXT, &[0; 200], None).unwrap();
+        // Only the header: the payload is never read.
+        let err = read_frame_limited(&mut &wire[..4], 199).err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let frame = read_frame_limited(&mut wire.as_slice(), 200).unwrap();
+        assert_eq!(frame.payload.len(), 200);
     }
 
     #[test]

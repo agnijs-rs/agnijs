@@ -12,10 +12,21 @@ use agnijs::api::{
     Engine, EngineInfo, ErrorKind, Handle, HostClassDef, HostClassId, HostFunction, HostObject,
     MemoryUsage, PromiseState, PropertyKey, RealmId, Result, TypeOf, Value,
 };
-use agnijs_js_cdp::{CdpServer, Session};
+use agnijs_js_cdp::server::is_loopback;
+use agnijs_js_cdp::{CdpOptions, CdpServer, Session};
 use agnijs_js_debugger::Debuggee;
 use std::cell::RefCell;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::rc::Rc;
+
+/// The addresses `addr` resolves to that are not loopback.
+fn remote_addresses(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    addrs
+        .iter()
+        .copied()
+        .filter(|a| !is_loopback(a.ip()))
+        .collect()
+}
 
 pub struct Inspected {
     debuggee: RefCell<Box<dyn Debuggee>>,
@@ -35,7 +46,19 @@ impl Inspected {
         title: &str,
         wait: bool,
     ) -> std::io::Result<Inspected> {
-        let server = CdpServer::listen(addr, title)?;
+        // The user named the address, so a public one is their choice: warn,
+        // then opt in (the library refuses it by default).
+        let addrs: Vec<SocketAddr> = addr.to_socket_addrs()?.collect();
+        let remote = remote_addresses(&addrs);
+        if let Some(a) = remote.first() {
+            eprintln!(
+                "agnijs: warning: the debugger on {a} is not on a loopback address. \
+                 Anyone who can reach it can run code with this process's permissions, \
+                 including reading files."
+            );
+        }
+        let options = CdpOptions::new().allow_remote(!remote.is_empty());
+        let server = CdpServer::listen_with(&addrs[..], title, options)?;
         let local = server.local_addr();
         eprintln!("Debugger listening on {}", server.websocket_url());
         eprintln!(
@@ -269,5 +292,20 @@ impl Engine for Inspected {
     }
     fn same_object(&mut self, a: &Handle, b: &Handle) -> bool {
         self.e().same_object(a, b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_non_loopback_addresses_are_remote() {
+        let parse = |a: &str| a.to_socket_addrs().unwrap().collect::<Vec<_>>();
+        assert!(remote_addresses(&parse("127.0.0.1:9229")).is_empty());
+        assert!(remote_addresses(&parse("[::1]:9229")).is_empty());
+        assert_eq!(remote_addresses(&parse("0.0.0.0:9229")).len(), 1);
+        assert_eq!(remote_addresses(&parse("[::]:9229")).len(), 1);
+        assert_eq!(remote_addresses(&parse("192.168.1.2:9229")).len(), 1);
     }
 }
