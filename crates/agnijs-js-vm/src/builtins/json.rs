@@ -73,6 +73,7 @@ fn parse_units_tracked<T: Unit>(vm: &mut Vm, units: &[T], track: bool) -> JsResu
         scratch: Vec::new(),
         track,
         recs: Vec::new(),
+        values: 0,
     };
     p.skip_ws();
     let v = p.parse_value(vm)?;
@@ -113,6 +114,9 @@ struct Parser<'a, T: Unit> {
     track: bool,
     /// The records of the values parsed so far, innermost last.
     recs: Vec<Rec>,
+    /// Array elements and object members parsed so far; the host's
+    /// interrupt hook is asked once per 4096 (TASK-103.28).
+    values: u32,
 }
 
 const MAX_JSON_DEPTH: u32 = 5000;
@@ -126,6 +130,18 @@ enum Content {
 }
 
 impl<'a, T: Unit> Parser<'a, T> {
+    /// Count one array element or object member, and ask the host whether
+    /// to stop once per 4096. A parse is linear in its text, so this only
+    /// bounds how long a huge text holds the thread.
+    #[inline(always)]
+    fn poll(&mut self, vm: &mut Vm) -> JsResult<()> {
+        self.values = self.values.wrapping_add(1);
+        if self.values & 0xfff == 0 {
+            return vm.ask_host_interrupt();
+        }
+        Ok(())
+    }
+
     #[inline]
     fn peek(&self) -> Option<u16> {
         self.units.get(self.pos).map(|c| c.u())
@@ -371,6 +387,7 @@ impl<'a, T: Unit> Parser<'a, T> {
             self.pos += 1;
         } else {
             loop {
+                self.poll(vm)?;
                 self.skip_ws();
                 let v = self.parse_value(vm)?;
                 vm.root(v);
@@ -416,6 +433,7 @@ impl<'a, T: Unit> Parser<'a, T> {
             self.pos += 1;
         } else {
             loop {
+                self.poll(vm)?;
                 self.skip_ws();
                 if self.peek() != Some(0x22) {
                     return self.fail(vm, "Expected property name");
@@ -508,6 +526,7 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value, rec: O
             let len = vm.length_of_array_like(o)?;
             let mut i = 0.0;
             while i < len {
+                vm.poll_interrupt()?;
                 let k = vm.number_key(i);
                 let new_el = internalize(vm, o, k, reviver, elements.get(i as usize))?;
                 if new_el.is_undefined() {
@@ -524,6 +543,7 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value, rec: O
             };
             let keys = vm.enumerable_own_keys(o)?;
             for k in keys {
+                vm.poll_interrupt()?;
                 let entry = entries.iter().find(|(ek, _)| *ek == k).map(|(_, r)| r);
                 let new_el = internalize(vm, o, k, reviver, entry)?;
                 if new_el.is_undefined() {
@@ -599,6 +619,7 @@ fn json_stringify(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let mut list: Vec<PropKey> = Vec::new();
             let mut i = 0.0;
             while i < len {
+                vm.poll_interrupt()?;
                 let k = vm.number_key(i);
                 let v = vm.get(r, k)?;
                 let item: Option<StrId> = match v {
@@ -855,6 +876,7 @@ fn serialize_object(
     out.push(0x7B);
     let mut any = false;
     for k in keys {
+        vm.poll_interrupt()?;
         // The member is written in place and taken back if the value turns
         // out to be undefined; writing to `out` is not observable, so this
         // is the same as serializing the value first.
@@ -897,6 +919,7 @@ fn serialize_array(
     out.push(0x5B);
     let mut i = 0.0;
     while i < len {
+        vm.poll_interrupt()?;
         if i > 0.0 {
             out.push(0x2C);
         }

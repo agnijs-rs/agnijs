@@ -63,7 +63,8 @@ pub enum RegexMatcher {
     #[default]
     Auto,
     /// Always backtrack (an embedder opt-out). Pathological patterns can
-    /// take exponential time; [`Host::interrupt`] is the only way out.
+    /// take exponential time; [`Host::interrupt`], which the matcher polls
+    /// every 65,536 steps, is the way out.
     BacktrackingOnly,
     /// Run every pattern the linear-time matcher supports on it, whatever
     /// its cost estimate: for hosts that take untrusted patterns and want
@@ -121,8 +122,11 @@ pub trait Host {
         let _ = (realm, level, args);
     }
 
-    /// Polled periodically while JavaScript runs. Return true to interrupt;
-    /// the running call then fails with [`crate::Error::Interrupted`].
+    /// Polled periodically while JavaScript runs: at function entries,
+    /// loop back-edges and call returns, every 65,536 steps of a regex
+    /// match, and in native built-ins that loop over their input. Return
+    /// true to interrupt; the running call then fails with
+    /// [`crate::Error::Interrupted`].
     fn interrupt(&self) -> bool {
         false
     }

@@ -816,6 +816,33 @@ fn another_thread_can_request_an_interrupt() {
 }
 
 #[test]
+fn another_thread_can_interrupt_a_runaway_regex_and_a_native_loop() {
+    // TASK-103.28: the matchers and native loops poll the interrupt, so a
+    // call that would run for hours returns AGNIJS_INTERRUPTED.
+    let e = engine();
+    for src in [
+        "/(?=(a+)+b)/.test('a'.repeat(40))",
+        "Array.prototype.indexOf.call({ length: 2 ** 53 - 1 }, 1)",
+    ] {
+        let t = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            agnijs_engine_request_interrupt(e)
+        });
+        let start = std::time::Instant::now();
+        let (st, _) = eval_status(e, src);
+        assert_eq!(st, AGNIJS_INTERRUPTED, "{src}");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "{src}: {:?}",
+            start.elapsed()
+        );
+        assert_eq!(t.join().unwrap(), AGNIJS_OK);
+    }
+    assert_eq!(eval_display(e, "'after'"), "after");
+    free_engine(e);
+}
+
+#[test]
 fn string_compilation_can_be_refused() {
     let mut o = options();
     o.flags = AGNIJS_FLAG_NO_STRING_COMPILATION;

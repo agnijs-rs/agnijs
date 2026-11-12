@@ -154,10 +154,12 @@ pub trait Engine {
     /// (and reads what is left with [`Engine::fuel`] after), and meters a
     /// realm by giving it an engine of its own. The count depends only on
     /// the program and the engine build, so exhaustion comes at the same
-    /// instruction on every run and platform. A native built-in costs only
-    /// the instruction that calls it (and the instructions of any
-    /// JavaScript it calls back); the memory limit and the interrupt hook
-    /// bound the rest. Engines without fuel return
+    /// instruction on every run and platform. Fuel counts bytecode only: a
+    /// native built-in costs the instruction that calls it, however much
+    /// work it does (a regex match, a join, a sort), plus the instructions
+    /// of any JavaScript it calls back. That work is bounded by the
+    /// interrupt hook, which the regex matchers and native loops poll
+    /// (TASK-103.28), and the memory limit. Engines without fuel return
     /// [`crate::Error::Unsupported`].
     fn set_fuel(&mut self, fuel: Option<u64>) -> Result<()> {
         let _ = fuel;

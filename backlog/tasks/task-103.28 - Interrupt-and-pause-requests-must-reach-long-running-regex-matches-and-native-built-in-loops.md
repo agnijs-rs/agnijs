@@ -3,9 +3,11 @@ id: TASK-103.28
 title: >-
   Interrupt and pause requests must reach long-running regex matches and native
   built-in loops
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-12T06:25:00Z'
+updated_date: '2026-11-12T15:30:00Z'
 labels:
   - ready-for-agent
   - security
@@ -30,3 +32,13 @@ Found by the security review (TASK-103.9, docs/security-model.md). `Vm::poll_int
 - [ ] #3 Regression tests interrupt an exponential lookahead pattern under Auto, a nested-quantifier pattern under BacktrackingOnly and a join over a multi-million-element array, each within a bounded time
 - [ ] #4 The fuel documentation states what fuel does and does not count inside native calls after the change
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red tests (crates/agnijs-js-vm/tests/interrupt_native.rs): a host whose interrupt hook always says stop; exponential lookahead under Auto, nested quantifier under BacktrackingOnly, Array(3e6).join, sparse array-like loops, quadratic string search; each must fail with Error::Interrupted within a bounded time and call the hook. Plus a match-results-unchanged check under a never-stop hook.
+2. agnijs-js-regex: a polled search API (Regex::exec_polled / exec_sticky_polled returning Result<Option<Captures>, Interrupted>). The backtracker's step counter runs in slices; at each slice end a cold path asks the poll callback and refills from the remaining Auto budget, so the hot loop keeps one counter. The linear matcher polls per chunk of thread-steps. exec/exec_sticky stay as never-interrupted wrappers.
+3. VM: builtin_exec_raw passes a poll that asks Host::interrupt directly (Fault::Interrupt on stop). Native loops (Array, TypedArray, String search/split/replace, RegExp match/replace/split, JSON parse/stringify, collections, Object loops, iterator helpers) call vm.poll_interrupt() per iteration; string search gains a polled variant weighted by needle length.
+4. C API test: agnijs_engine_request_interrupt stops a backtracking regex. Docs: security-model.md, fuel docs (Engine::set_fuel), Host::regex_matcher / RegexMatcher docs, ADR 0013 note.
+5. Gates: clippy, rustfmt own hunks, test262 x4 + QuickJS-NG baseline, GC-stress slice, JIT slices if needed, regex-focused benchmarks within 1%.
+<!-- SECTION:PLAN:END -->

@@ -993,7 +993,9 @@ impl Vm {
 
     /// Poll the host's interrupt hook every so often. The interpreter polls
     /// at function entry, at loop back-edges and after a call returns (ADR
-    /// 0019 J7); the host hook itself runs once per 4096 polls.
+    /// 0019 J7), and native built-ins once per iteration of a loop over
+    /// their input (TASK-103.28); the host hook itself runs once per 4096
+    /// polls.
     #[inline]
     pub fn poll_interrupt(&mut self) -> JsResult<()> {
         self.interrupt_counter = self.interrupt_counter.wrapping_add(1);

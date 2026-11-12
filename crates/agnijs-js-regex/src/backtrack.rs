@@ -455,6 +455,78 @@ pub(crate) enum Outcome {
     /// The step budget ran out while trying the start position given;
     /// every earlier start position has failed.
     Exhausted(usize),
+    /// The poll asked the search to stop (TASK-103.28).
+    Interrupted,
+}
+
+/// How many steps the matcher takes between polls.
+pub(crate) const SLICE: u64 = 1 << 16;
+
+/// The steps a search may take, counted in slices (TASK-103.28). The hot
+/// loop decrements only [`Meter::left`]; when a slice is spent,
+/// [`Meter::refill`] asks the poll whether to stop and takes the next
+/// slice from what is left of the budget. The budget is spent exactly as
+/// with one counter, so polling never changes where a search hands over
+/// to the linear-time matcher, or what it matches.
+pub(crate) struct Meter<'p> {
+    /// Steps left in this slice.
+    left: u64,
+    /// Steps left after this slice.
+    reserve: u64,
+    poll: &'p mut dyn FnMut() -> bool,
+    interrupted: bool,
+}
+
+impl<'p> Meter<'p> {
+    pub(crate) fn new(budget: u64, poll: &'p mut dyn FnMut() -> bool) -> Meter<'p> {
+        let left = budget.min(SLICE);
+        Meter {
+            left,
+            reserve: budget - left,
+            poll,
+            interrupted: false,
+        }
+    }
+
+    /// Take one step: false when the search must stop (out of steps or
+    /// interrupted).
+    #[inline(always)]
+    fn step(&mut self) -> bool {
+        if self.left == 0 && !self.refill() {
+            return false;
+        }
+        self.left -= 1;
+        true
+    }
+
+    /// Charge `n` steps at once (a scanned run), possibly past this slice.
+    #[inline]
+    fn charge(&mut self, n: u64) {
+        if n <= self.left {
+            self.left -= n;
+        } else {
+            self.reserve = self.reserve.saturating_sub(n - self.left);
+            self.left = 0;
+        }
+    }
+
+    /// The slice is spent: poll, then start the next slice. False when
+    /// the budget is gone or the poll said stop.
+    #[cold]
+    #[inline(never)]
+    fn refill(&mut self) -> bool {
+        if self.interrupted || self.reserve == 0 {
+            return false;
+        }
+        if (self.poll)() {
+            self.interrupted = true;
+            return false;
+        }
+        let n = self.reserve.min(SLICE);
+        self.reserve -= n;
+        self.left = n;
+        true
+    }
 }
 
 #[inline]
@@ -513,8 +585,17 @@ impl Prog {
     }
 
     /// Search from `start` (only at `start` when `sticky`), spending at
-    /// most `budget` steps.
-    pub(crate) fn exec(&self, s: &mut Scratch, input: &[u16], start: usize, sticky: bool, budget: u64) -> Outcome {
+    /// most `budget` steps and asking `poll` every [`SLICE`] steps
+    /// whether to stop.
+    pub(crate) fn exec(
+        &self,
+        s: &mut Scratch,
+        input: &[u16],
+        start: usize,
+        sticky: bool,
+        budget: u64,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Outcome {
         if start > input.len() {
             return Outcome::NoMatch;
         }
@@ -522,7 +603,7 @@ impl Prog {
         if s.regs.len() != nregs {
             s.regs = vec![NONE; nregs];
         }
-        let mut steps = budget;
+        let mut steps = Meter::new(budget, poll);
         let mut pos = start;
         loop {
             if !sticky {
@@ -549,6 +630,7 @@ impl Prog {
                     return Outcome::Match(caps);
                 }
                 Some(false) => {}
+                None if steps.interrupted => return Outcome::Interrupted,
                 None => return Outcome::Exhausted(pos),
             }
             if sticky {
@@ -570,7 +652,13 @@ impl Prog {
 
     /// One attempt at `start`: `Some(true)` with the captures in the
     /// registers, `Some(false)` on failure, `None` when out of steps.
-    fn run(&self, s: &mut Scratch, input: &[u16], start: usize, steps: &mut u64) -> Option<bool> {
+    fn run(
+        &self,
+        s: &mut Scratch,
+        input: &[u16],
+        start: usize,
+        steps: &mut Meter<'_>,
+    ) -> Option<bool> {
         let g = self.groups as usize + 1;
         s.regs[..3 * g].iter_mut().for_each(|r| *r = NONE);
         s.stack.clear();
@@ -593,7 +681,15 @@ impl Prog {
                         pos = q;
                         continue;
                     }
-                    None => return if *steps == 0 { None } else { Some(false) },
+                    // The stack ran dry (the attempt failed) or the
+                    // steps ran out; only the second leaves none.
+                    None => {
+                        return if steps.left == 0 && !steps.refill() {
+                            None
+                        } else {
+                            Some(false)
+                        }
+                    }
                 }
             };
         }
@@ -605,10 +701,9 @@ impl Prog {
             }};
         }
         loop {
-            if *steps == 0 {
+            if !steps.step() {
                 return None;
             }
-            *steps -= 1;
             match self.insts[pc] {
                 Inst::Char { c, back } => match self.read(input, pos, back) {
                     Some((x, w)) if x == c => {
@@ -748,7 +843,7 @@ impl Prog {
                         if n < min {
                             fail!();
                         }
-                        *steps = steps.saturating_sub(n as u64);
+                        steps.charge(n as u64);
                         if pc == 0 {
                             *run_end = p;
                         }
@@ -899,13 +994,12 @@ impl Prog {
         stack: &mut Vec<Frame>,
         looks: &mut Vec<usize>,
         input: &[u16],
-        steps: &mut u64,
+        steps: &mut Meter<'_>,
     ) -> Option<(usize, usize)> {
         while let Some(f) = stack.pop() {
-            if *steps == 0 {
+            if !steps.step() {
                 return None;
             }
-            *steps -= 1;
             match f {
                 Frame::Restore { reg, val } => regs[reg as usize] = val,
                 Frame::Choice { pc, pos } => return Some((pc as usize, pos)),

@@ -466,6 +466,7 @@ fn construct_collection(vm: &mut Vm, a: &CallArgs, kind: Kind, proto_intrinsic: 
     }
     let (iter, next) = vm.get_iterator(iterable, false)?;
     loop {
+        vm.poll_interrupt()?;
         let Some(item) = vm.iterator_step_value(iter, next)? else {
             return Ok(Value::Object(o));
         };
@@ -510,6 +511,7 @@ fn map_group_by(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let proto = vm.intrinsic(Intrinsic::MapPrototype);
     let o = vm.alloc(ObjectData::new(Some(proto), Class::Map(Box::new(MapData::new(false)))));
     for (key, items) in groups {
+        vm.poll_interrupt()?;
         let key = normalize(key);
         let mk = map_key(vm, key);
         let arr = Value::Object(vm.new_array(items));
@@ -599,6 +601,7 @@ fn map_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[a.this, f, this_arg], |vm| {
         let mut i = 0;
         loop {
+            vm.poll_interrupt()?;
             let entry = {
                 let d = data_ref(vm, o);
                 if i >= d.entries.len() {
@@ -755,6 +758,7 @@ fn set_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[a.this, f, this_arg], |vm| {
         let mut i = 0;
         loop {
+            vm.poll_interrupt()?;
             let entry = {
                 let d = data_ref(vm, o);
                 if i >= d.entries.len() {
@@ -852,6 +856,7 @@ fn set_union(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (iter, next) = keys_iterator(vm, &rec)?;
     let mut result = data_ref(vm, o).copy();
     while let Some(v) = vm.iterator_step_value(iter, next)? {
+        vm.poll_interrupt()?;
         let v = normalize(v);
         let k = map_key(vm, v);
         result.set(k, v, Value::Undefined);
@@ -867,6 +872,7 @@ fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if this_size <= rec.size {
         let mut i = 0;
         while let Some(slot) = raw_entry(vm, o, i) {
+            vm.poll_interrupt()?;
             i += 1;
             if let Some(e) = slot {
                 if call_has(vm, &rec, e)? {
@@ -878,6 +884,7 @@ fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     } else {
         let (iter, next) = keys_iterator(vm, &rec)?;
         while let Some(v) = vm.iterator_step_value(iter, next)? {
+            vm.poll_interrupt()?;
             let v = normalize(v);
             let k = map_key(vm, v);
             if data_ref(vm, o).has(&k) {
@@ -896,6 +903,7 @@ fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if this_size <= rec.size {
         let mut i = 0;
         while let Some(slot) = raw_entry(vm, o, i) {
+            vm.poll_interrupt()?;
             i += 1;
             if let Some(e) = slot {
                 if call_has(vm, &rec, e)? {
@@ -907,6 +915,7 @@ fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     } else {
         let (iter, next) = keys_iterator(vm, &rec)?;
         while let Some(v) = vm.iterator_step_value(iter, next)? {
+            vm.poll_interrupt()?;
             let k = map_key(vm, normalize(v));
             result.remove(&k);
         }
@@ -920,6 +929,7 @@ fn set_symmetric_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (iter, next) = keys_iterator(vm, &rec)?;
     let mut result = data_ref(vm, o).copy();
     while let Some(v) = vm.iterator_step_value(iter, next)? {
+        vm.poll_interrupt()?;
         let v = normalize(v);
         let k = map_key(vm, v);
         if data_ref(vm, o).has(&k) {
@@ -939,6 +949,7 @@ fn set_is_subset_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let mut i = 0;
     while let Some(slot) = raw_entry(vm, o, i) {
+        vm.poll_interrupt()?;
         i += 1;
         if let Some(e) = slot {
             if !call_has(vm, &rec, e)? {
@@ -957,6 +968,7 @@ fn set_is_superset_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let (iter, next) = keys_iterator(vm, &rec)?;
     while let Some(v) = vm.iterator_step_value(iter, next)? {
+        vm.poll_interrupt()?;
         let k = map_key(vm, v);
         if !data_ref(vm, o).has(&k) {
             vm.iterator_close(iter)?;
@@ -972,6 +984,7 @@ fn set_is_disjoint_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if (data_ref(vm, o).live as f64) <= rec.size {
         let mut i = 0;
         while let Some(slot) = raw_entry(vm, o, i) {
+            vm.poll_interrupt()?;
             i += 1;
             if let Some(e) = slot {
                 if call_has(vm, &rec, e)? {
@@ -982,6 +995,7 @@ fn set_is_disjoint_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     } else {
         let (iter, next) = keys_iterator(vm, &rec)?;
         while let Some(v) = vm.iterator_step_value(iter, next)? {
+            vm.poll_interrupt()?;
             let k = map_key(vm, v);
             if data_ref(vm, o).has(&k) {
                 vm.iterator_close(iter)?;

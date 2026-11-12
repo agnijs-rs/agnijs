@@ -4,7 +4,7 @@ use crate::builtins::iterator::create_string_iterator;
 use crate::convert::to_integer_or_infinity_f64;
 use crate::object::{CallArgs, Class};
 use crate::realm::Intrinsic;
-use crate::string::{is_js_whitespace, StrBuilder, Units};
+use crate::string::{is_js_whitespace, SearchPoll, StrBuilder, Units};
 use crate::value::{Attrs, ObjId, PropKey, StrId, Value};
 use crate::vm::{JsResult, Vm};
 use agnijs_engine_api::RealmId;
@@ -202,6 +202,7 @@ fn string_raw(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut b = StrBuilder::new();
     let mut i = 0.0;
     loop {
+        vm.poll_interrupt()?;
         let key = vm.number_key(i);
         let seg = vm.get(raw, key)?;
         let seg = vm.to_string(seg)?;
@@ -331,8 +332,9 @@ fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let search = vm.to_string(a.arg(0))?;
     let len = vm.heap.str_len(s);
     let pos = vm.to_integer_or_infinity(a.arg(1))?.clamp(0.0, len as f64) as usize;
+    let mut poll = SearchPoll::new(&vm.host);
     let (hay, su) = units_pair(vm, s, search);
-    Ok(Value::Bool(hay.index_of(&su, pos).is_some()))
+    Ok(Value::Bool(hay.index_of(&su, pos, &mut poll)?.is_some()))
 }
 
 fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -340,8 +342,9 @@ fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let search = vm.to_string(a.arg(0))?;
     let len = vm.heap.str_len(s);
     let pos = vm.to_integer_or_infinity(a.arg(1))?.clamp(0.0, len as f64) as usize;
+    let mut poll = SearchPoll::new(&vm.host);
     let (hay, su) = units_pair(vm, s, search);
-    Ok(Value::Number(match hay.index_of(&su, pos) {
+    Ok(Value::Number(match hay.index_of(&su, pos, &mut poll)? {
         Some(i) => i as f64,
         None => -1.0,
     }))
@@ -363,9 +366,10 @@ fn proto_last_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return Ok(Value::Number(-1.0));
     }
     let from = start.min(len - search_len);
+    let mut poll = SearchPoll::new(&vm.host);
     let (hay, su) = units_pair(vm, s, search);
     Ok(Value::Number(
-        match hay.last_index_of(&su, from) {
+        match hay.last_index_of(&su, from, &mut poll)? {
             Some(i) => i as f64,
             None => -1.0,
         },
@@ -646,6 +650,7 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let u = units_of(vm, s);
     let mut out = Vec::with_capacity(len * n as usize);
     for _ in 0..n as usize {
+        vm.poll_interrupt()?;
         out.extend_from_slice(&u);
     }
     vm.str_from_units(out)
@@ -819,8 +824,9 @@ fn proto_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         Some(vm.to_string(replace_value)?)
     };
     let found = {
+        let mut poll = SearchPoll::new(&vm.host);
         let (hay, needle) = units_pair(vm, s, search);
-        hay.index_of(&needle, 0)
+        hay.index_of(&needle, 0, &mut poll)?
     };
     let Some(pos) = found else {
         return Ok(Value::String(s));
@@ -873,14 +879,16 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let advance = search_len.max(1);
     let mut positions = Vec::new();
     {
+        let mut poll = SearchPoll::new(&vm.host);
         let (hay, needle) = units_pair(vm, s, search);
-        let mut pos = hay.index_of(&needle, 0);
+        let mut pos = hay.index_of(&needle, 0, &mut poll)?;
         while let Some(p) = pos {
+            poll.charge(advance)?;
             positions.push(p);
             pos = if p + advance > s_len {
                 None
             } else {
-                hay.index_of(&needle, p + advance)
+                hay.index_of(&needle, p + advance, &mut poll)?
             };
         }
     }
@@ -890,6 +898,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut end_of_last = 0;
     let mut out = StrBuilder::with_capacity(s_len + 16);
     for p in positions {
+        vm.poll_interrupt()?;
         vm.check_string_len(out.len())?;
         out.push_units(&vm.heap.units(s).slice(end_of_last, p));
         string_replacement(vm, s, search, p, replace_value, template, &mut out)?;
@@ -964,6 +973,7 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let mut parts = Vec::with_capacity(n);
         vm.heap.flatten(s);
         for i in 0..n {
+            vm.poll_interrupt()?;
             let unit = vm.heap.units_flat(s).at(i);
             parts.push(Value::String(vm.heap.char_str(unit)));
         }
@@ -971,10 +981,12 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let mut parts = Vec::new();
     let mut i = 0;
+    let mut poll = SearchPoll::new(&vm.host);
     loop {
+        vm.poll_interrupt()?;
         let j = {
             let (hay, needle) = units_pair(vm, s, r);
-            hay.index_of(&needle, i)
+            hay.index_of(&needle, i, &mut poll)?
         };
         let Some(j) = j else { break };
         parts.push(Value::String(vm.heap.substring(s, i, j)));

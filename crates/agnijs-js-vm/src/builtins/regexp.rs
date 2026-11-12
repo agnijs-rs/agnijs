@@ -600,6 +600,10 @@ fn builtin_exec_raw(
         return Ok(None);
     }
     let last_index = last_index as usize;
+    // The matchers ask the host whether to stop every 65,536 steps, so a
+    // pathological pattern cannot outlast an interrupt (TASK-103.28).
+    let host = vm.host.clone();
+    let mut poll = || host.interrupt();
     let (attempt, found) = with_input(vm, s, |input| {
         // In unicode mode an index inside a surrogate pair denotes the
         // character that pair encodes, so the attempt starts at the pair.
@@ -613,12 +617,15 @@ fn builtin_exec_raw(
             attempt -= 1;
         }
         let found = if sticky {
-            matcher.exec_sticky(input, attempt)
+            matcher.exec_sticky_polled(input, attempt, &mut poll)
         } else {
-            matcher.exec(input, attempt)
+            matcher.exec_polled(input, attempt, &mut poll)
         };
         (attempt, found)
     });
+    let Ok(found) = found else {
+        return Err(crate::vm::Fault::Interrupt);
+    };
     let Some(caps) = found else {
         if global || sticky {
             vm.set(r, li_key, Value::Number(0.0), true)?;
@@ -1002,6 +1009,7 @@ fn symbol_match(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let arr = vm.array_create(0.0, None)?;
     let mut n: u32 = 0;
     loop {
+        vm.poll_interrupt()?;
         let match_str = match regexp_exec_match(vm, rx, s)? {
             Exec::Null => return Ok(if n == 0 { Value::Null } else { Value::Object(arr) }),
             Exec::Raw(index, caps) => vm.heap.substring(s, index, raw_end(&caps)),
@@ -1103,6 +1111,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let mut results: Vec<Exec> = Vec::new();
     loop {
+        vm.poll_interrupt()?;
         let result = regexp_exec_match(vm, rx, s)?;
         if matches!(result, Exec::Null) {
             break;
@@ -1131,6 +1140,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut accumulated = StrBuilder::with_capacity(length_s);
     let mut next_source_position = 0usize;
     for result in results {
+        vm.poll_interrupt()?;
         // The match, its position and length, and (unless the template is
         // plain) its captures and named captures, read as the spec reads
         // them from the result object.
@@ -1286,6 +1296,7 @@ fn symbol_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut p = 0usize;
     let mut q = p;
     while q < size {
+        vm.poll_interrupt()?;
         set_last_index(vm, sp, q as f64)?;
         let z = regexp_exec_match(vm, sp, s)?;
         if matches!(z, Exec::Null) {

@@ -279,6 +279,9 @@ enum Frame {
     Restore(u32, usize),
 }
 
+/// A match's capture ranges, the whole match first.
+pub(crate) type Ranges = Vec<Option<(usize, usize)>>;
+
 /// Working memory for one regex, reused across matches.
 pub(crate) struct Scratch {
     clist: Threads,
@@ -400,17 +403,22 @@ impl Linear {
     }
 
     /// Find the leftmost match at or after `start` (or exactly at `start`
-    /// when `sticky`). Returns the capture slots as ranges.
+    /// when `sticky`). Returns the capture slots as ranges, or
+    /// `Err(Interrupted)` when `poll`, asked once per
+    /// [`SLICE`](crate::backtrack::SLICE) thread steps, says stop.
     pub(crate) fn exec(
         &self,
         s: &mut Scratch,
         input: &[u16],
         start: usize,
         sticky: bool,
-    ) -> Option<Vec<Option<(usize, usize)>>> {
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Ranges>, crate::Interrupted> {
         if start > input.len() {
-            return None;
+            return Ok(None);
         }
+        // Thread steps since the last poll (TASK-103.28).
+        let mut work: u64 = 0;
         s.clist.len = 0;
         s.nlist.len = 0;
         let all = u32::MAX;
@@ -426,6 +434,13 @@ impl Linear {
             }
             if s.clist.len == 0 {
                 break;
+            }
+            work += s.clist.len as u64 + 1;
+            if work >= crate::backtrack::SLICE {
+                work = 0;
+                if poll() {
+                    return Err(crate::Interrupted);
+                }
             }
             let here = self.decode(input, pos);
             for k in 0..s.clist.len {
@@ -455,15 +470,15 @@ impl Linear {
                 break;
             }
         }
-        let b = best?;
-        Some(
+        let Some(b) = best else { return Ok(None) };
+        Ok(Some(
             (0..self.nslots / 2)
                 .map(|g| match (b[2 * g], b[2 * g + 1]) {
                     (x, y) if x != NONE && y != NONE => Some((x, y)),
                     _ => None,
                 })
                 .collect(),
-        )
+        ))
     }
 
     /// With no thread alive, advance to the next position where a match

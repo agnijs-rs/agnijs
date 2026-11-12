@@ -161,6 +161,11 @@ pub struct Regex {
     lin_scratch: RefCell<Option<linear::Scratch>>,
 }
 
+/// A search stopped because its poll said stop (TASK-103.28): see
+/// [`Regex::exec_polled`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Interrupted;
+
 /// One successful match: `ranges[0]` is the whole match, `ranges[n]` the
 /// n-th capture (`None` when the group did not participate). All indices
 /// are UTF-16 code-unit offsets into the input.
@@ -305,46 +310,95 @@ impl Regex {
 
     /// Find the leftmost match starting at or after `start`.
     pub fn exec(&self, input: &[u16], start: usize) -> Option<Captures> {
-        if self.program.starts_anchored {
-            // Only index 0 can begin a match, so one exact-start attempt
-            // there decides it; from anywhere else the answer is no.
-            // Without this a failed `/^x/` tried every position.
-            return if start == 0 { self.search(input, 0, true) } else { None };
-        }
-        self.search(input, start, false)
+        self.exec_polled(input, start, &mut || false)
+            .unwrap_or(None)
     }
 
     /// Find a match that starts exactly at `start` (sticky semantics).
     pub fn exec_sticky(&self, input: &[u16], start: usize) -> Option<Captures> {
-        self.search(input, start, true)
+        self.exec_sticky_polled(input, start, &mut || false)
+            .unwrap_or(None)
     }
 
-    fn search(&self, input: &[u16], start: usize, sticky: bool) -> Option<Captures> {
+    /// [`Regex::exec`] that asks `poll` every so often whether to stop
+    /// (TASK-103.28): every 65,536 backtracking steps, or about as many
+    /// linear-matcher thread steps. When `poll` returns true the search
+    /// ends with [`Interrupted`]. Polling never changes what matches, and
+    /// how often `poll` is asked depends only on the pattern and input.
+    pub fn exec_polled(
+        &self,
+        input: &[u16],
+        start: usize,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Captures>, Interrupted> {
+        if self.program.starts_anchored {
+            // Only index 0 can begin a match, so one exact-start attempt
+            // there decides it; from anywhere else the answer is no.
+            // Without this a failed `/^x/` tried every position.
+            return if start == 0 {
+                self.search(input, 0, true, poll)
+            } else {
+                Ok(None)
+            };
+        }
+        self.search(input, start, false, poll)
+    }
+
+    /// [`Regex::exec_sticky`] with a poll, as [`Regex::exec_polled`].
+    pub fn exec_sticky_polled(
+        &self,
+        input: &[u16],
+        start: usize,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Captures>, Interrupted> {
+        self.search(input, start, true, poll)
+    }
+
+    fn search(
+        &self,
+        input: &[u16],
+        start: usize,
+        sticky: bool,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Captures>, Interrupted> {
         if start > input.len() {
-            return None;
+            return Ok(None);
         }
         #[cfg(feature = "linear")]
         let budget = match self.route(input.len() - start) {
-            Route::Linear(lin) => return self.exec_linear(lin, input, start, sticky),
+            Route::Linear(lin) => return self.exec_linear(lin, input, start, sticky, poll),
             Route::Backtrack(budget) => budget,
         };
         #[cfg(not(feature = "linear"))]
         let budget = u64::MAX;
         let outcome = match self.bt_scratch.try_borrow_mut() {
-            Ok(mut s) => self.program.backtrack.exec(&mut s, input, start, sticky, budget),
-            Err(_) => self.program.backtrack.exec(&mut Default::default(), input, start, sticky, budget),
+            Ok(mut s) => self
+                .program
+                .backtrack
+                .exec(&mut s, input, start, sticky, budget, poll),
+            Err(_) => self.program.backtrack.exec(
+                &mut Default::default(),
+                input,
+                start,
+                sticky,
+                budget,
+                poll,
+            ),
         };
         match outcome {
-            backtrack::Outcome::Match(ranges) => well_formed(ranges),
-            backtrack::Outcome::NoMatch => None,
+            backtrack::Outcome::Match(ranges) => Ok(well_formed(ranges)),
+            backtrack::Outcome::NoMatch => Ok(None),
+            backtrack::Outcome::Interrupted => Err(Interrupted),
             backtrack::Outcome::Exhausted(_at) => {
                 #[cfg(feature = "linear")]
                 if let Ok(lin) = &self.program.linear {
                     // Every start before `_at` has failed, so the leftmost
                     // match from `_at` is the leftmost match from `start`.
-                    return self.exec_linear(lin, input, _at, sticky);
+                    return self.exec_linear(lin, input, _at, sticky, poll);
                 }
-                unreachable!("only budgeted searches run out of steps")
+                // Only an Auto budget runs out, and only for a pattern the
+                // linear matcher runs: never a panic on a foreign program.
+                Ok(None)
             }
         }
     }
@@ -366,15 +420,22 @@ impl Regex {
     }
 
     #[cfg(feature = "linear")]
-    fn exec_linear(&self, lin: &linear::Linear, input: &[u16], start: usize, sticky: bool) -> Option<Captures> {
+    fn exec_linear(
+        &self,
+        lin: &linear::Linear,
+        input: &[u16],
+        start: usize,
+        sticky: bool,
+        poll: &mut dyn FnMut() -> bool,
+    ) -> Result<Option<Captures>, Interrupted> {
         let ranges = match self.lin_scratch.try_borrow_mut() {
             Ok(mut s) => {
                 let s = s.get_or_insert_with(|| lin.scratch());
-                lin.exec(s, input, start, sticky)
+                lin.exec(s, input, start, sticky, poll)
             }
-            Err(_) => lin.exec(&mut lin.scratch(), input, start, sticky),
+            Err(_) => lin.exec(&mut lin.scratch(), input, start, sticky, poll),
         }?;
-        well_formed(ranges)
+        Ok(ranges.and_then(well_formed))
     }
 }
 
@@ -510,6 +571,60 @@ mod tests {
         assert!(re.exec(&u("\u{1F600}"), 0).is_some());
         let re = Regex::compile(&u("^.$"), &Flags::default()).unwrap();
         assert!(re.exec(&u("\u{1F600}"), 0).is_none());
+    }
+
+    #[test]
+    fn a_poll_stops_a_runaway_search_under_every_mode() {
+        // TASK-103.28: exponential lookahead (backtracks under any mode),
+        // a nested quantifier under BacktrackingOnly, and a large linear
+        // search under LinearWhenEligible.
+        let s = u(&"a".repeat(40));
+        let long = u(&"a".repeat(2_000_000));
+        for (p, mode, input) in [
+            ("(?=(a+)+b)", MatcherMode::Auto, &s),
+            ("(a+)+b", MatcherMode::BacktrackingOnly, &s),
+            ("(a|aa)+\\1b", MatcherMode::Auto, &s),
+            ("(a|b)*(a|b)*c", MatcherMode::LinearWhenEligible, &long),
+        ] {
+            let re = Regex::compile_with(&u(p), &Flags::default(), mode).unwrap();
+            let mut asked = 0;
+            let r = re.exec_polled(input, 0, &mut || {
+                asked += 1;
+                asked > 2
+            });
+            assert_eq!(r, Err(Interrupted), "{p} under {mode:?}");
+            assert_eq!(asked, 3, "{p} under {mode:?}");
+        }
+    }
+
+    #[test]
+    fn polling_does_not_change_what_matches() {
+        // Searches that span many polling slices give the same captures
+        // whether they are polled or not, under every mode.
+        let s = u(&("a".repeat(18) + "x"));
+        for mode in [
+            MatcherMode::Auto,
+            MatcherMode::BacktrackingOnly,
+            MatcherMode::LinearWhenEligible,
+        ] {
+            for p in [
+                "(?=(a+)+c)|x",
+                "(a+)+c|(x)",
+                "(a|aa)+\\1c|a{3}x",
+                "(a|b)*(a|b)*x",
+            ] {
+                let re = Regex::compile_with(&u(p), &Flags::default(), mode).unwrap();
+                let mut asked = 0;
+                let polled = re.exec_polled(&s, 0, &mut || {
+                    asked += 1;
+                    false
+                });
+                assert_eq!(polled, Ok(re.exec(&s, 0)), "{p} under {mode:?}");
+                assert!(polled.unwrap().is_some(), "{p} under {mode:?}");
+                let sticky = re.exec_sticky_polled(&s, 15, &mut || false);
+                assert_eq!(sticky, Ok(re.exec_sticky(&s, 15)), "{p} under {mode:?}");
+            }
+        }
     }
 
     #[test]

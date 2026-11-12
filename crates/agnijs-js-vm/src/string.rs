@@ -4,7 +4,51 @@
 //! is UTF-8.
 
 use crate::value::StrId;
+use crate::vm::{Fault, JsResult};
+use agnijs_engine_api::Host;
 use std::cell::Cell;
+use std::rc::Rc;
+
+/// The interrupt check for a string search (TASK-103.28). A naive search
+/// costs up to haystack times needle units, so it asks the host whether to
+/// stop once per [`SearchPoll::SLICE`] units compared, counted across every
+/// search that shares the poll.
+pub struct SearchPoll {
+    work: usize,
+    host: Rc<dyn Host>,
+}
+
+impl SearchPoll {
+    /// Units compared between polls.
+    pub const SLICE: usize = 1 << 20;
+
+    pub fn new(host: &Rc<dyn Host>) -> SearchPoll {
+        SearchPoll {
+            work: 0,
+            host: host.clone(),
+        }
+    }
+
+    /// Count `n` units of work; past a slice, ask the host.
+    #[inline]
+    pub fn charge(&mut self, n: usize) -> JsResult<()> {
+        self.work += n;
+        if self.work >= Self::SLICE {
+            return self.ask();
+        }
+        Ok(())
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn ask(&mut self) -> JsResult<()> {
+        self.work = 0;
+        if self.host.interrupt() {
+            return Err(Fault::Interrupt);
+        }
+        Ok(())
+    }
+}
 
 /// The longest string the engine makes, in UTF-16 code units: 2^30
 /// (TASK-103.26). Every operation that would make a longer one throws
@@ -262,62 +306,80 @@ impl<'a> Units<'a> {
         h.wrapping_mul(0x100000001b3)
     }
 
-    /// Find `needle` starting at `from`.
-    pub fn index_of(&self, needle: &Units<'_>, from: usize) -> Option<usize> {
+    /// Find `needle` starting at `from`, charging the comparisons to
+    /// `poll`.
+    pub fn index_of(
+        &self,
+        needle: &Units<'_>,
+        from: usize,
+        poll: &mut SearchPoll,
+    ) -> JsResult<Option<usize>> {
         let n = needle.len();
         let len = self.len();
         if n == 0 {
-            return if from <= len { Some(from) } else { None };
+            return Ok(if from <= len { Some(from) } else { None });
         }
         if n > len {
-            return None;
+            return Ok(None);
         }
         match (self, needle) {
-            (Units::One(h), Units::One(nd)) => return index_of_slice(h, nd, from),
-            (Units::Two(h), Units::Two(nd)) => return index_of_slice(h, nd, from),
+            (Units::One(h), Units::One(nd)) => return index_of_slice(h, nd, from, poll),
+            (Units::Two(h), Units::Two(nd)) => return index_of_slice(h, nd, from, poll),
             // A needle with a unit above 0xFF never occurs in one-byte text.
-            (Units::One(_), Units::Two(nd)) if nd.iter().any(|&c| c > 0xFF) => return None,
+            (Units::One(_), Units::Two(nd)) if nd.iter().any(|&c| c > 0xFF) => return Ok(None),
             _ => {}
         }
         let mut i = from;
         while i + n <= len {
             let mut ok = true;
-            for j in 0..n {
+            let mut j = 0;
+            while j < n {
                 if self.at(i + j) != needle.at(j) {
                     ok = false;
                     break;
                 }
+                j += 1;
             }
             if ok {
-                return Some(i);
+                return Ok(Some(i));
             }
+            poll.charge(j + 1)?;
             i += 1;
         }
-        None
+        Ok(None)
     }
 
-    /// Find the last occurrence of `needle` starting at or before `from`.
-    pub fn last_index_of(&self, needle: &Units<'_>, from: usize) -> Option<usize> {
+    /// Find the last occurrence of `needle` starting at or before `from`,
+    /// charging the comparisons to `poll`.
+    pub fn last_index_of(
+        &self,
+        needle: &Units<'_>,
+        from: usize,
+        poll: &mut SearchPoll,
+    ) -> JsResult<Option<usize>> {
         let n = needle.len();
         let len = self.len();
         if n > len {
-            return None;
+            return Ok(None);
         }
         let mut i = from.min(len - n);
         loop {
             let mut ok = true;
-            for j in 0..n {
+            let mut j = 0;
+            while j < n {
                 if self.at(i + j) != needle.at(j) {
                     ok = false;
                     break;
                 }
+                j += 1;
             }
             if ok {
-                return Some(i);
+                return Ok(Some(i));
             }
             if i == 0 {
-                return None;
+                return Ok(None);
             }
+            poll.charge(j + 1)?;
             i -= 1;
         }
     }
@@ -358,23 +420,34 @@ impl<'a> Units<'a> {
 }
 
 /// The first index at or after `from` where `needle` (not empty) occurs.
-fn index_of_slice<T: Copy + PartialEq>(hay: &[T], needle: &[T], from: usize) -> Option<usize> {
+/// Each candidate is charged the needle's length, the most its comparison
+/// can cost.
+fn index_of_slice<T: Copy + PartialEq>(
+    hay: &[T],
+    needle: &[T],
+    from: usize,
+    poll: &mut SearchPoll,
+) -> JsResult<Option<usize>> {
     let n = needle.len();
     if from + n > hay.len() {
-        return None;
+        return Ok(None);
     }
     let first = needle[0];
     let rest = &needle[1..];
     let last_start = hay.len() - n;
     let mut i = from;
     while i <= last_start {
-        i += hay[i..=last_start].iter().position(|&c| c == first)?;
+        let Some(k) = hay[i..=last_start].iter().position(|&c| c == first) else {
+            return Ok(None);
+        };
+        i += k;
         if &hay[i + 1..i + n] == rest {
-            return Some(i);
+            return Ok(Some(i));
         }
+        poll.charge(n)?;
         i += 1;
     }
-    None
+    Ok(None)
 }
 
 pub struct UnitsIter<'a> {

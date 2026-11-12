@@ -213,6 +213,7 @@ fn iterator_from_method(vm: &mut Vm, v: Value, m: Value) -> JsResult<(Value, Val
 fn list_from_iterator(vm: &mut Vm, it: Value, next: Value) -> JsResult<Vec<Value>> {
     let mut out = Vec::new();
     while let Some(x) = vm.iterator_step_value(it, next)? {
+        vm.poll_interrupt()?;
         out.push(x);
     }
     Ok(out)
@@ -349,6 +350,7 @@ fn typed_array_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             }
         } else {
             for i in 0..src_len {
+                vm.poll_interrupt()?;
                 let v = ta_get_element(vm, src, i);
                 let c = converted(vm, v);
                 ta_store(vm, o, i, c);
@@ -428,10 +430,12 @@ fn typed_array_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = allocate_typed_array(vm, kind, proto, len as f64)?;
     if using.is_some() {
         for (i, v) in values.into_iter().enumerate() {
+            vm.poll_interrupt()?;
             set_elem(vm, o, i, v)?;
         }
     } else {
         for i in 0..len {
+            vm.poll_interrupt()?;
             let v = vm.get(src, PropKey::Index(i as u32))?;
             set_elem(vm, o, i, v)?;
         }
@@ -459,6 +463,7 @@ fn ta_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let len = values.len();
         let target = typed_array_create_from_ctor(vm, c, &[Value::Number(len as f64)])?;
         for (k, v) in values.into_iter().enumerate() {
+            vm.poll_interrupt()?;
             let mapped = if mapping {
                 vm.call_value(mapfn, this_arg, &[v, Value::Number(k as f64)])?
             } else {
@@ -473,6 +478,7 @@ fn ta_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let target = typed_array_create_from_ctor(vm, c, &[Value::Number(len)])?;
     let mut k = 0.0;
     while k < len {
+        vm.poll_interrupt()?;
         let key = vm.number_key(k);
         let v = vm.get(array_like, key)?;
         let mapped = if mapping {
@@ -608,6 +614,7 @@ fn iterate(
     let cb = callable_arg(vm, a.arg(0), method)?;
     let this_arg = a.arg(1);
     for step in 0..len {
+        vm.poll_interrupt()?;
         let k = if reverse { len - 1 - step } else { step };
         let v = elem(vm, o, k);
         let r = vm.call_value(cb, this_arg, &[v, Value::Number(k as f64), Value::Object(o)])?;
@@ -675,6 +682,7 @@ fn proto_fill(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let c = converted(vm, value);
     let mut k = start as usize;
     while (k as f64) < end {
+        vm.poll_interrupt()?;
         ta_store(vm, o, k, c);
         k += 1;
     }
@@ -687,6 +695,7 @@ fn proto_filter(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let this_arg = a.arg(1);
     let mut kept = Vec::new();
     for k in 0..len {
+        vm.poll_interrupt()?;
         let v = elem(vm, o, k);
         let r = vm.call_value(cb, this_arg, &[v, Value::Number(k as f64), Value::Object(o)])?;
         if vm.to_boolean(r) {
@@ -696,6 +705,7 @@ fn proto_filter(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let n = kept.len();
     let result = typed_array_species_create(vm, o, &[Value::Number(n as f64)])?;
     for (i, v) in kept.into_iter().enumerate() {
+        vm.poll_interrupt()?;
         set_elem(vm, result, i, v)?;
     }
     Ok(Value::Object(result))
@@ -718,6 +728,7 @@ fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     };
     let search = a.arg(0);
     while k < lenf {
+        vm.poll_interrupt()?;
         let v = elem(vm, o, k as usize);
         if vm.same_value_zero(v, search) {
             return Ok(Value::Bool(true));
@@ -744,6 +755,7 @@ fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     };
     let search = a.arg(0);
     while k < lenf {
+        vm.poll_interrupt()?;
         if let Some(i) = valid_index(vm, o, k) {
             let v = ta_get_element(vm, o, i);
             if vm.strict_equals(v, search) {
@@ -776,6 +788,7 @@ fn proto_last_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     };
     let search = a.arg(0);
     while k >= 0.0 {
+        vm.poll_interrupt()?;
         if let Some(i) = valid_index(vm, o, k) {
             let v = ta_get_element(vm, o, i);
             if vm.strict_equals(v, search) {
@@ -801,6 +814,7 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let mut b = StrBuilder::new();
     for k in 0..len {
+        vm.poll_interrupt()?;
         if k > 0 {
             b.push_slice(&sep);
         }
@@ -821,6 +835,7 @@ fn proto_map(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let this_arg = a.arg(1);
     let result = typed_array_species_create(vm, o, &[Value::Number(len as f64)])?;
     for k in 0..len {
+        vm.poll_interrupt()?;
         let v = elem(vm, o, k);
         let mapped = vm.call_value(cb, this_arg, &[v, Value::Number(k as f64), Value::Object(o)])?;
         set_elem(vm, result, k, mapped)?;
@@ -849,6 +864,7 @@ fn reduce_impl(vm: &mut Vm, a: &CallArgs, method: &str, right: bool) -> JsResult
         }
     };
     for k in indices {
+        vm.poll_interrupt()?;
         let v = elem(vm, o, k);
         acc = vm.call_value(cb, Value::Undefined, &[acc, v, Value::Number(k as f64), Value::Object(o)])?;
     }
@@ -934,6 +950,7 @@ fn set_from_typed_array(vm: &mut Vm, target: ObjId, target_offset: f64, src: Obj
         }
     } else {
         for i in 0..src_len {
+            vm.poll_interrupt()?;
             let raw = super::typedarray::read_element(&src_bytes[i * s_size..(i + 1) * s_size], s_kind);
             let v = match raw {
                 Converted::Num(n) => Value::Number(n),
@@ -958,6 +975,7 @@ fn set_from_array_like(vm: &mut Vm, target: ObjId, target_offset: f64, source: V
     let target_offset = target_offset as usize;
     let mut k = 0usize;
     while (k as f64) < src_len {
+        vm.poll_interrupt()?;
         let key = vm.number_key(k as f64);
         let v = vm.get(src, key)?;
         ta_set_element(vm, target, target_offset + k, v)?;
@@ -1013,6 +1031,7 @@ fn proto_slice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let mut n = 0;
             let mut k = start as usize;
             while (k as f64) < end {
+                vm.poll_interrupt()?;
                 let v = elem(vm, o, k);
                 set_elem(vm, result, n, v)?;
                 k += 1;
@@ -1081,6 +1100,7 @@ fn proto_sort(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let items: Vec<Value> = (0..len).map(|k| ta_get_element(vm, o, k)).collect();
     let sorted = sort_elements(vm, items, comparefn)?;
     for (j, v) in sorted.into_iter().enumerate() {
+        vm.poll_interrupt()?;
         if valid_index(vm, o, j as f64).is_some() {
             let c = converted(vm, v);
             ta_store(vm, o, j, c);
@@ -1123,6 +1143,7 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let args: [Value; 0] = [];
     let mut b = StrBuilder::new();
     for k in 0..len {
+        vm.poll_interrupt()?;
         if k > 0 {
             b.push(b',' as u16);
         }
@@ -1142,6 +1163,7 @@ fn proto_to_reversed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, len) = validate_typed_array(vm, a.this, "toReversed")?;
     let result = typed_array_create_same_type(vm, o, len as f64)?;
     for k in 0..len {
+        vm.poll_interrupt()?;
         let v = elem(vm, o, len - 1 - k);
         set_elem(vm, result, k, v)?;
     }
@@ -1158,6 +1180,7 @@ fn proto_to_sorted(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let items: Vec<Value> = (0..len).map(|k| ta_get_element(vm, o, k)).collect();
     let sorted = sort_elements(vm, items, comparefn)?;
     for (j, v) in sorted.into_iter().enumerate() {
+        vm.poll_interrupt()?;
         set_elem(vm, result, j, v)?;
     }
     Ok(Value::Object(result))
@@ -1178,6 +1201,7 @@ fn proto_with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let result = typed_array_create_same_type(vm, o, len as f64)?;
     for k in 0..len {
+        vm.poll_interrupt()?;
         let v = if k as f64 == actual { value } else { elem(vm, o, k) };
         set_elem(vm, result, k, v)?;
     }

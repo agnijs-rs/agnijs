@@ -2,7 +2,7 @@
 
 This page says what an embedder can rely on when AgniJS runs code it does not trust, what it cannot rely on, and what it must do itself. Each claim names the code or the test behind it. Where the engine falls short of what a sandbox needs, the gap is stated next to the claim with the task that tracks it. Read those gaps before you rely on a limit.
 
-AgniJS is pre-release. This page describes `main` as of TASK-103.26 (November 2026).
+AgniJS is pre-release. This page describes `main` as of TASK-103.28 (November 2026).
 
 ## Threat model
 
@@ -143,22 +143,32 @@ The collection threshold is capped at the distance to the limit (`rearm_threshol
 - `the_budget_spans_callbacks_from_natives_and_promise_jobs`
 - `the_jit_does_not_change_what_a_program_costs`
 
-**What it does not cover.** A call to a native built-in costs one instruction, whatever the built-in does. `Array(1e7).join()`, a sort, or an exponential regex match costs a handful of units. Fuel bounds bytecode, not time. TASK-103.28 covers the work inside built-ins.
+**What it does not cover.** Fuel counts bytecode only. A call to a native built-in costs one instruction, whatever the built-in does, plus the instructions of any JavaScript it calls back: `Array(1e7).join()`, a sort, or an exponential regex match costs a handful of units. That keeps the count deterministic, but fuel bounds bytecode, not time. The [wall-clock interrupt](#wall-clock-interrupt), which the regex matchers and native loops poll, and the memory limit bound the work inside built-ins.
 
 ### Wall-clock interrupt
 
 **What it is.** `Host::interrupt` returns true to stop the running call with `Error::Interrupted`. In the C API this is the `interrupt` hook, or `agnijs_engine_request_interrupt` from any thread. The engine has no timer of its own. The host keeps a deadline, and the hook compares against it. An interrupt skips `finally` blocks and unwinds through host functions. The engine stays usable.
 
-**How it is enforced.** `Vm::poll_interrupt` (`vm.rs`) runs at the interpreter's function entries, loop back-edges and call returns. The JIT polls at the same points (`interp/jit.rs`), so recursion without loops is stopped as well (TASK-100.33). The host hook itself is called once every 4096 polls. Tests:
+**How it is enforced.** `Vm::poll_interrupt` (`vm.rs`) runs at the interpreter's function entries, loop back-edges and call returns. The JIT polls at the same points (`interp/jit.rs`), so recursion without loops is stopped as well (TASK-100.33). The host hook itself is called once every 4096 polls. Native code polls too (TASK-103.28):
+
+- **Regex matches.** Both matchers count their steps in slices of 65,536 and ask the host at the end of each (`Meter` in `agnijs-js-regex/src/backtrack.rs`, `Regex::exec_polled`). The step budget of `Auto` is spent exactly as before, so polling never changes which matcher finishes a search or what it matches.
+- **Native loops.** Built-ins that loop over their input call `Vm::poll_interrupt` once per iteration: the Array and TypedArray methods, `Array.from`, String `split`, `replaceAll` and `repeat`, the RegExp `match`, `replace` and `split` loops, JSON `parse` (once per 4096 values) and `stringify`, Map and Set iteration and set methods, `Object.assign`, `fromEntries`, `groupBy` and the key lists, and the iterator helpers.
+- **String search.** `indexOf`, `lastIndexOf`, `includes`, `split` and `replace` with a string pattern compare up to haystack times needle units, and ask the host once per 2^20 units compared (`SearchPoll` in `string.rs`).
+
+Tests:
 
 - `a_recursive_function_with_no_loops_is_interrupted_by_the_host` and `a_chain_of_calls_returning_without_loops_is_interrupted_by_the_host` (`tests/dispatch.rs`);
 - `an_interrupt_stops_a_runaway_job_and_the_engine_carries_on` and `an_interrupt_unwinds_through_host_functions_and_skips_finally_blocks` (`tests/host_driven.rs`);
 - `an_interrupt_stops_a_compiled_loop` (`tests/jit_differential.rs`);
-- `the_interrupt_hook_stops_an_infinite_loop` and `another_thread_can_request_an_interrupt` (C API).
+- `the_interrupt_hook_stops_an_infinite_loop` and `another_thread_can_request_an_interrupt` (C API);
+- `crates/agnijs-js-vm/tests/interrupt_native.rs`: exponential lookahead under `Auto`, nested quantifiers under `BacktrackingOnly`, backreferences, global `replace`, `split` and `match` over millions of matches, `join` over a 3,000,000-element array, Array methods over huge array-likes, TypedArray methods, quadratic string searches and JSON, each stopped within 2 s in a debug build, and match results unchanged by polling;
+- `a_poll_stops_a_runaway_search_under_every_mode` and `polling_does_not_change_what_matches` (`agnijs-js-regex`);
+- `another_thread_can_interrupt_a_runaway_regex_and_a_native_loop` (C API).
 
 **What it does not cover.**
 
-- **Long native calls.** The regex matchers and native built-ins never poll. Patterns the linear-time matcher cannot run (backreferences, lookaround), and every pattern under `RegexMatcher::BacktrackingOnly`, backtrack with no step budget. A probe ran `/(?=(a+)+b)/.test('a'.repeat(23))` for 3.9 s in a debug build with an interrupt hook that always said stop, and the hook was never called; each extra character doubles the time. `Array(3000000).join(',')` behaves the same way. Until TASK-103.28, a script that reaches one of these can hold the thread for as long as the call takes. The doc comment on `RegexMatcher::BacktrackingOnly`, which calls the interrupt "the only way out", is wrong today.
+- **Bounded native work between polls.** Some native work does not poll, because it is bounded by the size of one string or buffer: copying or filling bytes (`repeat` and `padStart` builders, `TypedArray.prototype.reverse`, `slice` and `set` between buffers), case mapping, normalization, `encodeURI`, base64 and hex, and the regex matchers' scan for a first character. Each is at most linear in a string of 2^30 units or a buffer of 4 GiB.
+- **Debugger pauses.** A pause request (`PauseRequester`) is taken at the next statement. A native call cannot pause partway through, so the pause comes after it returns; the interrupt is what stops it.
 - **Host code.** Time spent in host functions and `Host` hooks is the host's to bound.
 - **Cadence.** The interrupt is a poll, not preemption. A call returns only at the next poll that reaches the host.
 
@@ -229,7 +239,7 @@ Tests in `crates/agnijs-js-vm/tests/string_length.rs`: doubling a string past th
 
 **What it does not cover.**
 
-- **Ineligible patterns.** Patterns with backreferences or lookaround are not eligible for the linear matcher under any policy. They backtrack with no budget, and today the interrupt cannot stop them (TASK-103.28).
+- **Ineligible patterns.** Patterns with backreferences or lookaround are not eligible for the linear matcher under any policy. They backtrack with no budget. The interrupt stops them: the matcher asks the host every 65,536 steps (TASK-103.28).
 - **Untrusted patterns.** A host that accepts patterns from untrusted users should refuse such patterns before they reach the engine, or run them in a process it can kill.
 - **Builds without the linear matcher.** The `linear-regex` feature can be turned off. Bytecode written by such a build marks every pattern ineligible, so they all backtrack wherever that bytecode is loaded.
 
@@ -316,7 +326,7 @@ For code you do not trust:
 
 1. **One engine per trust domain**, and one process per domain where a crash or a side channel matters.
 2. **A memory limit** (`set_memory_limit`), set well below what the process can afford. It does not yet count ArrayBuffers or collection entries (TASK-103.25), so also cap the process with the operating system (a job object, cgroup or `RLIMIT_AS`) or run the engine in a child process you can kill.
-3. **A wall-clock deadline** through `Host::interrupt` (or `agnijs_engine_request_interrupt` from a watchdog thread). Add **fuel** (`set_fuel`) when you need a deterministic bound. Neither stops a long regex match or a native loop yet (TASK-103.28). A watchdog that can kill the process is the only hard bound today.
+3. **A wall-clock deadline** through `Host::interrupt` (or `agnijs_engine_request_interrupt` from a watchdog thread). The regex matchers and native loops poll it, so it stops a long match or a loop over a huge array too. Add **fuel** (`set_fuel`) when you need a deterministic bound; fuel does not count work inside native calls, so keep the deadline as well.
 4. **A native stack bound.** Every engine sets one by default; call in with the budget plus headroom free (768 KiB by default), and do not opt out with `set_stack_budget(None)`.
 5. **The regex policy.** Keep `Auto`, or pick `LinearWhenEligible`, and keep the default `linear-regex` feature. Screen untrusted patterns that use backreferences or lookaround.
 6. **No string compilation** unless the script needs it: `Host::can_compile_strings` returns false, or `AGNIJS_FLAG_NO_STRING_COMPILATION`.

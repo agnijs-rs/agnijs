@@ -493,9 +493,12 @@ pub extern "C" fn agnijs_set_memory_limit(engine: AgnijsEngine, bytes: usize) ->
 /// `AGNIJS_OUT_OF_FUEL` (JavaScript cannot catch it), and so does every
 /// later call until a new budget is set or the budget is cleared. The
 /// count depends only on the script and the library build, so exhaustion
-/// comes at the same instruction on every run and platform. Native
-/// built-ins cost only the instruction that calls them; the memory limit
-/// and the interrupt hook bound them. ABI 1.1.
+/// comes at the same instruction on every run and platform. Fuel counts
+/// bytecode only: a native built-in costs the instruction that calls it,
+/// however much work it does (a regex match, a join, a sort), plus the
+/// instructions of any JavaScript it calls back. The interrupt hook, which
+/// the regex matchers and native loops poll, and the memory limit bound
+/// that work. ABI 1.1.
 #[no_mangle]
 pub extern "C" fn agnijs_set_fuel(engine: AgnijsEngine, fuel: u64) -> AgnijsStatus {
     ffi("agnijs_set_fuel", || engine_op(engine, |eng| eng_res(engine, eng.set_fuel(Some(fuel)))))

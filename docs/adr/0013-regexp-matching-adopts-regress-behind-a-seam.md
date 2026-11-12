@@ -176,7 +176,7 @@ Date: 2026-11-09
 
 - **Nested quantifiers.** Patterns whose repeated body contains a quantifier with max > 1, or an alternation, run on the linear matcher from the start. There is one exception: a repeated alternation whose branches begin with disjoint characters is not counted as nested. That was the `regex-long-input` follow-up from TASK-102.
 - **Everything else eligible.** It backtracks with a budget of `max(16 × program size × (len + 1), 4096)` steps. When the budget runs out, the search continues on the linear matcher from the start position the backtracker had reached. Every earlier start has failed, so leftmost semantics hold, and the total work stays linear in the input.
-- **Ineligible patterns** (backreferences, lookaround) backtrack with no budget, as in every backtracking engine. The host interrupt (ADR 0006) remains the guard.
+- **Ineligible patterns** (backreferences, lookaround) backtrack with no budget, as in every backtracking engine. The host interrupt (ADR 0006) remains the guard. Since TASK-103.28 both matchers ask it every 65,536 steps (`Regex::exec_polled`), so it reaches a match that is running.
 
 `BacktrackingOnly` and `LinearWhenEligible` are unchanged.
 
