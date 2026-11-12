@@ -4,7 +4,7 @@ title: Close the GC memory gap to QuickJS-NG
 status: To Do
 assignee: []
 created_date: '2026-11-10T07:02:00Z'
-updated_date: '2026-11-10T23:55:00Z'
+updated_date: '2026-11-12T03:43:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -45,6 +45,8 @@ Threshold floor: micro-benchmarks (bench run, agnijs, 5 iterations) at the 8 MiB
 Growth factor (AGNIJS_GC_GROWTH, 2 MiB floor): 200 vs 150 percent: list-diff 865.5 ms 132.6 MiB vs 891.4 ms 124.5 MiB (+3% time for -6% memory); template-mount 73.4 ms 43.0 vs 71.9 ms 41.0; signal-churn 471.9 ms 15.4 vs 468.8 ms 12.5. Kept at 2x: list-diff's gap is not the factor. Its trace at the 2 MiB floor: live 20.4 MB, each in-series collection at the 40.8 MB threshold still retains about 17 MB of garbage from the jobs before the flush (bounded by half a threshold now), and the RSS is about 1.6x the counted bytes (slot-heavy objects, strings, shapes).
 
 Validation (commits 7cb93e6 and 90672e0 on main, rebased on f241b36): test262 default 42231/42231, --precompile 42231/42231, intl402 981/981, 0 regressions; GC stress slice at AGNIJS_GC_STRESS=16 (class, assignment, for-of: 5949 tests) 5949 passed, 0 failed, 0 wrong results; AGNIJS_GC_STRESS=1 unit tests of agnijs-js-vm and agnijs-js-compiler 257 passed; agnijs-capi under stress (basics, hostile, fault_injection) 44 passed; jit feature build with jit_differential, jit_inline_cache, gc_native_frames and gc tests 75 passed; VM crate without stress 231 passed. Final Gable benches (run-bench.mjs, same harness build, agnijs ms / peak MiB vs quickjs ms / peak MiB): rxjs-operators 185.4 / 8.4 vs 100.6 / 6.6; rxjs-higher-order 269.0 / 13.3 vs 184.0 / 6.7 (1.99x, was 5.2x); rxjs-subject-fanout 121.2 / 13.8 vs 79.2 / 6.6 (2.1x, was 2.9x); signal-churn 467.1 / 15.5 vs 238.2 / 9.1; signal-create 86.2 / 18.8 vs 65.7 / 7.9 (2.4x, was 3.7x); template-mount 72.8 / 42.5 vs 52.9 / 17.9 (2.4x); template-update 40.3 / 14.3 vs 28.7 / 10.1; list-diff 838.2 / 132 vs 774.6 / 42.4 (3.1x, was 3.9x); ui-bundle-startup 95.5 / 41.4 vs 73.1 / 19.6. Geomean agnijs/quickjs 1.45 (was 1.35 on the five-bench baseline subset; on the same five: 1.39 vs 1.35, each within the band: rxjs-higher-order 289.7 to 269.0 ms, template-mount 80.9 to 72.8, list-diff 857.3 to 838.2, signal-create 90.7 to 86.2, rxjs-subject-fanout 123.8 to 121.2). No Gable bench or micro-benchmark is slower by more than 5%.
+
+Independent re-measurement 2026-11-11 (main 8972adb, same i9-9900KF, 3 runs of run-bench.mjs at 5 iterations / 1 warmup, gable-harness from Gable 7cd58eb with path dependencies on this commit; full tables in docs/js-engine-performance-findings.md, section Re-measurement 2026-11-11). Peak RSS agnijs / quickjs MiB: rxjs-higher-order 13.1 / 6.5 (2.02x, within the AC 2 bound); list-diff 123.8 / 40.9 (3.03x, still outside it); template-mount 41.4 / 17.8 (2.33x); ui-bundle-startup 41.5 / 19.3 (2.15x); rxjs-subject-fanout 13.9 / 6.6 and signal-create 16.7 / 7.9 (2.11x). Gable RSS geomean 1.92x (3.98x at 3ade2ef); time geomean 1.46x (2.86x at 3ade2ef), runs 1.455 to 1.467. These match this task's final numbers within the run-to-run band, so AC 2 stands as reported: met for rxjs-higher-order, not for list-diff. Micro set: time geomean 0.92x over the 20 original workloads, micro RSS 1.64x (floor-dominated). Caveat: the first bench run after a build reports micro RSS about 15 MiB high; the figures above discard it.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

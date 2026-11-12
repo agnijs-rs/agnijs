@@ -2,11 +2,137 @@
 
 This is the investigation in TASK-100.14. It explains why the AgniJS engine is slower or heavier than the interim engine (QuickJS-NG) on the M9 benchmarks ([switch-over report](https://github.com/jcannon98188/gable/blob/main/docs/js-engine-switch-over.md)) and the micro-benchmarks (`crates/agnijs-js-bench`). It measures and explains only. Nothing in the engine changed. Each cause worth fixing has its own backlog ticket, listed in [the tickets](#the-tickets).
 
-All numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds.
+The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-11](#re-measurement-2026-11-11) has current numbers, taken after TASK-100.16 to TASK-100.35 and the baseline JIT.
+
+## Re-measurement, 2026-11-11
+
+This is a fresh head-to-head at `main` `8972adb`, using the same commands as the [method](#benchmarks). Nothing in the engine changed for it.
+
+**Headline.** On the 20 micro-benchmarks that existed at `3ade2ef`, AgniJS is now faster than QuickJS-NG: the geomean time ratio is **0.92x**, down from 2.90x (the 2.87x quoted below is the checked-in baseline's figure; the per-workload ratios below give 2.90x). The Gable benchmarks are still slower but the gap has halved: **1.46x**, down from 2.86x. Peak RSS on the Gable set is **1.92x** QuickJS-NG's (geomean), down from 3.98x. With the baseline JIT on (`--features jit`, `AGNIJS_JIT=on`), the micro geomean is **0.81x**.
+
+### Setup
+
+- **Machine:** the same one as `3ade2ef`. Intel Core i9-9900KF at 3.60 GHz, 16 logical CPUs, 64 GiB, Windows 11 Pro 10.0.26200. It is a desktop with other applications running, not an isolated host. rustc 1.99.0 and Node v24.21.0.
+- **Build:** release profile (`debug = 1`, no LTO). The bench crate turns on `linear-regex` and `intl` for `agnijs-js-vm`. The JIT build adds `--features jit` and uses a separate target directory.
+- **Micro-benchmarks:** `bench run --engine agnijs --engine quickjs --iterations 5 --warmup 1`, run three times back to back. The JIT build was run twice.
+- **Gable benchmarks:** `run-bench.mjs --engine agnijs --engine quickjs --iterations 5 --warmup 1`, run three times. The harness came from Gable `7cd58eb`, copied out of the tree, with its pinned git dependency replaced by path dependencies on this commit's crates. The bench sources (`bench/*.bench.ts` and `packages/ui`) have not changed since `3ade2ef`. The harness change since then is only the rename from `gable` to `agnijs`.
+- **How the figures are taken:** ms is the median of each run's per-pair median. The ratio is the median of the per-run ratios, and the range is the lowest and highest per-run ratio. Peak RSS is the lowest of the runs; see the RSS caveat below.
+
+### Micro-benchmarks (interpreter)
+
+| workload | agnijs ms | quickjs ms | ratio | ratio range | agnijs peak RSS MiB | quickjs peak RSS MiB | ratio at 3ade2ef | speed-up vs QuickJS since |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| loop-arith | 103.4 | 131.0 | 0.79 | 0.78 to 0.80 | 6.4 | 5.4 | 3.92 | 5.0x |
+| loop-array-index | 95.0 | 85.4 | 1.11 | 1.09 to 1.17 | 6.5 | 5.5 | 6.73 | 6.1x |
+| prop-monomorphic | 80.4 | 72.4 | 1.10 | 1.08 to 1.11 | 6.9 | 5.6 | 6.42 | 5.8x |
+| prop-polymorphic | 125.8 | 88.5 | 1.42 | 1.39 to 1.45 | 6.9 | 5.7 | 6.93 | 4.9x |
+| prop-write-alloc | 78.2 | 160.9 | 0.48 | 0.47 to 0.49 | 9.7 | 5.5 | 2.13 | 4.4x |
+| string-concat | 62.9 | 82.0 | 0.75 | 0.74 to 0.77 | 9.8 | 7.4 | 1.74 | 2.3x |
+| string-methods | 32.7 | 35.5 | 0.91 | 0.90 to 0.92 | 9.6 | 5.6 | 1.71 | 1.9x |
+| array-methods | 317.9 | 148.5 | 2.16 | 2.12 to 2.18 | 9.0 | 5.6 | 4.12 | 1.9x |
+| map-set | 122.7 | 1030.9 | 0.12 | 0.12 to 0.12 | 14.9 | 6.0 | 0.22 | 1.8x |
+| closures | 61.8 | 72.6 | 0.85 | 0.85 to 0.85 | 10.2 | 5.5 | 2.98 | 3.5x |
+| calls-recursive | 54.8 | 33.7 | 1.63 | 1.60 to 1.70 | 6.4 | 5.6 | 5.21 | 3.2x |
+| method-calls | 117.7 | 74.9 | 1.57 | 1.57 to 1.64 | 6.6 | 5.5 | 4.87 | 3.1x |
+| regex | 101.1 | 135.7 | 0.75 | 0.72 to 0.77 | 10.3 | 5.6 | 2.56 | 3.4x |
+| regex-tokenize | 29.7 | 21.5 | 1.37 | 1.37 to 1.39 | 10.3 | 5.6 | - | new |
+| regex-long-input | 1.74 | 3.06 | 0.57 | 0.56 to 0.58 | 8.3 | 6.3 | - | new |
+| regex-redos | 0.01 | 96.2 | 0.0001 | - | 6.6 | 5.5 | - | new |
+| json-stringify | 48.1 | 141.4 | 0.34 | 0.34 to 0.35 | 10.2 | 6.4 | 1.22 | 3.6x |
+| json-parse | 44.7 | 84.7 | 0.53 | 0.52 to 0.53 | 15.0 | 7.9 | 1.53 | 2.9x |
+| promise-chain | 15.7 | 22.4 | 0.70 | 0.69 to 0.74 | 59.9 | 22.4 | 2.80 | 4.0x |
+| async-await | 15.0 | 27.2 | 0.55 | 0.55 to 0.56 | 8.9 | 5.6 | 3.24 | 5.9x |
+| compile-source | 13.2 | 8.82 | 1.50 | 1.49 to 1.50 | 25.9 | 8.6 | 2.30 | 1.5x |
+| bytecode-load | 2.14 | 0.90 | 2.38 | 2.37 to 2.52 | 21.5 | 7.9 | 5.28 | 2.2x |
+| engine-startup | 0.61 | 0.16 | 3.80 | 3.45 to 3.88 | 6.6 | 5.5 | 6.65 | 1.7x |
+| bundle-cold | 2.64 | 1.00 | 2.65 | 2.64 to 2.83 | 14.1 | 7.9 | - | new |
+| snapshot-startup | 0.59 | - | - | - | 6.7 | - | - | new, AgniJS only |
+| bundle-snapshot | 2.09 | - | - | - | 13.4 | - | - | new, AgniJS only |
+
+The last column is the old ratio divided by the new one. It measures relative progress, because QuickJS-NG's own times are mostly within a few percent of `3ade2ef` on this machine.
+
+**Geomeans:**
+
+- Time, the 20 workloads present at `3ade2ef`: **0.918x** (per run 0.917, 0.923, 0.919). At `3ade2ef` it was 2.90x.
+- Time, all 24 paired workloads: 0.661x. This figure is dominated by regex-redos, a catastrophic-backtracking pattern that the linear-time matcher finishes in microseconds while QuickJS-NG takes 96 ms. Without regex-redos (23 workloads) it is 0.958x.
+- Peak RSS, the 20 old workloads: **1.64x** QuickJS-NG's. The same workloads at `00e3b62` (the checked-in baseline in `crates/agnijs-js-bench/baselines`, measured with a clean floor) were 3.18x.
+
+**Still worst:** engine-startup 3.80x, bundle-cold 2.65x, bytecode-load 2.38x, array-methods 2.16x, calls-recursive 1.63x, method-calls 1.57x, compile-source 1.50x and prop-polymorphic 1.42x. Startup, bytecode load and compile are fixed per-realm and front-end costs, and they moved least (1.5x to 2.2x). array-methods is the slowest steady-state workload, as before.
+
+**Best:** regex-redos (by construction), map-set 0.12x, json-stringify 0.34x, prop-write-alloc 0.48x, json-parse 0.53x and async-await 0.55x.
+
+**Moved most since `3ade2ef`:** loop-array-index 6.1x, async-await 5.9x, prop-monomorphic 5.8x, loop-arith 5.0x, prop-polymorphic 4.9x, prop-write-alloc 4.4x and promise-chain 4.0x. These are the dispatch, inline-cache, call and promise causes (findings 2 to 5 and 9b). Moved least: compile-source 1.5x, engine-startup 1.7x, map-set 1.8x, array-methods 1.9x and string-methods 1.9x.
+
+### Micro-benchmarks with the baseline JIT
+
+`--features jit`, `AGNIJS_JIT=on`, two runs. This is a different binary from the interpreter rows above, so the two tables are not one run with a switch flipped. The JIT is off by default and the Gable benchmarks were not run with it.
+
+| workload | agnijs JIT ms | quickjs ms | ratio | interpreter ratio | agnijs JIT peak RSS MiB |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| loop-arith | 33.5 | 133.3 | 0.25 | 0.79 | 9.1 |
+| loop-array-index | 52.0 | 87.7 | 0.59 | 1.11 | 10.9 |
+| prop-monomorphic | 47.9 | 74.3 | 0.64 | 1.10 | 12.6 |
+| prop-polymorphic | 68.2 | 89.9 | 0.76 | 1.42 | 12.7 |
+| prop-write-alloc | 74.6 | 164.7 | 0.45 | 0.48 | 8.8 |
+| string-concat | 65.6 | 84.2 | 0.78 | 0.75 | 10.0 |
+| string-methods | 32.7 | 36.2 | 0.90 | 0.91 | 9.7 |
+| array-methods | 326.0 | 152.0 | 2.15 | 2.16 | 9.0 |
+| map-set | 122.3 | 1037.9 | 0.12 | 0.12 | 15.0 |
+| closures | 60.8 | 72.8 | 0.84 | 0.85 | 10.2 |
+| calls-recursive | 55.9 | 33.7 | 1.66 | 1.63 | 6.5 |
+| method-calls | 115.6 | 74.8 | 1.55 | 1.57 | 6.6 |
+| regex | 109.4 | 138.2 | 0.79 | 0.75 | 10.2 |
+| regex-tokenize | 31.0 | 22.1 | 1.40 | 1.37 | 17.4 |
+| regex-long-input | 1.65 | 3.50 | 0.47 | 0.57 | 8.2 |
+| regex-redos | 0.01 | 99.5 | 0.0001 | 0.0001 | 6.7 |
+| json-stringify | 50.8 | 142.9 | 0.36 | 0.34 | 10.3 |
+| json-parse | 49.5 | 85.9 | 0.58 | 0.53 | 15.1 |
+| promise-chain | 15.8 | 22.8 | 0.69 | 0.70 | 60.1 |
+| async-await | 15.1 | 27.0 | 0.56 | 0.55 | 8.9 |
+| compile-source | 13.8 | 9.02 | 1.53 | 1.50 | 26.0 |
+| bytecode-load | 2.38 | 0.88 | 2.70 | 2.38 | 21.8 |
+| engine-startup | 0.66 | 0.16 | 4.10 | 3.80 | 6.7 |
+| bundle-cold | 2.85 | 1.00 | 2.86 | 2.65 | 14.3 |
+
+Geomean time over the 20 old workloads: **0.806x** (per run 0.802, 0.809). Over the 23 paired workloads without regex-redos it is 0.852x. Peak RSS is 1.82x QuickJS-NG's, against 1.64x for the interpreter.
+
+The JIT pays off only on the loop and property workloads: loop-arith is 3.1x faster than the interpreter, and loop-array-index, prop-monomorphic and prop-polymorphic are 1.7x to 1.9x faster. The call-heavy workloads (calls-recursive, method-calls) are unchanged, which suggests those paths do not reach compiled code. Startup, bytecode load and bundle-cold are 8 to 11% slower. The JIT build adds 3 to 6 MiB of peak RSS on the loop and property workloads.
+
+### Gable benchmarks
+
+| benchmark | agnijs ms | quickjs ms | ratio | ratio range | agnijs peak RSS MiB | quickjs peak RSS MiB | RSS ratio | ratio at 3ade2ef | RSS ratio at 3ade2ef | speed-up vs QuickJS since |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rxjs-operators | 179.8 | 101.1 | 1.77 | 1.70 to 1.79 | 8.8 | 6.6 | 1.33 | 4.06 | 1.42 | 2.3x |
+| rxjs-higher-order | 274.3 | 187.2 | 1.47 | 1.46 to 1.47 | 13.1 | 6.5 | 2.02 | 2.98 | 18.6 | 2.0x |
+| rxjs-subject-fanout | 127.5 | 81.5 | 1.57 | 1.56 to 1.59 | 13.9 | 6.6 | 2.11 | 3.91 | 5.79 | 2.5x |
+| signal-churn | 484.3 | 241.8 | 2.00 | 2.00 to 2.01 | 12.5 | 9.1 | 1.37 | 4.16 | 2.88 | 2.1x |
+| signal-create | 90.8 | 66.5 | 1.36 | 1.35 to 1.40 | 16.7 | 7.9 | 2.11 | 2.92 | 5.78 | 2.1x |
+| template-mount | 75.2 | 54.6 | 1.38 | 1.37 to 1.40 | 41.4 | 17.8 | 2.33 | 2.38 | 2.91 | 1.7x |
+| template-update | 40.5 | 29.0 | 1.40 | 1.39 to 1.40 | 14.4 | 10.0 | 1.44 | 2.64 | 2.56 | 1.9x |
+| list-diff | 872.5 | 811.9 | 1.07 | 1.07 to 1.09 | 123.8 | 40.9 | 3.03 | 1.69 | 5.80 | 1.6x |
+| ui-bundle-startup | 101.0 | 76.1 | 1.34 | 1.29 to 1.34 | 41.5 | 19.3 | 2.15 | 2.07 | 2.26 | 1.6x |
+
+**Geomeans:** time **1.462x** (per run 1.463, 1.455, 1.467), down from 2.86x. Peak RSS **1.92x**, down from 3.98x.
+
+**Still worst (time):** signal-churn 2.00x, rxjs-operators 1.77x, rxjs-subject-fanout 1.57x, rxjs-higher-order 1.47x and template-update 1.40x. These are the call-dense, `Function.prototype.call`-heavy bundles, so calls and native-to-JS re-entry (finding 4) are still the likely gap. **Best:** list-diff 1.07x, ui-bundle-startup 1.34x, signal-create 1.36x and template-mount 1.38x.
+
+**Still worst (memory):** list-diff 3.03x (124 against 41 MiB) is the only benchmark above TASK-100.35's 2.5x bound. Next are template-mount 2.33x, ui-bundle-startup 2.15x, rxjs-subject-fanout and signal-create 2.11x, and rxjs-higher-order 2.02x.
+
+**Moved most since `3ade2ef`:** for time, rxjs-subject-fanout 2.5x, rxjs-operators 2.3x, signal-churn and signal-create 2.1x, and rxjs-higher-order 2.0x. For memory, rxjs-higher-order went from 124 to 13 MiB, list-diff from 238 to 124 MiB and signal-create from 46 to 17 MiB. Moved least: list-diff and ui-bundle-startup at 1.6x. ui-bundle-startup is dominated by the parser and compiler, which matches compile-source moving least in the micro set.
+
+### Variance and what is uncertain
+
+- **Run-to-run:** the geomeans moved by under 1% between runs: 0.917 to 0.923 micro, 1.455 to 1.467 Gable. Per-workload ratios mostly stayed within 3%. The exceptions are engine-startup (11%, a sub-millisecond pair), regex, bundle-cold, promise-chain and loop-array-index (7%), calls-recursive and bytecode-load (6%), and rxjs-operators (5%). The JIT runs moved by up to 15% on bytecode-load and under 7% elsewhere. Treat any single-workload change under about 5% as noise.
+- **The micro RSS columns at `3ade2ef` are inflated.** The first `bench run` after a build reports every pair about 15 MiB higher, as the baselines README already notes: the floor was 20 MiB in this session's first run and 5.5 MiB in the next two. The historical micro table below shows QuickJS-NG at 20 MiB on every workload, so it was a first run, and its RSS is not comparable with the figures above. That is why the micro memory comparison uses the clean `00e3b62` baseline. The Gable harness did not show the effect: its RSS stayed within 1 MiB across runs.
+- **Micro RSS is mostly floor.** About 5.5 MiB of every figure is the harness and both engines' static data. A 1.6x ratio on 9 against 5.6 MiB says little about heap efficiency. The Gable figures carry more weight.
+- **One machine, not isolated.** No CPU pinning and no frequency locking, with other applications running. No other heavy job ran during the measurements, but background load cannot be ruled out. QuickJS-NG's times mostly match `3ade2ef` within about 3%, which suggests the machine state is comparable. The exceptions are list-diff (+3.4%) and ui-bundle-startup (+8%), so those two ratios may read slightly better than the engine alone would justify.
+- **The workload set grew.** The new regex, snapshot and bundle workloads are excluded from the like-for-like geomeans. regex-redos makes any geomean that includes it meaningless.
+- **The JIT figures are from two runs of a separate build**, with default thresholds. They are not tuned and not representative of Gable workloads, which were not run under the JIT.
+- **The Gable harness ran against a patched copy**, with path dependencies on this commit instead of its pinned revision `fa65c08`. The Cargo.lock entries for third-party crates may differ slightly from Gable's.
 
 ## Summary
 
-The causes, ranked by measured impact:
+As measured at `3ade2ef`. Most of these causes have since been worked on; see the re-measurement above for where each workload stands now. The causes, ranked by measured impact:
 
 1. **The collector never runs while JavaScript runs under the embedding.** Module bodies, host calls, promise jobs and every callback from a native function run inside a native frame. The collector is deferred there, so a long synchronous call keeps all of its garbage. This is the whole peak-memory gap: rxjs-higher-order peaks at 124 MiB against 6.7 MiB, list-diff at 238 MiB against 41 MiB, and a two-line reproduction at 901 MiB against 5.4 MiB.
 2. **Interpreter dispatch costs more than the work.** `step` is an out-of-line call per instruction with a 1.2 KiB stack frame. `pc` and the accumulator live in the frame vector behind bounds checks, and the run loop tests four flags before every instruction. Together this is 35 to 55% of all samples on the Gable benchmarks and about half of loop-arith.
@@ -24,8 +150,8 @@ Causes 2 to 5 are one interpreter-performance problem seen from four sides. The 
 
 ### Benchmarks
 
-- **Micro-benchmarks:** `target/release/bench.exe run --engine agnijs --engine quickjs --iterations 5 --warmup 1 --output micro.json`. The geomean is 2.87x, the same as the checked-in baseline.
-- **Gable benchmarks** (run from the Gable repository, which keeps the harness): `node native/engine-harness/js/run-bench.mjs --engine agnijs --engine quickjs --iterations 5 --warmup 1`. The geomean is 2.86x, the same as M9's 2.89x.
+- **Micro-benchmarks:** `target/release/bench.exe run --engine agnijs --engine quickjs --iterations 5 --warmup 1 --output micro.json`. At `3ade2ef` the geomean was 2.87x, the same as the checked-in baseline.
+- **Gable benchmarks** (run from the Gable repository, which keeps the harness): `node native/engine-harness/js/run-bench.mjs --engine agnijs --engine quickjs --iterations 5 --warmup 1`. At `3ade2ef` the geomean was 2.86x, the same as M9's 2.89x.
 
 ### Sampling profiler
 
@@ -63,6 +189,8 @@ The minimal reproductions below are ES modules run with `gable-harness run --eng
 
 ### Micro-benchmarks
 
+At `3ade2ef`. The "gable" columns are the AgniJS engine under its old name. The RSS columns come from a first run after a build and are about 15 MiB high (see the re-measurement caveats).
+
 | workload | gable ms | quickjs ms | ratio | gable peak RSS MiB | quickjs peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | loop-arith | 527.5 | 134.6 | 3.92 | 6.8 | 20.2 |
@@ -86,9 +214,11 @@ The minimal reproductions below are ES modules run with `gable-harness run --eng
 | bytecode-load | 4.48 | 0.85 | 5.28 | 41.4 | 22.5 |
 | engine-startup | 1.06 | 0.16 | 6.65 | 22.0 | 20.4 |
 
-map-set is the only workload where the AgniJS engine is faster, by 4.5x. It is not investigated further.
+At `3ade2ef`, map-set was the only workload where the AgniJS engine was faster, by 4.5x. It is not investigated further. In the 2026-11-11 re-measurement, 13 of the 24 paired workloads are faster.
 
 ### Gable benchmarks
+
+At `3ade2ef`.
 
 | benchmark | gable ms | quickjs ms | ratio | gable peak RSS MiB | quickjs peak RSS MiB |
 | --- | ---: | ---: | ---: | ---: | ---: |
