@@ -73,6 +73,11 @@ pub fn allocate_buffer(
         if m > MAX_BUFFER_BYTES {
             return vm.range_error("Array buffer allocation failed");
         }
+        // AllocateArrayBuffer: a resizable buffer never starts past its
+        // maximum (TASK-103.45, where transfer missed it).
+        if len > m {
+            return vm.range_error("byteLength exceeds maxByteLength");
+        }
     }
     let bytes = zeroed(vm, len)?;
     let data = BufferData {
@@ -380,12 +385,17 @@ fn slice_impl(vm: &mut Vm, a: &CallArgs, shared: bool) -> JsResult<Value> {
     if !shared && is_detached(vm, o) {
         return vm.type_error("ArrayBuffer is detached");
     }
+    // The conversions and the species constructor can shrink a resizable
+    // buffer: copy only while `first` is below its current length
+    // (TASK-103.42). The rest of the new buffer stays zero.
     let cur_len = buffer_byte_length(vm, o);
     let first = first as usize;
-    let count = (new_len as usize).min(cur_len.saturating_sub(first));
-    let src: Vec<u8> = buffer_data(vm, o).unwrap().bytes[first..first + count].to_vec();
-    if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(n).class {
-        b.bytes[..count].copy_from_slice(&src);
+    if first < cur_len {
+        let count = (new_len as usize).min(cur_len - first);
+        let src: Vec<u8> = buffer_data(vm, o).unwrap().bytes[first..first + count].to_vec();
+        if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(n).class {
+            b.bytes[..count].copy_from_slice(&src);
+        }
     }
     Ok(new)
 }

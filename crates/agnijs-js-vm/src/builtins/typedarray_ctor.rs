@@ -564,8 +564,13 @@ fn proto_copy_within(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let fin = relative_index(vm, a.arg(2), lenf, lenf)?;
     let count = (fin - from).min(lenf - to);
     if count > 0.0 {
+        // The conversions above can shrink a resizable buffer: read the
+        // length again and copy only the bytes below the new limit
+        // (TASK-103.41). An index at or past the limit copies nothing.
         let Some(len) = ta_length(vm, o) else {
-            return vm.type_error("%TypedArray%.prototype.copyWithin: typed array is detached or out of bounds");
+            return vm.type_error(
+                "%TypedArray%.prototype.copyWithin: typed array is detached or out of bounds",
+            );
         };
         let (buffer, kind, offset) = {
             let t = ta_data(vm, o).unwrap();
@@ -575,10 +580,12 @@ fn proto_copy_within(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let limit = len * size + offset;
         let to_b = to as usize * size + offset;
         let from_b = from as usize * size + offset;
-        let mut count_b = count as usize * size;
-        if from_b + count_b > limit || to_b + count_b > limit {
-            count_b = limit.saturating_sub(from_b).min(limit.saturating_sub(to_b));
+        if from_b >= limit || to_b >= limit {
+            return Ok(Value::Object(o));
         }
+        let count_b = (count as usize * size)
+            .min(limit - from_b)
+            .min(limit - to_b);
         if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(buffer).class {
             b.bytes.copy_within(from_b..from_b + count_b, to_b);
         }

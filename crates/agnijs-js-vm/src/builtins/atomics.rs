@@ -6,7 +6,7 @@
 
 use agnijs_engine_api::RealmId;
 
-use super::arraybuffer::{is_detached, is_shared};
+use super::arraybuffer::{buffer_byte_length, is_detached, is_shared};
 use super::typedarray::{read_element, ta_length, write_element, Converted, ElementKind};
 use super::typedarray_ctor::{ta_data, ta_kind};
 use crate::object::{CallArgs, Class};
@@ -80,9 +80,15 @@ fn convert_operand(vm: &mut Vm, kind: ElementKind, v: Value) -> JsResult<Convert
     }
 }
 
-fn revalidate(vm: &mut Vm, o: ObjId) -> JsResult<()> {
+/// RevalidateAtomicAccess: the conversions after ValidateAtomicAccess can
+/// shrink a resizable buffer, so the element at byte `at` must still be
+/// inside it (TASK-103.43).
+fn revalidate(vm: &mut Vm, o: ObjId, at: usize, kind: ElementKind) -> JsResult<()> {
     if ta_length(vm, o).is_none() {
         return vm.type_error("Typed array is detached or out of bounds");
+    }
+    if at + kind.size() > buffer_byte_length(vm, buffer_of(vm, o)) {
+        return vm.range_error("Atomics index out of range");
     }
     Ok(())
 }
@@ -91,19 +97,34 @@ fn buffer_of(vm: &Vm, o: ObjId) -> ObjId {
     ta_data(vm, o).unwrap().buffer
 }
 
-fn raw_read(vm: &Vm, o: ObjId, at: usize, kind: ElementKind) -> Converted {
+/// The element at byte `at`, or a RangeError if the buffer no longer
+/// holds it: every caller revalidates first, so that is a missed check,
+/// and an error rather than a panic.
+fn raw_read(vm: &mut Vm, o: ObjId, at: usize, kind: ElementKind) -> JsResult<Converted> {
     let buffer = buffer_of(vm, o);
-    let Class::ArrayBuffer(b) = &vm.heap.obj(buffer).class else {
-        unreachable!()
+    let read = match &vm.heap.obj(buffer).class {
+        Class::ArrayBuffer(b) => b
+            .bytes
+            .get(at..at + kind.size())
+            .map(|e| read_element(e, kind)),
+        _ => None,
     };
-    read_element(&b.bytes[at..at + kind.size()], kind)
+    match read {
+        Some(c) => Ok(c),
+        None => vm.range_error("Atomics index out of range"),
+    }
 }
 
-fn raw_write(vm: &mut Vm, o: ObjId, at: usize, kind: ElementKind, c: Converted) {
+/// Store at byte `at`, with the same check as [`raw_read`].
+fn raw_write(vm: &mut Vm, o: ObjId, at: usize, kind: ElementKind, c: Converted) -> JsResult<()> {
     let buffer = buffer_of(vm, o);
     if let Class::ArrayBuffer(b) = &mut vm.heap.obj_mut(buffer).class {
-        write_element(&mut b.bytes[at..at + kind.size()], kind, c);
+        if let Some(e) = b.bytes.get_mut(at..at + kind.size()) {
+            write_element(e, kind, c);
+            return Ok(());
+        }
     }
+    vm.range_error("Atomics index out of range")
 }
 
 fn to_value(vm: &mut Vm, c: Converted) -> Value {
@@ -136,10 +157,10 @@ fn rmw(vm: &mut Vm, a: &CallArgs, op: fn(i128, i128) -> i128) -> JsResult<Value>
     let (o, kind, len) = validate_integer_typed_array(vm, a.arg(0), false)?;
     let at = validate_atomic_access(vm, o, len, a.arg(1))?;
     let operand = convert_operand(vm, kind, a.arg(2))?;
-    revalidate(vm, o)?;
-    let old = raw_read(vm, o, at, kind);
+    revalidate(vm, o, at, kind)?;
+    let old = raw_read(vm, o, at, kind)?;
     let new_bits = op(as_bits(kind, old), as_bits(kind, operand));
-    raw_write(vm, o, at, kind, from_bits(kind, new_bits));
+    raw_write(vm, o, at, kind, from_bits(kind, new_bits))?;
     Ok(to_value(vm, old))
 }
 
@@ -172,10 +193,10 @@ fn atomics_compare_exchange(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let at = validate_atomic_access(vm, o, len, a.arg(1))?;
     let expected = convert_operand(vm, kind, a.arg(2))?;
     let replacement = convert_operand(vm, kind, a.arg(3))?;
-    revalidate(vm, o)?;
-    let old = raw_read(vm, o, at, kind);
+    revalidate(vm, o, at, kind)?;
+    let old = raw_read(vm, o, at, kind)?;
     if as_bits(kind, old) == as_bits(kind, expected) {
-        raw_write(vm, o, at, kind, replacement);
+        raw_write(vm, o, at, kind, replacement)?;
     }
     Ok(to_value(vm, old))
 }
@@ -183,8 +204,8 @@ fn atomics_compare_exchange(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn atomics_load(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, kind, len) = validate_integer_typed_array(vm, a.arg(0), false)?;
     let at = validate_atomic_access(vm, o, len, a.arg(1))?;
-    revalidate(vm, o)?;
-    let v = raw_read(vm, o, at, kind);
+    revalidate(vm, o, at, kind)?;
+    let v = raw_read(vm, o, at, kind)?;
     Ok(to_value(vm, v))
 }
 
@@ -192,8 +213,8 @@ fn atomics_store(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (o, kind, len) = validate_integer_typed_array(vm, a.arg(0), false)?;
     let at = validate_atomic_access(vm, o, len, a.arg(1))?;
     let v = convert_operand(vm, kind, a.arg(2))?;
-    revalidate(vm, o)?;
-    raw_write(vm, o, at, kind, v);
+    revalidate(vm, o, at, kind)?;
+    raw_write(vm, o, at, kind, v)?;
     Ok(match v {
         // ToIntegerOrInfinity already normalised -0 to +0.
         Converted::Num(n) => Value::Number(if n == 0.0 { 0.0 } else { n }),
@@ -245,7 +266,7 @@ fn do_wait(vm: &mut Vm, a: &CallArgs) -> JsResult<&'static str> {
     if is_detached(vm, buffer) {
         return vm.type_error("Typed array is detached");
     }
-    let current = raw_read(vm, o, at, kind);
+    let current = raw_read(vm, o, at, kind)?;
     if as_bits(kind, current) != as_bits(kind, expected) {
         return Ok("not-equal");
     }
