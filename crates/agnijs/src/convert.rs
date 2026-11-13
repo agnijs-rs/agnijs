@@ -5,6 +5,9 @@
 //! `None` becomes `null`, and integers outside +-2^53 lose precision.
 //! `undefined` reads back as `null`; non-finite numbers read back as `null`;
 //! functions, symbols, BigInts and cyclic structures are conversion errors.
+//! So is a value of more than [`MAX_CONVERTED_VALUES`] array elements and
+//! object members in all: an array's `length` is the script's choice, and a
+//! sparse array of length 2^32-1 costs the engine nothing (TASK-103.39).
 
 use crate::error::{Error, Result};
 use agnijs_engine_api::{Engine, Handle, PropertyKey, RealmId, TypeOf, Value};
@@ -12,6 +15,14 @@ use serde::{de::DeserializeOwned, Serialize};
 use serde_json::{Map, Number, Value as Json};
 
 const MAX_DEPTH: usize = 128;
+
+/// The most values one conversion from JavaScript to Rust data reads:
+/// array elements and object members, counted over the whole tree. A
+/// longer value is an [`Error::Convert`] (a TypeError for a host
+/// function's argument), refused before anything is allocated for it.
+/// The cap also bounds the native loop, which the engine's interrupt
+/// does not see.
+pub const MAX_CONVERTED_VALUES: usize = 1 << 22;
 
 /// Convert a Rust value to a JavaScript value in `realm`.
 pub fn to_value<T: Serialize + ?Sized>(
@@ -58,7 +69,21 @@ pub(crate) fn json_to_js(engine: &mut dyn Engine, realm: RealmId, json: &Json) -
 }
 
 pub(crate) fn js_to_json(engine: &mut dyn Engine, realm: RealmId, value: &Value) -> Result<Json> {
-    walk(engine, realm, value, &mut Vec::new())
+    let mut budget = MAX_CONVERTED_VALUES;
+    walk(engine, realm, value, &mut Vec::new(), &mut budget)
+}
+
+/// Take `n` values from what the conversion may still read.
+fn spend(budget: &mut usize, n: usize) -> Result<()> {
+    match budget.checked_sub(n) {
+        Some(left) => {
+            *budget = left;
+            Ok(())
+        }
+        None => Err(Error::Convert(format!(
+            "more than {MAX_CONVERTED_VALUES} array elements and object members"
+        ))),
+    }
 }
 
 fn walk(
@@ -66,6 +91,7 @@ fn walk(
     realm: RealmId,
     value: &Value,
     path: &mut Vec<Handle>,
+    budget: &mut usize,
 ) -> Result<Json> {
     Ok(match value {
         Value::Undefined | Value::Null => Json::Null,
@@ -85,20 +111,26 @@ fn walk(
             let out = if engine.is_array(value) {
                 let len = engine.get(realm, value, &"length".into())?;
                 let len = len.as_number().unwrap_or(0.0) as u32;
+                spend(budget, len as usize)?;
                 let mut items = Vec::with_capacity(len as usize);
                 for i in 0..len {
                     let v = engine.get(realm, value, &PropertyKey::from(i))?;
-                    items.push(walk(engine, realm, &v, path)?);
+                    items.push(walk(engine, realm, &v, path, budget)?);
                 }
                 Json::Array(items)
             } else {
                 let mut map = Map::new();
-                for key in engine.own_keys(realm, value)? {
+                let keys = engine.own_keys(realm, value)?;
+                spend(budget, keys.len())?;
+                for key in keys {
                     let PropertyKey::String(name) = &key else {
                         continue;
                     };
                     let v = engine.get(realm, value, &key)?;
-                    map.insert(name.to_string_lossy(), walk(engine, realm, &v, path)?);
+                    map.insert(
+                        name.to_string_lossy(),
+                        walk(engine, realm, &v, path, budget)?,
+                    );
                 }
                 Json::Object(map)
             };

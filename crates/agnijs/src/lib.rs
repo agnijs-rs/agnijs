@@ -36,7 +36,7 @@ pub use agnijs_derive::{host_methods, HostClass};
 pub use agnijs_engine_api as api;
 pub use agnijs_engine_api::{Host, HostObject, Value};
 pub use class::{ClassBuilder, HostClass, HostClassMethods};
-pub use convert::{from_value, to_value};
+pub use convert::{from_value, to_value, MAX_CONVERTED_VALUES};
 pub use error::{Error, JsError, JsException, Result};
 /// The JSON value type constructors and methods exchange arguments in.
 pub use serde_json::Value as Json;

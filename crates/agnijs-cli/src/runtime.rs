@@ -156,7 +156,9 @@ impl Runtime {
                 let list = cx.arg(3);
                 let len_v = engine.get(cx.realm, &list, &PropertyKey::from("length"))?;
                 let len = engine.to_number(cx.realm, &len_v)? as u32;
-                let mut args = Vec::with_capacity(len as usize);
+                // The prelude passes a dense rest array, but its `length`
+                // does not size the reservation (TASK-103.39's bug class).
+                let mut args = Vec::with_capacity((len as usize).min(64));
                 for i in 0..len {
                     args.push(engine.get(
                         cx.realm,
