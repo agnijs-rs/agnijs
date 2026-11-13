@@ -107,6 +107,8 @@ jobs:
         env:
           AGNIJS_JIT: force
         run: cargo test --locked -p agnijs-js-vm --features jit
+      - name: Crafted bytecode with every case compiled (release, TASK-103.30)
+        run: cargo test --release --locked -p agnijs-js-vm --features jit --test bytecode_fuzz
       - name: Benchmark workloads agree across JIT modes
         run: cargo test --locked -p agnijs-js-bench --features jit --test jit_workloads
       - name: Cache test262 at the pinned commit

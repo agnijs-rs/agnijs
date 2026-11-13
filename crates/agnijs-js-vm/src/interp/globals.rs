@@ -567,6 +567,23 @@ impl Vm {
     // Registers are never observable from JavaScript, and the environment
     // stays reachable through the frame while the right-hand side runs.
 
+    /// The declarative environment a `Number` reference names. A reference
+    /// is only ever taken from the frame's own chain and used while that
+    /// chain stands, so anything else is a register that crafted bytecode
+    /// filled (TASK-103.30): an arena index of some other, perhaps freed,
+    /// environment is refused rather than followed.
+    fn reference_env(&self, fi: usize, e: f64) -> Option<EnvId> {
+        let mut at = self.frames[fi].env;
+        while let Some(id) = at {
+            let env = self.heap.env(id);
+            if id.0 as f64 == e {
+                return env.as_decl().map(|_| id);
+            }
+            at = env.parent();
+        }
+        None
+    }
+
     pub(crate) fn resolve_dynamic_ref(
         &mut self,
         fi: usize,
@@ -603,12 +620,18 @@ impl Vm {
                 self.get_prop(obj, key, Value::Object(obj))
             }
             Value::Number(e) => {
-                let env = EnvId(e as u32);
+                let Some(env) = self.reference_env(fi, e) else {
+                    return Err(self.invalid_bytecode(
+                        code,
+                        fi,
+                        "a reference register holds another value",
+                    ));
+                };
                 let d = self
                     .heap
                     .env(env)
                     .as_decl()
-                    .expect("reference to a non-declarative environment");
+                    .expect("checked by reference_env");
                 let v = match d.slot_of(&n) {
                     Some((slot, _)) => d.slots[slot],
                     None => match d.extra_get(&n) {
@@ -666,12 +689,18 @@ impl Vm {
                 Ok(())
             }
             Value::Number(e) => {
-                let env = EnvId(e as u32);
+                let Some(env) = self.reference_env(fi, e) else {
+                    return Err(self.invalid_bytecode(
+                        code,
+                        fi,
+                        "a reference register holds another value",
+                    ));
+                };
                 let d = self
                     .heap
                     .env(env)
                     .as_decl()
-                    .expect("reference to a non-declarative environment");
+                    .expect("checked by reference_env");
                 if let Some((slot, kind)) = d.slot_of(&n) {
                     let cur = d.slots[slot];
                     if cur.is_empty() && kind != BindingKind::Var && kind != BindingKind::Function {

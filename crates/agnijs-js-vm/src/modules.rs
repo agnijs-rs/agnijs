@@ -421,14 +421,18 @@ impl Vm {
         let Some(code) = record(self, module).code.clone() else {
             return vec![utf16("default")];
         };
-        let info = code.module.clone().unwrap();
+        // Loading refuses module code without module information, and the
+        // decoder refuses exports without a name (TASK-103.30).
+        let Some(info) = code.module.clone() else {
+            return Vec::new();
+        };
         let mut names: Vec<Vec<u16>> = Vec::new();
         for e in info
             .local_exports
             .iter()
             .chain(info.indirect_exports.iter())
         {
-            names.push(e.export_name.as_ref().unwrap().to_vec());
+            names.extend(e.export_name.as_ref().map(|n| n.to_vec()));
         }
         for &ri in &info.star_exports {
             let Some(req) = record(self, module).requested[ri] else {
@@ -464,10 +468,14 @@ impl Vm {
             }
             return Resolution::NotFound;
         };
-        let info = code.module.clone().unwrap();
+        let Some(info) = code.module.clone() else {
+            return Resolution::NotFound;
+        };
         for e in &info.local_exports {
             if e.export_name.as_deref() == Some(name) {
-                let local = e.local_name.as_ref().unwrap();
+                let Some(local) = e.local_name.as_ref() else {
+                    return Resolution::NotFound;
+                };
                 // `import ... ; export { imported }` re-exports the
                 // imported binding (or namespace) itself.
                 if let Some(imp) = info.imports.iter().find(|i| i.local_name == *local) {
@@ -479,15 +487,18 @@ impl Vm {
                         Some(import_name) => self.resolve_export(req, import_name, resolve_set),
                     };
                 }
-                let slot = self
-                    .module_slot_of(&code, local)
-                    .expect("local export without a slot");
+                let Some(slot) = self.module_slot_of(&code, local) else {
+                    return Resolution::NotFound;
+                };
                 return Resolution::Found(Binding::Slot { module, slot });
             }
         }
         for e in &info.indirect_exports {
             if e.export_name.as_deref() == Some(name) {
-                let Some(req) = record(self, module).requested[e.request.unwrap()] else {
+                let Some(req) = e
+                    .request
+                    .and_then(|ri| record(self, module).requested.get(ri).copied().flatten())
+                else {
                     return Resolution::NotFound;
                 };
                 return match &e.import_name {
@@ -641,7 +652,9 @@ impl Vm {
         };
         // Indirect exports must resolve.
         for e in &info.indirect_exports {
-            let name = e.export_name.clone().unwrap();
+            let Some(name) = e.export_name.clone() else {
+                return self.type_error("Indirect export without a name");
+            };
             match self.resolve_export(module, &name, &mut Vec::new()) {
                 Resolution::Found(_) => {}
                 Resolution::NotFound | Resolution::Ambiguous => {
@@ -664,9 +677,9 @@ impl Vm {
             match &imp.import_name {
                 None => {
                     let ns = self.get_module_namespace(req)?;
-                    let slot = self
-                        .module_slot_of(&code, &imp.local_name)
-                        .expect("namespace import without a slot");
+                    let Some(slot) = self.module_slot_of(&code, &imp.local_name) else {
+                        return self.type_error("Namespace import without a module binding");
+                    };
                     self.heap.env_mut(env).as_decl_mut().unwrap().slots[slot] = Value::Object(ns);
                 }
                 Some(import_name) => match self.resolve_export(req, import_name, &mut Vec::new()) {
@@ -687,9 +700,9 @@ impl Vm {
             for (name, fidx) in &decls.functions {
                 let fcode = code.functions[*fidx as usize].clone();
                 let f = self.create_function(fcode, Some(env), Some(module));
-                let slot = self
-                    .module_slot_of(&code, name)
-                    .expect("function declaration without a slot");
+                let Some(slot) = self.module_slot_of(&code, name) else {
+                    return self.type_error("Function declaration without a module binding");
+                };
                 self.heap.env_mut(env).as_decl_mut().unwrap().slots[slot] = Value::Object(f);
             }
         }

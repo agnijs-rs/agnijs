@@ -1,5 +1,6 @@
 //! One instruction at a time: the big match.
 
+use super::generator::Suspend;
 use super::{Args, ConstructKind, Flow, RunOutcome};
 use crate::builtins::disposable;
 use crate::convert::{bin_arith, Hint};
@@ -152,6 +153,33 @@ impl Vm {
                 self.frames[fi].pc = (pc as i64 + off as i64) as usize;
             }};
         }
+        // A value the compiler always puts in a register (an object, a
+        // function, a private name) is checked rather than assumed, so
+        // crafted bytecode that passes the loader throws instead of
+        // panicking (TASK-103.30). The branch was there before, as an
+        // `expect`.
+        macro_rules! or_invalid {
+            ($e:expr, $what:expr) => {
+                match $e {
+                    Some(v) => v,
+                    None => return Err(self.invalid_bytecode(code, fi, $what)),
+                }
+            };
+        }
+        macro_rules! private_name {
+            ($r:expr) => {
+                match reg!($r) {
+                    Value::Symbol(s) if self.heap.sym(s).is_private() => s,
+                    _ => {
+                        return Err(self.invalid_bytecode(
+                            code,
+                            fi,
+                            "a private name register holds another value",
+                        ))
+                    }
+                }
+            };
+        }
         macro_rules! reg_args {
             ($args:expr, $argc:expr) => {
                 Args::Regs {
@@ -193,12 +221,19 @@ impl Vm {
             }
             Instr::PopEnv => {
                 let f = &mut self.frames[fi];
-                let e = f.env.expect("PopEnv with no environment");
+                // Only an environment this frame pushed can be popped.
+                let (Some(e), 1..) = (f.env, f.env_depth) else {
+                    return Err(self.invalid_bytecode(
+                        code,
+                        fi,
+                        "PopEnv with no environment of its own",
+                    ));
+                };
                 f.env = self.heap.env(e).parent();
                 f.env_depth -= 1;
             }
             Instr::CopyEnv => {
-                let e = self.frames[fi].env.expect("CopyEnv with no environment");
+                let e = or_invalid!(self.frames[fi].env, "CopyEnv with no environment");
                 let copy = self.heap.env(e).copy_declarative();
                 let n = self.heap.alloc_env(copy);
                 self.frames[fi].env = Some(n);
@@ -533,16 +568,14 @@ impl Vm {
                 }
             }
             Instr::DefineOwn { obj, key } => {
-                let o = reg!(obj).as_object().expect("DefineOwn on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "DefineOwn on a non-object");
                 let k = reg!(key);
                 let pk = self.to_property_key(k)?;
                 let v = acc!();
                 self.create_data_property_or_throw(o, pk, v)?;
             }
             Instr::DefineOwnNamed { obj, name } => {
-                let o = reg!(obj)
-                    .as_object()
-                    .expect("DefineOwnNamed on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "DefineOwnNamed on a non-object");
                 let pk = self.name_key(code, name);
                 let v = acc!();
                 if !self.heap.add_by_transition(o, pk, v) {
@@ -554,11 +587,9 @@ impl Vm {
                 key,
                 enumerable,
             } => {
-                let o = reg!(obj).as_object().expect("DefineMethod on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "DefineMethod on a non-object");
                 let k = reg!(key);
-                let f = acc!()
-                    .as_object()
-                    .expect("DefineMethod with a non-function");
+                let f = or_invalid!(acc!().as_object(), "DefineMethod with a non-function");
                 let pk = self.to_property_key(k)?;
                 let kv = self.key_to_value(pk);
                 self.set_function_name(f, kv, None)?;
@@ -585,11 +616,9 @@ impl Vm {
                 enumerable,
             } => {
                 let is_getter = matches!(instr, Instr::DefineGetter { .. });
-                let o = reg!(obj).as_object().expect("DefineGetter on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "DefineGetter on a non-object");
                 let k = reg!(key);
-                let f = acc!()
-                    .as_object()
-                    .expect("DefineGetter with a non-function");
+                let f = or_invalid!(acc!().as_object(), "DefineGetter with a non-function");
                 let pk = self.to_property_key(k)?;
                 let kv = self.key_to_value(pk);
                 self.set_function_name(f, kv, Some(if is_getter { "get" } else { "set" }))?;
@@ -614,12 +643,11 @@ impl Vm {
                 self.define_property_or_throw(o, pk, desc)?;
             }
             Instr::SetHomeObject { func, home } => {
-                let f = reg!(func)
-                    .as_object()
-                    .expect("SetHomeObject on a non-function");
-                let h = reg!(home)
-                    .as_object()
-                    .expect("SetHomeObject with a non-object home");
+                let f = or_invalid!(reg!(func).as_object(), "SetHomeObject on a non-function");
+                let h = or_invalid!(
+                    reg!(home).as_object(),
+                    "SetHomeObject with a non-object home"
+                );
                 if let Some(fd) = self.heap.obj_mut(f).function_mut() {
                     fd.home_object = Some(h);
                 }
@@ -643,9 +671,7 @@ impl Vm {
                 }
             }
             Instr::SetPrototypeLiteral { obj } => {
-                let o = reg!(obj)
-                    .as_object()
-                    .expect("SetPrototypeLiteral on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "SetPrototypeLiteral on a non-object");
                 match acc!() {
                     Value::Object(p) => {
                         self.heap.set_proto(o, Some(p));
@@ -661,9 +687,10 @@ impl Vm {
                 excluded,
                 count,
             } => {
-                let t = reg!(target)
-                    .as_object()
-                    .expect("CopyDataProperties on a non-object");
+                let t = or_invalid!(
+                    reg!(target).as_object(),
+                    "CopyDataProperties on a non-object"
+                );
                 let src = acc!();
                 let mut ex = Vec::with_capacity(count as usize);
                 for i in 0..count {
@@ -684,19 +711,19 @@ impl Vm {
             }
             Instr::GetPrivate { obj, name } => {
                 let o = reg!(obj);
-                let n = reg!(name).as_symbol_id();
+                let n = private_name!(name);
                 let v = self.private_get(o, n)?;
                 set_acc!(v);
             }
             Instr::SetPrivate { obj, name } => {
                 let o = reg!(obj);
-                let n = reg!(name).as_symbol_id();
+                let n = private_name!(name);
                 let v = acc!();
                 self.private_set(o, n, v)?;
             }
             Instr::HasPrivate { obj, name } => {
                 let o = reg!(obj);
-                let n = reg!(name).as_symbol_id();
+                let n = private_name!(name);
                 let Value::Object(o) = o else {
                     return Err(self.throw_type(
                         "Cannot use 'in' operator to search for a private field in a non-object",
@@ -706,7 +733,7 @@ impl Vm {
                 set_acc!(Value::Bool(has));
             }
             Instr::SetPrivateMethod { name, kind } => {
-                let n = reg!(name).as_symbol_id();
+                let n = private_name!(name);
                 let f = acc!();
                 let desc = self
                     .heap
@@ -742,10 +769,8 @@ impl Vm {
                 };
             }
             Instr::AddPrivateBrand { obj, name } => {
-                let o = reg!(obj)
-                    .as_object()
-                    .expect("AddPrivateBrand on a non-object");
-                let n = reg!(name).as_symbol_id();
+                let o = or_invalid!(reg!(obj).as_object(), "AddPrivateBrand on a non-object");
+                let n = private_name!(name);
                 self.private_method_add(o, n)?;
             }
 
@@ -1020,7 +1045,7 @@ impl Vm {
             Instr::CallSpread { callee, this, args } => {
                 let f = reg!(callee);
                 let t = reg!(this);
-                let arr = reg!(args).as_object().expect("CallSpread with a non-array");
+                let arr = or_invalid!(reg!(args).as_object(), "CallSpread with a non-array");
                 let a = self.array_to_vec(arr);
                 return self.call_from_frame(f, t, Args::Slice(&a));
             }
@@ -1052,9 +1077,7 @@ impl Vm {
             } => {
                 let f = reg!(callee);
                 let t = reg!(this);
-                let arr = reg!(args)
-                    .as_object()
-                    .expect("CallEvalSpread with a non-array");
+                let arr = or_invalid!(reg!(args).as_object(), "CallEvalSpread with a non-array");
                 let a = self.array_to_vec(arr);
                 if let Value::Object(fo) = f {
                     if fo == self.intrinsic_in(self.frames[fi].realm, crate::realm::Intrinsic::Eval)
@@ -1076,9 +1099,7 @@ impl Vm {
             }
             Instr::ConstructSpread { callee, args } => {
                 let f = reg!(callee);
-                let arr = reg!(args)
-                    .as_object()
-                    .expect("ConstructSpread with a non-array");
+                let arr = or_invalid!(reg!(args).as_object(), "ConstructSpread with a non-array");
                 let a = self.array_to_vec(arr);
                 return self.construct_from_frame(f, Args::Slice(&a), f);
             }
@@ -1088,9 +1109,7 @@ impl Vm {
                 args,
                 argc,
             } => {
-                let f = reg!(func)
-                    .as_object()
-                    .expect("SuperCall with a non-function");
+                let f = or_invalid!(reg!(func).as_object(), "SuperCall with a non-function");
                 let nt = reg!(new_target);
                 let a = reg_args!(args, argc);
                 let parent = self.get_prototype_of(f)?;
@@ -1105,13 +1124,12 @@ impl Vm {
                 new_target,
                 args,
             } => {
-                let f = reg!(func)
-                    .as_object()
-                    .expect("SuperCallSpread with a non-function");
+                let f = or_invalid!(
+                    reg!(func).as_object(),
+                    "SuperCallSpread with a non-function"
+                );
                 let nt = reg!(new_target);
-                let arr = reg!(args)
-                    .as_object()
-                    .expect("SuperCallSpread with a non-array");
+                let arr = or_invalid!(reg!(args).as_object(), "SuperCallSpread with a non-array");
                 let a = self.array_to_vec(arr);
                 let parent = self.get_prototype_of(f)?;
                 let parent = match parent {
@@ -1182,7 +1200,7 @@ impl Vm {
                 set_acc!(Value::Object(a));
             }
             Instr::ArrayPush { arr } => {
-                let a = reg!(arr).as_object().expect("ArrayPush on a non-array");
+                let a = or_invalid!(reg!(arr).as_object(), "ArrayPush on a non-array");
                 let v = acc!();
                 if !self.heap.array_push_dense(a, v) {
                     let len = self.heap.obj(a).array_length().unwrap_or(0);
@@ -1190,13 +1208,13 @@ impl Vm {
                 }
             }
             Instr::ArrayPushHole { arr } => {
-                let a = reg!(arr).as_object().expect("ArrayPushHole on a non-array");
+                let a = or_invalid!(reg!(arr).as_object(), "ArrayPushHole on a non-array");
                 if let Class::Array(ad) = &mut self.heap.obj_mut(a).class {
                     ad.length += 1;
                 }
             }
             Instr::ArraySpread { arr } => {
-                let a = reg!(arr).as_object().expect("ArraySpread on a non-array");
+                let a = or_invalid!(reg!(arr).as_object(), "ArraySpread on a non-array");
                 let src = acc!();
                 let (iter, next) = self.get_iterator(src, false)?;
                 loop {
@@ -1237,7 +1255,7 @@ impl Vm {
                 init,
                 anon,
             } => {
-                let c = reg!(ctor).as_object().expect("AddField on a non-class");
+                let c = or_invalid!(reg!(ctor).as_object(), "AddField on a non-class");
                 let k = reg!(key);
                 let i = reg!(init);
                 let fk = match k {
@@ -1260,7 +1278,7 @@ impl Vm {
                 }
             }
             Instr::DefineField { obj, key, anon } => {
-                let o = reg!(obj).as_object().expect("DefineField on a non-object");
+                let o = or_invalid!(reg!(obj).as_object(), "DefineField on a non-object");
                 let k = reg!(key);
                 let v = acc!();
                 let fk = match k {
@@ -1273,10 +1291,11 @@ impl Vm {
                 self.define_field(o, &fk, v, anon)?;
             }
             Instr::AddInstancePrivateMethod { ctor, name } => {
-                let c = reg!(ctor)
-                    .as_object()
-                    .expect("AddInstancePrivateMethod on a non-class");
-                let n = reg!(name).as_symbol_id();
+                let c = or_invalid!(
+                    reg!(ctor).as_object(),
+                    "AddInstancePrivateMethod on a non-class"
+                );
+                let n = private_name!(name);
                 if let Some(fd) = self.heap.obj_mut(c).function_mut() {
                     fd.class_data
                         .get_or_insert_with(Default::default)
@@ -1285,12 +1304,14 @@ impl Vm {
                 }
             }
             Instr::InitializeInstanceElements { func, this } => {
-                let f = reg!(func)
-                    .as_object()
-                    .expect("InitializeInstanceElements with a non-function");
-                let t = reg!(this)
-                    .as_object()
-                    .expect("InitializeInstanceElements with a non-object this");
+                let f = or_invalid!(
+                    reg!(func).as_object(),
+                    "InitializeInstanceElements with a non-function"
+                );
+                let t = or_invalid!(
+                    reg!(this).as_object(),
+                    "InitializeInstanceElements with a non-object this"
+                );
                 self.initialize_instance_elements(f, t)?;
             }
             Instr::CreateRegExp { pattern, flags } => {
@@ -1406,7 +1427,12 @@ impl Vm {
                 reg!(dst) = Value::Object(it);
             }
             Instr::ForInNext { iter, done } => {
-                let it = reg!(iter).as_object().expect("ForInNext on a non-iterator");
+                let it = or_invalid!(
+                    reg!(iter)
+                        .as_object()
+                        .filter(|&o| matches!(self.heap.obj(o).class, Class::ForIn(_))),
+                    "ForInNext on a non-iterator"
+                );
                 match self.for_in_next(it)? {
                     Some(k) => set_acc!(k),
                     None => jump!(done),
@@ -1415,20 +1441,40 @@ impl Vm {
 
             // ---- generators and async ----
             Instr::InitialYield => {
+                if !self.can_suspend(fi, Suspend::InitialYield) {
+                    return Err(self.invalid_bytecode(
+                        code,
+                        fi,
+                        "InitialYield outside a generator's first run",
+                    ));
+                }
                 let gen = self.generator_initial_yield(fi)?;
                 return Ok(Flow::Done(RunOutcome::Return(Value::Object(gen))));
             }
             Instr::Yield { kind } => {
+                if !self.can_suspend(fi, Suspend::Yield) {
+                    return Err(self.invalid_bytecode(code, fi, "Yield outside a generator"));
+                }
                 let v = acc!();
                 self.suspend_frame(fi, Some(kind));
                 return Ok(Flow::Done(RunOutcome::Yield(v)));
             }
             Instr::YieldRaw { kind } => {
+                if !self.can_suspend(fi, Suspend::YieldRaw) {
+                    return Err(self.invalid_bytecode(
+                        code,
+                        fi,
+                        "YieldRaw outside a sync generator",
+                    ));
+                }
                 let v = acc!();
                 self.suspend_frame(fi, Some(kind));
                 return Ok(Flow::Done(RunOutcome::YieldRaw(v)));
             }
             Instr::Await => {
+                if !self.can_suspend(fi, Suspend::Await) {
+                    return Err(self.invalid_bytecode(code, fi, "Await outside an async body"));
+                }
                 let v = acc!();
                 self.suspend_frame(fi, None);
                 return Ok(Flow::Done(RunOutcome::Await(v)));
@@ -1978,15 +2024,6 @@ pub(crate) fn instr_arith(i: Instr) -> ArithOp {
         Instr::BitOr(_) => ArithOp::BitOr,
         Instr::BitXor(_) => ArithOp::BitXor,
         _ => unreachable!(),
-    }
-}
-
-impl Value {
-    pub(crate) fn as_symbol_id(self) -> crate::value::SymId {
-        match self {
-            Value::Symbol(s) => s,
-            other => panic!("expected a private name, found {other:?}"),
-        }
     }
 }
 

@@ -207,6 +207,23 @@ fn a_malformed_debug_section_does_not_stop_the_code_from_running() {
     assert_eq!((exc.stack[0].script.as_str(), exc.stack[0].line), ("t.js", 1));
 }
 
+/// A snapshot writes the code trees of the realm again. A block whose
+/// debug section was refused is written with an empty one, as the
+/// debugger sees it, instead of panicking in the encoder (TASK-103.30).
+#[test]
+fn code_with_a_malformed_debug_section_can_be_snapshotted() {
+    let (_host, mut e, realm) = engine();
+    e.eval_bytecode(realm, &container_with_a_bad_debug_section())
+        .unwrap_or_else(|err| panic!("{err}"));
+    let snap = e
+        .snapshot(realm)
+        .unwrap_or_else(|err| panic!("snapshot: {err}"));
+    let mut restored = agnijs_js_vm::make_engine_from_snapshot(TestHost::new(), &snap)
+        .unwrap_or_else(|err| panic!("restore: {err}"));
+    let realm = restored.main_realm();
+    assert_eq!(eval(&mut *restored, realm, "f(2)"), Value::Number(3.0));
+}
+
 #[test]
 fn an_attached_debugger_refuses_a_malformed_debug_section_at_load() {
     use agnijs_js_debugger::*;

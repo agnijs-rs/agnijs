@@ -879,6 +879,42 @@ fn get_module(r: &mut Reader) -> Result<ModuleInfo> {
     })
 }
 
+/// What linking a module record relies on (TASK-103.30): the block has a
+/// module scope; every export has a name, an indirect one a request; and
+/// every binding linking writes (namespace imports, function
+/// declarations) or reads (local exports that are not imports) has a slot
+/// in that scope.
+fn verify_module(m: &ModuleInfo, scopes: &[ScopeInfo], decls: Option<&Declarations>) -> Result<()> {
+    let Some(scope) = scopes.iter().find(|s| s.kind == ScopeKind::Module) else {
+        return invalid("module code without a module scope");
+    };
+    let slot = |name: &str, what: &str| match scope.slot_of(name) {
+        Some(_) => Ok(()),
+        None => invalid(format!("{what} '{name}' has no module binding")),
+    };
+    for i in m.imports.iter().filter(|i| i.import_name.is_none()) {
+        slot(&i.local_name, "namespace import")?;
+    }
+    for e in &m.local_exports {
+        let (Some(_), Some(local)) = (&e.export_name, &e.local_name) else {
+            return invalid("local export without a name");
+        };
+        if !m.imports.iter().any(|i| i.local_name == *local) {
+            slot(local, "local export")?;
+        }
+    }
+    if m.indirect_exports
+        .iter()
+        .any(|e| e.export_name.is_none() || e.request.is_none())
+    {
+        return invalid("indirect export without a name or a request");
+    }
+    for (name, _) in decls.map(|d| &d.functions[..]).unwrap_or(&[]) {
+        slot(name, "function declaration")?;
+    }
+    Ok(())
+}
+
 /// Block layout: the scalars, then every pool an instruction indexes
 /// (constants, names, scopes), the declarations, source, span and module
 /// record, the inline-cache and nested-function counts, then the
@@ -967,11 +1003,14 @@ fn put_block(w: &mut Writer, c: &CodeBlock) {
 /// as an unsigned delta, the source offset zigzag-encoded, since a
 /// statement can start before the one emitted ahead of it) and locals as
 /// (name index, register, start, length), all LEB128. The section is
-/// prefixed by its byte length so a loader can skip it.
+/// prefixed by its byte length so a loader can skip it. A section that was
+/// refused on decoding (crafted bytecode, TASK-103.30) is written empty,
+/// which is how the debugger sees that block.
 fn put_debug_section(w: &mut Writer, d: &DebugSection) {
     let at = w.out.len();
     w.u32(0);
-    let d = d.get().expect("encoding a block whose debug section was refused");
+    let empty = DebugInfo::default();
+    let d = d.get().unwrap_or(&empty);
     w.len(d.statements.len());
     let (mut pc, mut offset) = (0u32, 0u32);
     for s in &d.statements {
@@ -1100,7 +1139,9 @@ fn get_block(r: &mut Reader, depth: usize) -> Result<Rc<CodeBlock>> {
         return invalid(format!("span {span:?} outside the source text"));
     }
     let module = if r.bool()? {
-        Some(Rc::new(get_module(r)?))
+        let m = get_module(r)?;
+        verify_module(&m, &scopes, declarations.as_ref())?;
+        Some(Rc::new(m))
     } else {
         None
     };

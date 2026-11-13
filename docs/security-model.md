@@ -93,11 +93,12 @@ ADR 0021 and [c-api.md](c-api.md) have the details.
 
 ### Bytecode and snapshots from another build are refused
 
-Bytecode carries a format tag (`agnijs-bc-N`), and the payload has a checksum. Snapshots add a native-registry fingerprint. A container from another engine or build is refused with `BytecodeMismatch`, and damage is refused with `BytecodeCorrupt`. The loader also checks every operand that indexes a block's own pools (ADR 0010 and ADR 0022). Tests:
+Bytecode carries a format tag (`agnijs-bc-N`), and the payload has a checksum. Snapshots add a native-registry fingerprint. A container from another engine or build is refused with `BytecodeMismatch`, and damage is refused with `BytecodeCorrupt`. The loader also checks every operand that indexes a block's own pools, and the structure of a module record. The interpreter checks the operands that depend on the frame they run in, so a container that loads cannot panic the engine (ADR 0010 and ADR 0022, TASK-103.30 addenda). Tests:
 
 - `another_engines_bytecode_is_a_version_mismatch` and `a_corrupt_payload_is_refused_without_running` in `crates/agnijs-js-vm/tests/bytecode.rs`;
 - `corrupted_bytes_never_panic` and `operands_outside_their_pools_are_rejected_by_verification` in `crates/agnijs-js-compiler/tests/serialize.rs`;
-- `fuzzed_snapshots_load_or_fail_without_panicking` in `crates/agnijs-js-vm/tests/snapshot.rs`.
+- `fuzzed_snapshots_load_or_fail_without_panicking` in `crates/agnijs-js-vm/tests/snapshot.rs`;
+- `crafted_script_bytecode_runs_without_panicking`, `crafted_module_bytecode_runs_without_panicking` and `crafted_snapshot_code_runs_without_panicking` in `crates/agnijs-js-vm/tests/bytecode_fuzz.rs`. They alter code, reseal it and run whatever loads, also with the `jit` feature.
 
 This guards against accidents, not attackers: see [Bytecode and snapshots are trusted input](#bytecode-and-snapshots-are-trusted-input).
 
@@ -292,7 +293,7 @@ Module loading is a capability. `agnijs-js-resolve` implements Node's algorithm 
 
 ### Bytecode and snapshots are trusted input
 
-The checksum is FNV-1a, which catches accidents and is not a signature. Anyone who can write the bytes can reseal them. Beyond the pools it checks, the loader trusts operands that depend on run-time context, such as environment depth and slot, and module import slots (ADR 0010 M7 addendum; ADR 0022). Altered bytecode that still verifies can compute wrong values, and a regex program that verifies can match the wrong strings. It may also reach a VM invariant and panic. In the C API that poisons the engine; in the Rust API the panic unwinds into the embedder. TASK-103.30 tracks a verifier.
+The checksum is FNV-1a, which catches accidents and is not a signature. Anyone who can write the bytes can reseal them. The loader verifies the pools and module records. The interpreter checks the operands that depend on run-time context, such as environment depth and slot, import slots, register kinds and generator state. A failed check throws an `internal error: invalid bytecode` Error rather than panicking (ADR 0010 and ADR 0022, TASK-103.30 addenda). What stays trusted is meaning. Altered bytecode that is still in range can compute wrong values or loop until fuel, the interrupt or the memory limit stops it. A regex program that verifies can match the wrong strings.
 
 Load bytecode and snapshots only from a source you trust. If they cross a trust boundary (a download, a cache directory other users can write), authenticate them first, for example with a MAC or a signature over the whole container, keyed by something the attacker does not hold. A snapshot also carries the heap it was taken from, including any secrets the bootstrap left in it.
 

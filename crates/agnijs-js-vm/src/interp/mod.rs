@@ -757,7 +757,7 @@ impl Vm {
     /// Route a fault to the nearest handler, popping frames as needed.
     /// `Ok` means execution continues at a handler; `Err` means the exit
     /// frame was popped and the fault propagates to the Rust caller.
-    pub(crate) fn handle_fault(&mut self, fault: Fault) -> JsResult<()> {
+    pub(crate) fn handle_fault(&mut self, mut fault: Fault) -> JsResult<()> {
         if self.debug_hot {
             self.debug_fault(&fault);
         }
@@ -768,6 +768,13 @@ impl Vm {
                 let frame = &self.frames[fi];
                 let throw_pc = frame.pc.saturating_sub(1);
                 if let Some(h) = frame.code.handler_for(throw_pc).copied() {
+                    // A handler whose target is inside its own range loops
+                    // without a back-edge (crafted bytecode, TASK-103.30),
+                    // so routing a throw counts as one for the interrupt.
+                    if let Err(f) = self.poll_interrupt() {
+                        fault = f;
+                        continue;
+                    }
                     self.unwind_env_to(fi, h.env_depth);
                     let frame = &mut self.frames[fi];
                     frame.pc = h.target as usize;
@@ -786,11 +793,14 @@ impl Vm {
         }
     }
 
-    /// Pop environments until the frame's depth is `depth`.
+    /// Pop environments until the frame's depth is `depth`. A depth above
+    /// the frame's leaves it as it is: a handler of crafted bytecode can
+    /// name any depth, and `PopEnv` checks what it pops (TASK-103.30).
     pub(crate) fn unwind_env_to(&mut self, fi: usize, depth: u16) {
         let frame = &mut self.frames[fi];
         while frame.env_depth > depth {
-            let e = frame.env.expect("environment depth out of sync");
+            // Every level counted in `env_depth` was pushed by this frame.
+            let Some(e) = frame.env else { break };
             frame.env = self.heap.env(e).parent();
             frame.env_depth -= 1;
         }
@@ -849,6 +859,23 @@ impl Vm {
     pub(crate) fn env_slot_mut(&mut self, fi: usize, depth: u16, slot: u16) -> Option<&mut Value> {
         let e = self.env_at(fi, depth)?;
         self.heap.env_mut(e).as_decl_mut()?.slots.get_mut(slot as usize)
+    }
+
+    /// The exception for an instruction that found its frame in a state the
+    /// compiler never produces: a register without the object, function or
+    /// private name it always holds there, an environment pop or a
+    /// suspension the frame cannot make. Only crafted bytecode that passed
+    /// the loader gets here (TASK-103.30, ADR 0010), and it throws rather
+    /// than panicking.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn invalid_bytecode(&mut self, code: &CodeBlock, fi: usize, what: &str) -> Fault {
+        let msg = format!(
+            "internal error: invalid bytecode in {} (pc {}): {what}",
+            code.name,
+            self.frames[fi].pc.saturating_sub(1)
+        );
+        self.throw(crate::vm::ErrorType::Error, &msg)
     }
 
     /// The exception for an environment access the chain cannot satisfy.

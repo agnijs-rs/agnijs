@@ -106,7 +106,42 @@ fn gen_data(vm: &mut Vm, gen: ObjId) -> &mut GeneratorData {
     }
 }
 
+/// How an instruction suspends its frame.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Suspend {
+    InitialYield,
+    Yield,
+    YieldRaw,
+    Await,
+}
+
 impl Vm {
+    /// Whether frame `fi` can suspend `how`. The compiler emits each
+    /// suspension only in a body whose run expects it: a generator's first
+    /// run ends in `InitialYield`; a sync generator resumes to `Yield` or
+    /// `YieldRaw`, an async generator to `Yield` or `Await` and an async
+    /// function (module bodies with top-level await included) to `Await`.
+    /// Each run is entered with an exit frame. Crafted bytecode can put any
+    /// of them anywhere, so they are checked (TASK-103.30).
+    pub(crate) fn can_suspend(&self, fi: usize, how: Suspend) -> bool {
+        let f = &self.frames[fi];
+        if !f.exit {
+            return false;
+        }
+        let Some(g) = f.generator else {
+            return how == Suspend::InitialYield && f.callee.is_some();
+        };
+        let Class::Generator(g) = &self.heap.obj(g).class else {
+            return false;
+        };
+        match how {
+            Suspend::InitialYield => false,
+            Suspend::Yield => matches!(g.kind, GenKind::Sync | GenKind::Async),
+            Suspend::YieldRaw => matches!(g.kind, GenKind::Sync),
+            Suspend::Await => matches!(g.kind, GenKind::Async | GenKind::AsyncFn),
+        }
+    }
+
     /// Save the frame `fi` (the top frame) into its generator object and
     /// pop it.
     pub(crate) fn suspend_frame(&mut self, fi: usize, resume_reg: Option<u16>) {

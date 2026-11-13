@@ -229,6 +229,39 @@ fn decode_payload(bytes: &[u8]) -> Result<(Decoded, Vec<RegexEntry>), Error> {
     Ok((code, regexes))
 }
 
+/// Helpers for fuzzing the bytecode loader past its checksum (TASK-103.30).
+/// Not a stable API.
+#[doc(hidden)]
+pub mod testing {
+    use super::*;
+
+    /// Where the payload starts: after the magic, the tag and its NUL.
+    fn payload_start() -> usize {
+        4 + FORMAT.len() + 1
+    }
+
+    /// The byte range of the serialised code tree in a container made by
+    /// [`encode_bytecode`].
+    pub fn tree_span(bytes: &[u8]) -> Option<std::ops::Range<usize>> {
+        let at = payload_start() + 9;
+        let len = u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?);
+        let start = at + 8;
+        let end = start.checked_add(usize::try_from(len).ok()?)?;
+        (end <= bytes.len()).then_some(start..end)
+    }
+
+    /// Recompute the checksum after editing the body, so an edit reaches
+    /// the decoder instead of the checksum test.
+    pub fn reseal(bytes: &mut [u8]) {
+        let p = payload_start();
+        if bytes.len() < p + 9 {
+            return;
+        }
+        let sum = checksum(bytes[p], &bytes[p + 9..]);
+        bytes[p + 1..p + 9].copy_from_slice(&sum.to_le_bytes());
+    }
+}
+
 impl Vm {
     /// Decode a container and seed the regex cache with the compiled
     /// programs it carries, so its literals are not parsed or compiled

@@ -234,14 +234,16 @@ pub fn create_async_from_sync_iterator(vm: &mut Vm, iterator: Value, next: Value
     )))
 }
 
-fn afs_parts(vm: &mut Vm, this: Value) -> (Value, Value) {
-    match this {
-        Value::Object(o) => match &vm.heap.obj(o).class {
-            Class::AsyncFromSyncIterator(r) => (r.iterator, r.next),
-            _ => unreachable!("AsyncFromSyncIterator method on wrong receiver"),
-        },
-        _ => unreachable!("AsyncFromSyncIterator method on wrong receiver"),
+/// The iterator record of an async-from-sync iterator. The prototype is
+/// not reachable from script, but crafted bytecode can call its methods on
+/// another receiver (TASK-103.30), so that throws rather than panics.
+fn afs_parts(vm: &mut Vm, this: Value) -> JsResult<(Value, Value)> {
+    if let Value::Object(o) = this {
+        if let Class::AsyncFromSyncIterator(r) = &vm.heap.obj(o).class {
+            return Ok((r.iterator, r.next));
+        }
     }
+    vm.type_error("not an async-from-sync iterator")
 }
 
 /// Reject `cap` with the thrown value, or propagate a non-throw fault.
@@ -315,7 +317,7 @@ fn afs_close_iterator(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 }
 
 fn afs_next(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let (iter, next) = afs_parts(vm, a.this);
+    let (iter, next) = afs_parts(vm, a.this)?;
     let cap = promise::new_promise_capability_intrinsic(vm);
     let args: Vec<Value> = a.args.iter().take(1).copied().collect();
     let result = match vm.call_value(next, iter, &args) {
@@ -326,7 +328,7 @@ fn afs_next(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 }
 
 fn afs_return(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let (iter, _) = afs_parts(vm, a.this);
+    let (iter, _) = afs_parts(vm, a.this)?;
     let cap = promise::new_promise_capability_intrinsic(vm);
     let ret = match vm.get_method(iter, PropKey::Str(vm.names.return_)) {
         Ok(r) => r,
@@ -351,7 +353,7 @@ fn afs_return(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 }
 
 fn afs_throw(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let (iter, _) = afs_parts(vm, a.this);
+    let (iter, _) = afs_parts(vm, a.this)?;
     let cap = promise::new_promise_capability_intrinsic(vm);
     let thr = match vm.get_method(iter, PropKey::Str(vm.names.throw)) {
         Ok(r) => r,

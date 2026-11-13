@@ -83,3 +83,9 @@ The C API gets no snapshot entry points yet: the ticket does not ask for them, a
   - generator frames as data.
   Each is a follow-up ticket. The refusal message points at the value to remove.
 - The loader validates heap structure fully, but the bytecode trust model still applies to the code inside a snapshot, as it does to the bytecode loader. A bytecode verifier would close both.
+
+## Addendum (TASK-103.30, 2026-11-12): code inside a snapshot cannot panic the VM
+
+The verifier that the Consequences asked for now covers both loaders, because a snapshot decodes its code trees with the bytecode decoder. ADR 0010's TASK-103.30 addendum lists what is verified at load and what is checked at run time. `LdaEnv` and `StaEnv` stay the special case described above, and every other context-dependent operand throws on a mismatch the same way. A snapshot whose code bytes were altered and resealed therefore restores and runs, throws or is refused as `BytecodeCorrupt`, and never panics. As with bytecode, an alteration that stays in range can still compute a wrong value: the checksum is not a signature.
+
+`crafted_snapshot_code_runs_without_panicking` in `tests/bytecode_fuzz.rs` edits bytes inside the code span of a realm snapshot, reseals it, restores it, and calls every function of the corpus. It runs in the interpreter and, with `jit`, with forced compilation. The older `fuzzed_snapshots_load_or_fail_without_panicking` now runs its probe whether or not an edit touched code.

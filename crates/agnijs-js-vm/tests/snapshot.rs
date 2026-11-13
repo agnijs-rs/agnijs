@@ -217,20 +217,17 @@ impl Rng {
 }
 
 /// Mutations past the checksum (resealed) never make the loader panic.
-/// When a mutation leaves the code trees alone and the snapshot still
-/// loads, running script over the damaged heap must not panic either:
-/// it may throw. Mutated code is the bytecode loader's trust model (ADR
-/// 0010) and is only loaded, not run.
+/// When the snapshot still loads, running script over the damaged heap,
+/// or the damaged code (TASK-103.30), must not panic either: it may throw.
 #[test]
 fn fuzzed_snapshots_load_or_fail_without_panicking() {
-    use agnijs_js_vm::snapshot::testing::{code_span, reseal};
+    use agnijs_js_vm::snapshot::testing::reseal;
     let base = snapshot_of(
         "let n = 0; const inc = () => ++n;
          class A { #p = 1; static s = [1, { t: 'x' }]; get p() { return this.#p; } }
          var m = new Map([['k', new Set([1])]]), ta = new Int16Array(4), re = /a+/i;
          var b = inc.bind(null); var sym = Symbol.for('s'); var dv = new DataView(new ArrayBuffer(8));",
     );
-    let span = code_span(&base).expect("code span");
     let start = 4 + agnijs_js_vm::snapshot::format_tag().len() + 1 + 16;
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     let probe = "try { inc(); new A().p; A.s[1].t; m.get('k').has(1); ta[1] = 3; re.test('AA'); b(); \
@@ -242,10 +239,8 @@ fn fuzzed_snapshots_load_or_fail_without_panicking() {
     for _ in 0..iters {
         let mut bytes = base.clone();
         let edits = 1 + rng.below(4);
-        let mut touches_code = false;
         for _ in 0..edits {
             let at = start + rng.below(bytes.len() - start);
-            touches_code |= span.contains(&at);
             bytes[at] = match rng.below(4) {
                 0 => bytes[at] ^ (1 << rng.below(8)),
                 1 => 0,
@@ -258,9 +253,6 @@ fn fuzzed_snapshots_load_or_fail_without_panicking() {
             continue;
         };
         loaded += 1;
-        if touches_code {
-            continue;
-        }
         let realm = e.main_realm();
         e.set_fuel(Some(200_000)).unwrap();
         let _ = e.eval_script(realm, "probe.js", probe);
