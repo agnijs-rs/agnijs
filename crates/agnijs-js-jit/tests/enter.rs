@@ -2,6 +2,7 @@
 //! runtime and value type. The VM's differential tests cover the real
 //! runtime (crates/agnijs-js-vm/tests/jit_differential.rs).
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::rc::Rc;
 
 use agnijs_js_compiler::{compile_script, CodeBlock};
@@ -51,6 +52,11 @@ struct Toy {
     slow_result: Val,
     counter: u32,
     polls: u32,
+    /// Calls of [`Runtime::fast`], and whether it, or the generic path,
+    /// panics: what a bug in a runtime would do.
+    fast_calls: u32,
+    panic_in_fast: bool,
+    panic_in_slow: bool,
 }
 
 impl Toy {
@@ -61,6 +67,9 @@ impl Toy {
             slow_result: Val::Str(99),
             counter: 0,
             polls: 0,
+            fast_calls: 0,
+            panic_in_fast: false,
+            panic_in_slow: false,
         }
     }
 }
@@ -68,10 +77,20 @@ impl Toy {
 impl Runtime<Val> for Toy {
     fn slow(&mut self, pc: u32, _acc: Val) -> Resume<Val> {
         self.slow_pcs.push(pc);
+        if self.panic_in_slow {
+            panic!("a bug in the generic path");
+        }
         Resume::Next {
             pc: pc + 1,
             acc: self.slow_result,
         }
+    }
+    fn fast(&mut self, _pc: u32, _acc: Val) -> Option<Val> {
+        self.fast_calls += 1;
+        if self.panic_in_fast {
+            panic!("a bug in the fast path");
+        }
+        None
     }
     fn poll(&mut self, _pc: u32, target: u32, acc: Val) -> Resume<Val> {
         self.polls += 1;
@@ -230,6 +249,65 @@ fn truthiness_is_decided_inline_for_non_heap_values() {
         assert!(rt.slow_pcs.is_empty(), "{a:?}");
         assert_eq!(v, Val::Number(want), "{a:?}");
     }
+}
+
+/// What a run of `f`, which loads a global, ends as when the runtime
+/// panics where the flags say: the panic's message, or how the run ended
+/// without one.
+fn run_panicking(panic_in_fast: bool, panic_in_slow: bool) -> (Toy, Result<Exit, String>) {
+    let f = function("function f() { return someGlobal; }");
+    let compiled = Compiled::<Val>::compile(&f).expect("compiles to machine code");
+    let mut rt = Toy::new(f.register_count as usize);
+    rt.panic_in_fast = panic_in_fast;
+    rt.panic_in_slow = panic_in_slow;
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        compiled.enter(&mut rt, 0, Val::Undefined)
+    }));
+    let r = match r {
+        Ok(out) => Ok(out.exit),
+        Err(payload) => Err(payload
+            .downcast_ref::<&str>()
+            .copied()
+            .unwrap_or("?")
+            .to_string()),
+    };
+    (rt, r)
+}
+
+#[test]
+fn a_global_load_asks_the_fast_path_first() {
+    let (rt, r) = run_panicking(false, false);
+    assert_eq!(r, Ok(Exit::Return));
+    assert_eq!(rt.fast_calls, 1);
+    assert_eq!(
+        rt.slow_pcs.len(),
+        1,
+        "a miss runs the instruction generically"
+    );
+}
+
+#[test]
+fn a_panic_in_slow_leaves_enter_as_a_panic() {
+    let (_, r) = run_panicking(false, true);
+    assert_eq!(r, Err("a bug in the generic path".to_string()));
+}
+
+// TASK-103.35: a panic in the fast path was caught and dropped by its
+// trampoline, which then ran the instruction again by the generic path.
+#[test]
+fn a_panic_in_fast_leaves_enter_as_a_panic() {
+    let (rt, r) = run_panicking(true, false);
+    assert_eq!(
+        r,
+        Err("a bug in the fast path".to_string()),
+        "the panic in Runtime::fast was swallowed"
+    );
+    assert_eq!(rt.fast_calls, 1);
+    assert!(
+        rt.slow_pcs.is_empty(),
+        "the instruction was run again after the panic: {:?}",
+        rt.slow_pcs
+    );
 }
 
 #[test]

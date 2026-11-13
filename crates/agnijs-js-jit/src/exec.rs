@@ -27,7 +27,15 @@
 //!   [`Runtime::ic_table`] gave on entry, which has every site it reads.
 //! * No panic crosses machine code: each trampoline catches it, parks the
 //!   payload in the `Shared`, and returns `EXIT_PANIC`; `enter` resumes the
-//!   unwind once machine code has returned.
+//!   unwind once machine code has returned. That is every trampoline that
+//!   reaches the runtime's state: the generic path, calls and returns, the
+//!   polls, the fast paths for bindings and global sites ([`hit_or_out`]),
+//!   the side exits and the "left" helper. A frame is not materialised for
+//!   a panic: what unwinds is the host's to discard. The one trampoline
+//!   that parks nothing is [`Runtime::arith`]'s: it is given two numbers
+//!   and no context, sees no state a panic could leave half changed, and
+//!   is documented not to panic; should an implementation panic anyway,
+//!   the panic is caught there and the result is NaN.
 //! * Code compiled with a [`crate::CallLayout`] pushes and pops the
 //!   runtime's own frames (TASK-101.3.3). It reads and writes the frame
 //!   stack, the register file and the current realm only through the
@@ -1369,21 +1377,53 @@ extern "C" fn left_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, code
     }
 }
 
-extern "C" fn fast_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
-    {
-        // SAFETY: as in `call_out`.
-        let (rt_ptr, acc) = unsafe { ((*(*ctx).shared).rt as *mut R, (*ctx).acc) };
-        // SAFETY: as in `call_out`.
+/// Run `hit`, a runtime entry that serves the instruction at `pc` without
+/// changing anything compiled code caches ([`Runtime::fast`],
+/// [`Runtime::global`]), and answer machine code as [`call_out`] does, in
+/// its three ways:
+///
+/// - `Some`: the instruction is done and the value is the accumulator. No
+///   allocation, no poll, no safe point happened, so nothing is refreshed
+///   and compiled code continues at `pc + 1`.
+/// - `None`: the instruction runs by its generic semantics
+///   ([`Runtime::slow`]), a call out like any other.
+/// - A panic: the payload is parked for [`enter`] to resume and the answer
+///   is [`EXIT_PANIC`] (TASK-103.35). It used to be dropped and the
+///   instruction run again by the generic path, on whatever state the
+///   panic had left, so that the host never learned there had been one.
+fn hit_or_out<V: JitValue, R: Runtime<V>>(
+    ctx: *mut Ctx<V>,
+    pc: u32,
+    hit: impl FnOnce(&mut R, V) -> Option<V>,
+) -> u32 {
+    // SAFETY: as in `call_out`.
+    let (shared, rt_ptr, acc) = unsafe {
+        let s = (*ctx).shared;
+        (s, (*s).rt as *mut R, (*ctx).acc)
+    };
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        // SAFETY: as in `call_out`. The reference ends with this closure,
+        // before the generic path below makes its own.
         let rt = unsafe { &mut *rt_ptr };
-        // A hit changes nothing compiled code caches: no allocation, no
-        // poll, no safe point (`Runtime::fast`).
-        if let Ok(Some(v)) = catch_unwind(AssertUnwindSafe(|| rt.fast(pc, acc))) {
+        hit(rt, acc)
+    }));
+    match r {
+        Ok(Some(v)) => {
             // SAFETY: as in `call_out`.
             unsafe { (*ctx).acc = v };
-            return pc + 1;
+            pc + 1
+        }
+        Ok(None) => call_out::<V, R>(ctx, |rt, acc| rt.slow(pc, acc)),
+        Err(payload) => {
+            // SAFETY: as in `call_out`.
+            unsafe { park_panic(shared, payload) };
+            EXIT_PANIC
         }
     }
-    call_out::<V, R>(ctx, |rt, acc| rt.slow(pc, acc))
+}
+
+extern "C" fn fast_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, pc: u32) -> u32 {
+    hit_or_out::<V, R>(ctx, pc, |rt, acc| rt.fast(pc, acc))
 }
 
 /// An `LdaGlobal` at `pc` that its site (`site`) did not serve: the
@@ -1394,23 +1434,12 @@ extern "C" fn global_trampoline<V: JitValue, R: Runtime<V>>(
     pc: u32,
     site: u32,
 ) -> u32 {
-    {
-        // SAFETY: as in `call_out`.
-        let (rt_ptr, acc) = unsafe { ((*(*ctx).shared).rt as *mut R, (*ctx).acc) };
-        // SAFETY: as in `call_out`.
-        let rt = unsafe { &mut *rt_ptr };
+    hit_or_out::<V, R>(ctx, pc, |rt, acc| {
         // SAFETY: the info of the code that is running, which outlives the
         // run (`call_out`); the site is one of its own.
         let info: &CodeInfo = unsafe { &*(*ctx).info };
-        let site = info.globals.get(site as usize);
-        // A hit changes nothing compiled code caches (`Runtime::fast`).
-        if let Ok(Some(v)) = catch_unwind(AssertUnwindSafe(|| rt.global(pc, acc, site))) {
-            // SAFETY: as in `call_out`.
-            unsafe { (*ctx).acc = v };
-            return pc + 1;
-        }
-    }
-    call_out::<V, R>(ctx, |rt, acc| rt.slow(pc, acc))
+        rt.global(pc, acc, info.globals.get(site as usize))
+    })
 }
 
 extern "C" fn poll_trampoline<V: JitValue, R: Runtime<V>>(
