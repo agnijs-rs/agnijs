@@ -9,6 +9,14 @@ use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, PropSlot, Property, PropertyDescriptor, Value};
 use crate::vm::{JsResult, Vm};
 
+/// The longest list built from a length a script chose: the argument list
+/// of `apply`, `Reflect.apply` and `Reflect.construct`, a Proxy `ownKeys`
+/// result, the captures of a custom `exec` result. The specification has
+/// no maximum; engines refuse far shorter argument lists (V8 about 120k).
+/// A dense array is copied as it is, whatever its length: its memory
+/// already exists and is already counted.
+pub const MAX_LIST_LENGTH: usize = 1 << 22;
+
 /// The result of [`Vm::ordinary_get`].
 pub(crate) enum OrdinaryGet {
     Value(Value),
@@ -1143,14 +1151,28 @@ impl Vm {
             return Ok(d.to_vec());
         }
         let len = self.length_of_array_like(o)?;
-        let mut out = Vec::with_capacity(len as usize);
-        let mut i = 0.0;
-        while i < len {
-            let k = self.number_key(i);
-            out.push(self.get_prop(o, k, v)?);
-            i += 1.0;
+        let n = self.check_list_length(len)?;
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            self.poll_interrupt()?;
+            out.push(self.get_prop(o, PropKey::Index(i as u32), v)?);
         }
         Ok(out)
+    }
+
+    /// Room for a list of `len` values whose length a script chose (an
+    /// array-like's `length`, a custom `exec` result's): a RangeError past
+    /// [`MAX_LIST_LENGTH`], and the memory limit checked for the list
+    /// before any of it is allocated (TASK-103.48, TASK-103.49).
+    pub fn check_list_length(&mut self, len: f64) -> JsResult<usize> {
+        if len > MAX_LIST_LENGTH as f64 {
+            return Err(self.throw_range(&format!(
+                "List of {len} values is too long (the maximum is {MAX_LIST_LENGTH})"
+            )));
+        }
+        let n = len as usize;
+        self.check_memory(n * std::mem::size_of::<Value>())?;
+        Ok(n)
     }
 
     /// The property key for a non-negative integral number.

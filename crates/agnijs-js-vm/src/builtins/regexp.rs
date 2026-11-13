@@ -1157,7 +1157,10 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             }
             Exec::Object(result) => {
                 let result_length = vm.length_of_array_like(result)?;
-                let n_captures = (result_length - 1.0).max(0.0) as usize;
+                // A custom exec chooses the length: capped and checked
+                // against the memory limit before the list is reserved,
+                // and polled while it is read (TASK-103.49).
+                let n_captures = vm.check_list_length((result_length - 1.0).max(0.0))?;
                 let matched = get_match_string(vm, result)?;
                 let match_length = vm.heap.str_len(matched);
                 let idx_key = PropKey::Str(vm.names.index);
@@ -1166,6 +1169,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 let position = position.max(0.0).min(length_s as f64) as usize;
                 let mut captures: Vec<Value> = Vec::with_capacity(n_captures);
                 for n in 1..=n_captures {
+                    vm.poll_interrupt()?;
                     let mut cap = vm.get(result, PropKey::Index(n as u32))?;
                     if !cap.is_undefined() {
                         cap = Value::String(vm.to_string(cap)?);
@@ -1332,6 +1336,10 @@ fn symbol_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 let number_of_captures = vm.length_of_array_like(zo)?;
                 let number_of_captures = (number_of_captures - 1.0).max(0.0) as usize;
                 for i in 1..=number_of_captures {
+                    // Bounded by `lim`, but a custom exec chooses the
+                    // count: poll (TASK-103.49). `i` stays below
+                    // `length_a`, so below 2^32, and the key cannot wrap.
+                    vm.poll_interrupt()?;
                     let next_capture = vm.get(zo, PropKey::Index(i as u32))?;
                     vm.create_data_property_or_throw(arr, PropKey::Index(length_a), next_capture)?;
                     length_a += 1;

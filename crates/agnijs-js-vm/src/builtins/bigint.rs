@@ -64,7 +64,18 @@ fn bigint_as_int_n(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn bigint_as_uint_n(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let bits = vm.to_index(a.arg(0))?;
     let b = vm.to_bigint(a.arg(1))?;
-    let r = bigint::as_uint_n(bits as u64, &vm.heap.bigint(b).0);
+    let bits = bits as u64;
+    // A negative value wraps to a `bits`-bit result: refuse one past the
+    // largest BigInt, and check the memory limit before building it.
+    if bits > 0 && num_traits::Signed::is_negative(&vm.heap.bigint(b).0) {
+        if bits > bigint::MAX_BITS {
+            return vm.range_error("Maximum BigInt size exceeded");
+        }
+        vm.check_memory(bits.div_ceil(8) as usize)?;
+    }
+    let Some(r) = bigint::as_uint_n(bits, &vm.heap.bigint(b).0) else {
+        return vm.range_error("Maximum BigInt size exceeded");
+    };
     Ok(vm.bigint_value(r))
 }
 

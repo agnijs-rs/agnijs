@@ -4,7 +4,7 @@
 //! `asIntN`/`asUintN`).
 
 use num_bigint::{BigInt, Sign};
-use num_traits::{Signed, ToPrimitive, Zero};
+use num_traits::{One, Signed, ToPrimitive, Zero};
 
 pub struct BigIntData(pub BigInt);
 
@@ -104,30 +104,52 @@ pub fn parse_literal(text: &str) -> BigInt {
     parse(text.encode_utf16()).expect("invalid BigInt literal in constant pool")
 }
 
-/// `BigInt.asUintN(bits, x)`.
-pub fn as_uint_n(bits: u64, x: &BigInt) -> BigInt {
-    if bits == 0 {
-        return BigInt::zero();
-    }
-    let modulus = BigInt::from(1) << (bits as usize);
-    let r = x % &modulus;
-    if r.is_negative() {
-        r + modulus
-    } else {
-        r
-    }
+/// The most bits a BigInt result may have where the size is the script's
+/// choice: the cap `<<` applies to its shift count, used by
+/// `BigInt.asUintN` too.
+pub const MAX_BITS: u64 = 1 << 30;
+
+/// `x mod 2^bits` for `bits >= 1`, by masking (num-bigint's `&` works on
+/// the two's complement of a negative value, as ECMAScript's does).
+fn low_bits(bits: u64, x: &BigInt) -> BigInt {
+    let mask = (BigInt::one() << bits) - 1;
+    x & mask
 }
 
-/// `BigInt.asIntN(bits, x)`.
+/// `BigInt.asUintN(bits, x)`, or `None` when `x` is negative and `bits` is
+/// over [`MAX_BITS`]: that result has `bits` bits, up to 2^53-1 of them.
+/// A value that already fits comes back as is, whatever `bits` is, so
+/// nothing larger than `x` or `2^bits` is built (TASK-103.44).
+pub fn as_uint_n(bits: u64, x: &BigInt) -> Option<BigInt> {
+    if bits == 0 {
+        return Some(BigInt::zero());
+    }
+    if !x.is_negative() {
+        if x.bits() <= bits {
+            return Some(x.clone());
+        }
+        // `bits` is below the size of `x`: the mask is no larger than it.
+        return Some(low_bits(bits, x));
+    }
+    if bits > MAX_BITS {
+        return None;
+    }
+    Some(low_bits(bits, x))
+}
+
+/// `BigInt.asIntN(bits, x)`. The result is never larger than `x`.
 pub fn as_int_n(bits: u64, x: &BigInt) -> BigInt {
     if bits == 0 {
         return BigInt::zero();
     }
-    let modulus = BigInt::from(1) << (bits as usize);
-    let half = BigInt::from(1) << ((bits - 1) as usize);
-    let r = as_uint_n(bits, x);
-    if r >= half {
-        r - modulus
+    // |x| < 2^(bits-1) fits as is: the common case for a huge `bits`.
+    if x.bits() < bits {
+        return x.clone();
+    }
+    // Here `bits` is at most the size of `x`.
+    let r = low_bits(bits, x);
+    if r.bit(bits - 1) {
+        r - (BigInt::one() << bits)
     } else {
         r
     }
