@@ -2,7 +2,7 @@
 
 This is the investigation in TASK-100.14. It explains why the AgniJS engine is slower or heavier than the interim engine (QuickJS-NG) on the M9 benchmarks ([switch-over report](https://github.com/jcannon98188/gable/blob/main/docs/js-engine-switch-over.md)) and the micro-benchmarks (`crates/agnijs-js-bench`). It measures and explains only. Nothing in the engine changed. Each cause worth fixing has its own backlog ticket, listed in [the tickets](#the-tickets).
 
-The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-11](#re-measurement-2026-11-11) has current numbers, taken after TASK-100.16 to TASK-100.35 and the baseline JIT.
+The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-12](#re-measurement-2026-11-12) has the current numbers; [2026-11-11](#re-measurement-2026-11-11) has the ones before the security hardening, taken after TASK-100.16 to TASK-100.35 and the baseline JIT.
 
 ## Re-measurement, 2026-11-11
 
