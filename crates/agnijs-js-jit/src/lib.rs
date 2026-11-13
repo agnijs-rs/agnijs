@@ -50,7 +50,7 @@ mod calls;
 mod codegen;
 mod exec;
 
-pub use analysis::number_candidates;
+pub use analysis::{live_registers, number_candidates};
 pub mod handoff;
 
 pub use calls::{Callee, CalleeTable, GlobalSite, MAX_FILLS, MAX_GLOBAL_FILLS};

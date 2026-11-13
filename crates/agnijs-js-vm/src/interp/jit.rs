@@ -654,18 +654,43 @@ impl Vm {
     /// What to speculate about when compiling `code` for the frame whose
     /// window starts at `base`: the registers its loops do inline
     /// arithmetic on ([`agnijs_js_jit::number_candidates`]) that hold a
-    /// number now, or nothing yet (a local not assigned before the loop:
-    /// dead at the entry, so unguarded there), minus the guesses that have
-    /// failed before (`Tier::demoted`).
+    /// number now, or nothing yet, minus the guesses that have failed
+    /// before (`Tier::demoted`).
+    ///
+    /// "Nothing yet" is a local not assigned before the loop, and counts
+    /// only where the register is dead at the frame's pc
+    /// ([`agnijs_js_jit::live_registers`]): written before anything reads
+    /// it, a handler after a throw included, so compiled code takes it
+    /// without a guard. An unassigned register that is live there (a
+    /// `catch` block reads it, TASK-103.34) is not a number and would fail
+    /// the entry guard at once.
     fn jit_guess(&self, code: &CodeBlock, tier: &Tier, base: usize) -> Speculation {
         let mut numbers = agnijs_js_jit::number_candidates(code) & !tier.demoted.get();
         let mut rest = numbers;
+        // Asked for only when a candidate is unassigned.
+        let mut live = None;
         while rest != 0 {
             let r = rest.trailing_zeros();
             rest &= rest - 1;
-            match self.regs.get(base + r as usize) {
-                Some(Value::Number(_)) | Some(Value::Undefined) => {}
-                _ => numbers &= !(1u64 << r),
+            let keep = match self.regs.get(base + r as usize) {
+                Some(Value::Number(_)) => true,
+                Some(Value::Undefined) => {
+                    let live = *live.get_or_insert_with(|| {
+                        // The frame the block is compiled for is the top
+                        // one; for any other, every register counts as live.
+                        match self.frames.last() {
+                            Some(f) if f.base == base && std::ptr::eq(&*f.code, code) => {
+                                agnijs_js_jit::live_registers(code, f.pc)
+                            }
+                            _ => u64::MAX,
+                        }
+                    });
+                    live & (1u64 << r) == 0
+                }
+                _ => false,
+            };
+            if !keep {
+                numbers &= !(1u64 << r);
             }
         }
         Speculation { numbers }

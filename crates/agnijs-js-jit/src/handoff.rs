@@ -16,30 +16,37 @@
 //!   to hold a number when compiled code is entered).
 //! - Each point lists where every register whose current value is not in
 //!   the register file lives ([`Location`]): a spill slot of the compiled
-//!   frame, boxed or as an unboxed number. Registers not listed are current
-//!   in the file. The code generator fills the spill slots before the call
-//!   or the exit and stores the point's index and the spill area's address
-//!   in the context, so the runtime can read them while machine code waits.
+//!   frame, holding the value boxed. Registers not listed are current in
+//!   the file. The code generator fills the spill slots before the call or
+//!   the exit and stores the point's index and the spill area's address in
+//!   the context, so the runtime can read them while machine code waits.
 //! - A [`FrameState`] is what the runtime gets to write into the
 //!   interpreter frame: the listed registers' values, and for a side exit
 //!   the pc to continue at and the accumulator ([`SideExit`]).
 //!
 //! A collection under compiled frames traces every frame's spilled heap
 //! values through its handle (the collector never scans the native stack,
-//! ADR 0019 J6); numbers held unboxed are never heap values, so they are
-//! listed for deoptimization only.
+//! ADR 0019 J6).
+//!
+//! A register compiled code holds unboxed, on a guess that it is a number,
+//! is listed like any other, as a value: its payload under the tag it has
+//! (TASK-103.34). That tag is a number's once the register has been
+//! guarded or written. A register that is written before it is read is
+//! taken at an entry without a guard, and until the write it is still
+//! whatever the register file held, a heap value perhaps: the point says
+//! so, and a collection traces it. There is no location for "the bits of a
+//! number": nothing the runtime reads through a handle is boxed on the
+//! strength of a guess.
 
 /// Where a register's current value lives at a [`Point`], when not in the
 /// register file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Location {
     /// A boxed value (the 16 bytes of [`crate::layout`]) in the compiled
-    /// frame's spill area, at this byte offset.
+    /// frame's spill area, at this byte offset. Reading it allocates
+    /// nothing, so materialising a frame never reaches a safe point with
+    /// the state half written.
     Spill(i32),
-    /// An unboxed number (`f64` bits) in the spill area, at this offset.
-    /// Boxing it allocates nothing, so materialising a frame never reaches
-    /// a safe point with the state half written.
-    SpillNumber(i32),
 }
 
 /// What kind of point.
@@ -677,6 +684,98 @@ mod tests {
         assert_eq!(rt.regs[t], Val::Number(11.0));
         assert_eq!(rt.regs[t + 1], Val::Number(0.0));
         assert_eq!(rt.frames.len(), 0);
+    }
+
+    // TASK-103.34: a guessed register that is written before it is read
+    // is taken at an entry without a guard. Whatever it held then is its
+    // value until compiled code writes it, and that is what a point must
+    // say it holds: not the value's payload bytes boxed as a number.
+
+    /// What [`unguarded`] passes for `n`.
+    const N: f64 = 3.0;
+
+    /// A run of a function whose local `x` is guessed to hold a number,
+    /// is written before it is read, and is not yet written when `g()` is
+    /// first called. Every register but the parameters' holds a string of
+    /// its own at the entry (`Str(100 + r)`), as a register file may that
+    /// was used before. Returns the runtime after the run, what the first
+    /// call's point listed (a debugger's view of the registers held in
+    /// machine state), and how the run ended. `g` faults when `fault`.
+    fn unguarded(fault: bool) -> (Mock, Vec<(u16, Val)>, Exit) {
+        let code = function(
+            "function f(g, n) { var x; var y = 0; for (var i = 0; i < n; i++) { g(); x = i; y = x + 1; } return y; }",
+        );
+        let compiled = compile(&code, crate::number_candidates(&code));
+        let mut rt = Mock::new(&code);
+        let pb = code.param_base as usize;
+        for (r, v) in rt.regs.iter_mut().enumerate() {
+            *v = Val::Str(100 + r as u32);
+        }
+        rt.regs[pb] = Val::Str(1);
+        rt.regs[pb + 1] = Val::Number(N);
+        type Listed = Vec<(u16, Val)>;
+        let seen: Rc<RefCell<Vec<Listed>>> = Rc::default();
+        let s = seen.clone();
+        rt.native = Some(Box::new(move |m, _| {
+            let state = m.frames.last().expect("a compiled frame").state();
+            s.borrow_mut().push(state.regs);
+            m.fault = fault;
+            Val::Undefined
+        }));
+        let out = compiled.enter(&mut rt, 0, Val::Undefined);
+        let listed = seen.borrow().first().cloned().expect("`g` was called");
+        (rt, listed, out.exit)
+    }
+
+    /// The one register [`unguarded`]'s first call lists that is not a
+    /// number: `x`, with the string it held at the entry. Every other
+    /// listed register has been assigned by then: the zero of `y` and of
+    /// `i`, or the copy of `n`.
+    fn unassigned(listed: &[(u16, Val)]) -> u16 {
+        let mut x = None;
+        for &(r, v) in listed {
+            match v {
+                Val::Number(n) => assert!(
+                    n == 0.0 || n == N,
+                    "register {r} is listed as a number nothing assigned, {n:e}: {listed:?}"
+                ),
+                other => {
+                    assert_eq!(
+                        other,
+                        Val::Str(100 + u32::from(r)),
+                        "register {r}: {listed:?}"
+                    );
+                    assert_eq!(x.replace(r), None, "one register is unassigned: {listed:?}");
+                }
+            }
+        }
+        x.unwrap_or_else(|| panic!("`x` is held in machine state, unassigned: {listed:?}"))
+    }
+
+    #[test]
+    fn a_register_taken_unguarded_is_listed_with_the_value_it_had() {
+        let (_, listed, exit) = unguarded(false);
+        assert_eq!(exit, Exit::Return);
+        unassigned(&listed);
+    }
+
+    #[test]
+    fn a_fault_before_the_first_assignment_leaves_the_register_as_it_was() {
+        let (rt, listed, exit) = unguarded(true);
+        assert_eq!(exit, Exit::Fault);
+        let x = unassigned(&listed);
+        let (_, st) = rt.materialized.last().expect("materialised for the fault");
+        assert!(
+            st.regs.contains(&(x, Val::Str(100 + u32::from(x)))),
+            "{st:?}"
+        );
+        // The frame a handler would read: `x` as it was.
+        assert_eq!(
+            rt.regs[x as usize],
+            Val::Str(100 + u32::from(x)),
+            "{:?}",
+            rt.regs
+        );
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use agnijs_js_compiler::bytecode::{CodeBlock, Instr};
+use agnijs_js_compiler::bytecode::{CodeBlock, Constant, Instr};
 
 use crate::Speculation;
 
@@ -200,7 +200,45 @@ pub fn number_candidates(code: &CodeBlock) -> u64 {
     mask
 }
 
-/// The pcs an instruction may continue at.
+/// Whether the instruction never calls out of compiled code: its
+/// expansion is machine code alone, with no generic path behind a guard.
+/// (A jump among these still polls on a back-edge.)
+pub(crate) fn always_inline(code: &CodeBlock, instr: &Instr) -> bool {
+    match *instr {
+        Instr::LdaConst(c) => matches!(code.constants.get(c as usize), Some(Constant::Number(_))),
+        Instr::LdaUndefined
+        | Instr::LdaNull
+        | Instr::LdaTrue
+        | Instr::LdaFalse
+        | Instr::LdaEmpty
+        | Instr::LdaInt(_)
+        | Instr::Ldar(_)
+        | Instr::Star(_)
+        | Instr::Mov { .. }
+        | Instr::Nop
+        | Instr::LdaThis
+        | Instr::Jump(_)
+        | Instr::JumpIfNullish(_)
+        | Instr::JumpIfNotNullish(_)
+        | Instr::JumpIfUndefined(_)
+        | Instr::JumpIfNotUndefined(_)
+        | Instr::JumpIfEmpty(_)
+        | Instr::JumpIfNotEmpty(_)
+        | Instr::JumpIfObject(_)
+        | Instr::Return => true,
+        _ => false,
+    }
+}
+
+/// Whether running the instruction at `pc` may end in a throw that one of
+/// the block's own handlers catches: it reaches the runtime, by calling out
+/// or (a back-edge) by polling. Only what [`always_inline`] names and does
+/// not branch backwards cannot; every other instruction is assumed to.
+fn may_throw(code: &CodeBlock, instr: &Instr) -> bool {
+    !always_inline(code, instr) || branch_offset(instr).is_some_and(|off| off <= 0)
+}
+
+/// The pcs an instruction may continue at by normal control flow.
 fn successors(code: &CodeBlock, pc: usize) -> Vec<usize> {
     let instr = &code.instrs[pc];
     match *instr {
@@ -216,35 +254,43 @@ fn successors(code: &CodeBlock, pc: usize) -> Vec<usize> {
     }
 }
 
-/// For each pc, the cached registers (a bit per cache index) that may be
-/// read before written from there: what must hold its value when compiled
-/// code is entered or resumed at that pc. A generic instruction may read
-/// any register and is assumed to write none.
-pub(crate) fn liveness(code: &CodeBlock, index: &[Option<u8>], n: usize) -> Vec<u16> {
+/// For each pc, the registers (the bit `bit` gives each, `all` being every
+/// bit) that may be read before written from there, by any path: normal
+/// control flow, and a throw from an instruction inside a handler's range
+/// to that handler (TASK-103.34). A generic instruction may read any
+/// register and is assumed to write none.
+///
+/// The edge to a handler leaves from before the instruction: a throw
+/// happens before the instruction's own write, so that write does not make
+/// the register dead for the handler. Every handler whose range holds the
+/// instruction counts, not only the innermost, which is the one a throw
+/// goes to: more than is needed, never less.
+fn live_sets(code: &CodeBlock, bit: &dyn Fn(u16) -> u64, all: u64) -> Vec<u64> {
     let len = code.instrs.len();
-    let all: u16 = if n >= 16 { u16::MAX } else { (1u16 << n) - 1 };
-    let bit = |r: u16| -> u16 {
-        index
-            .get(r as usize)
-            .copied()
-            .flatten()
-            .map_or(0, |i| 1 << i)
-    };
-    let mut live_in = vec![0u16; len + 1];
+    let throws: Vec<bool> = code.instrs.iter().map(|i| may_throw(code, i)).collect();
+    let mut live_in = vec![0u64; len + 1];
     loop {
         let mut changed = false;
         for pc in (0..len).rev() {
             let instr = &code.instrs[pc];
-            let mut out = 0;
-            for s in successors(code, pc) {
-                out |= live_in.get(s).copied().unwrap_or(0);
-            }
             let new = match access(instr) {
                 Access::Any => all,
                 Access::Known(reads) => {
+                    let mut out = 0;
+                    for s in successors(code, pc) {
+                        out |= live_in.get(s).copied().unwrap_or(0);
+                    }
+                    let mut caught = 0;
+                    if throws[pc] {
+                        for h in &code.handlers {
+                            if h.start as usize <= pc && pc < h.end as usize {
+                                caught |= live_in.get(h.target as usize).copied().unwrap_or(0);
+                            }
+                        }
+                    }
                     let uses = reads.iter().fold(0, |m, &r| m | bit(r));
                     let def = written(instr).map_or(0, bit);
-                    uses | (out & !def)
+                    uses | (out & !def) | caught
                 }
             };
             if new != live_in[pc] {
@@ -255,6 +301,50 @@ pub(crate) fn liveness(code: &CodeBlock, index: &[Option<u8>], n: usize) -> Vec<
         if !changed {
             return live_in;
         }
+    }
+}
+
+/// For each pc, the cached registers (a bit per cache index) that may be
+/// read before written from there ([`live_sets`]): what must hold its value
+/// when compiled code is entered or resumed at that pc.
+pub(crate) fn liveness(code: &CodeBlock, index: &[Option<u8>], n: usize) -> Vec<u16> {
+    let all: u64 = if n >= 16 {
+        u64::from(u16::MAX)
+    } else {
+        (1u64 << n) - 1
+    };
+    let bit = |r: u16| -> u64 {
+        index
+            .get(r as usize)
+            .copied()
+            .flatten()
+            .map_or(0, |i| 1 << i)
+    };
+    live_sets(code, &bit, all)
+        .into_iter()
+        .map(|m| m as u16)
+        .collect()
+}
+
+/// The registers (below 64, a bit each) that may be read before written
+/// when `code` runs from `pc`, a handler's reads after a throw included:
+/// what holds a value that matters there. A runtime that guesses a register
+/// "holds a number or nothing yet" ([`Speculation::numbers`]) may count an
+/// unassigned one only when its bit is clear: it is written before anything
+/// reads it. A `pc` outside the block has every register live.
+pub fn live_registers(code: &CodeBlock, pc: usize) -> u64 {
+    let bit = |r: u16| -> u64 {
+        if r < 64 {
+            1 << r
+        } else {
+            0
+        }
+    };
+    let live = live_sets(code, &bit, u64::MAX);
+    if pc < code.instrs.len() {
+        live[pc]
+    } else {
+        u64::MAX
     }
 }
 
@@ -313,5 +403,90 @@ mod tests {
             .position(|i| matches!(i, Instr::JumpIfNotCmpRI { .. } | Instr::JumpIfCmpRI { .. } | Instr::JumpIfNotCmpRR { .. } | Instr::JumpIfCmpRR { .. }))
             .unwrap();
         assert_ne!(live[cmp] & bit, 0, "`s` is live at the loop head");
+    }
+
+    /// The liveness of `code` with every candidate guessed, and the cache
+    /// index of each register.
+    fn live_guessing(code: &CodeBlock) -> (Vec<u16>, Vec<Option<u8>>) {
+        let spec = Speculation {
+            numbers: number_candidates(code),
+        };
+        let cache = choose_cache(code, &spec);
+        let mut index = vec![None; code.register_count as usize];
+        for (i, &(r, _)) in cache.iter().enumerate() {
+            index[r as usize] = Some(i as u8);
+        }
+        (liveness(code, &index, cache.len()), index)
+    }
+
+    // TASK-103.34: the analysis followed normal control flow only, so a
+    // local every normal path writes before reading was dead even where a
+    // throw could take it, unwritten, to a handler that reads it.
+    #[test]
+    fn a_register_a_handler_reads_is_live_where_a_throw_can_come_from() {
+        let code = function(
+            "function f(n, o) { var x; var y = 0; try { for (var i = 0; i < n; i++) { o.p; x = i; y = x + 1; } } catch (e) { return x; } return y; }",
+        );
+        let (live, index) = live_guessing(&code);
+        let h = code.handlers[0];
+        let in_range = |pc: usize| h.start as usize <= pc && pc < h.end as usize;
+        // `x`: the first cached register the handler loads.
+        let x = (h.target as usize..code.instrs.len())
+            .find_map(|pc| match code.instrs[pc] {
+                Instr::Ldar(r) if index[r as usize].is_some() => Some(r),
+                _ => None,
+            })
+            .expect("the handler reads a cached register");
+        let bit = 1u16 << index[x as usize].unwrap();
+        let throws = code
+            .instrs
+            .iter()
+            .position(|i| matches!(i, Instr::GetNamed { .. }))
+            .expect("`o.p`");
+        assert!(in_range(throws));
+        let write = (throws..code.instrs.len())
+            .find(|&pc| written(&code.instrs[pc]) == Some(x))
+            .expect("`x = i` after the load");
+        assert!(in_range(write));
+        // On the normal path `x` is written before it is read (the
+        // instruction after the write does not need it from before)...
+        assert_eq!(live[write] & bit, 0, "`x` is dead at its own assignment");
+        // ...but the load can throw to the handler, which reads it: live
+        // there, and so at every entry before it, the function's start
+        // included.
+        assert_ne!(
+            live[throws] & bit,
+            0,
+            "`x` is live at the instruction that can throw"
+        );
+        assert_ne!(live[0] & bit, 0, "`x` is live at pc 0");
+    }
+
+    #[test]
+    fn an_instruction_that_cannot_throw_has_no_edge_to_its_handler() {
+        // `i` and `y` are assigned inside the `try` before anything in it
+        // can throw: the handler never sees them unassigned, so neither is
+        // live at the function's start, though the handler reads both.
+        let code = function(
+            "function f(n, o) { try { var y = 0; for (var i = 0; i < n; i++) { o.p; y = y + i; } } catch (e) { return y + i; } return y; }",
+        );
+        let (live, index) = live_guessing(&code);
+        let h = code.handlers[0];
+        let mut assigned = Vec::new();
+        for pc in h.start as usize..h.end as usize {
+            if matches!(code.instrs[pc], Instr::GetNamed { .. }) {
+                break;
+            }
+            assigned.extend(written(&code.instrs[pc]));
+        }
+        let cached: Vec<u16> = assigned
+            .into_iter()
+            .filter(|&r| index[r as usize].is_some())
+            .collect();
+        assert!(cached.len() >= 2, "`y` and `i`: {cached:?}");
+        for r in cached {
+            let bit = 1u16 << index[r as usize].unwrap();
+            assert_eq!(live[0] & bit, 0, "register {r} is dead at pc 0");
+        }
     }
 }

@@ -45,7 +45,9 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Switch, Variable};
 
-use crate::analysis::{access, branch_offset, choose_cache, liveness, written, Access};
+use crate::analysis::{
+    access, always_inline, branch_offset, choose_cache, liveness, written, Access,
+};
 use crate::calls::{GlobalSite, CALLEE, CALLEE_BITS, CALLEE_HASH, CALLEE_WAYS, GLOBAL};
 use crate::exec::{Offsets, EXIT_INTERP, EXIT_PANIC, EXIT_RETURN, NO_POINT};
 use crate::handoff::{Location, Point, PointKind, Points};
@@ -141,34 +143,6 @@ fn target(len: usize, pc: usize, off: i32) -> Result<usize, String> {
         return Err(format!("jump at {pc} leaves the block"));
     }
     Ok(t as usize)
-}
-
-/// Whether the instruction never calls out of compiled code.
-fn always_inline(code: &CodeBlock, instr: &Instr) -> bool {
-    match *instr {
-        Instr::LdaConst(c) => matches!(code.constants.get(c as usize), Some(Constant::Number(_))),
-        Instr::LdaUndefined
-        | Instr::LdaNull
-        | Instr::LdaTrue
-        | Instr::LdaFalse
-        | Instr::LdaEmpty
-        | Instr::LdaInt(_)
-        | Instr::Ldar(_)
-        | Instr::Star(_)
-        | Instr::Mov { .. }
-        | Instr::Nop
-        | Instr::LdaThis
-        | Instr::Jump(_)
-        | Instr::JumpIfNullish(_)
-        | Instr::JumpIfNotNullish(_)
-        | Instr::JumpIfUndefined(_)
-        | Instr::JumpIfNotUndefined(_)
-        | Instr::JumpIfEmpty(_)
-        | Instr::JumpIfNotEmpty(_)
-        | Instr::JumpIfObject(_)
-        | Instr::Return => true,
-        _ => false,
-    }
 }
 
 /// The entry pcs of a block: its start, the target of every back-edge
@@ -280,7 +254,10 @@ pub(crate) fn compile(
             .map(|&(reg, number)| Cached {
                 reg,
                 repr: if number {
-                    Repr::Number(b.declare_var(I64))
+                    Repr::Number {
+                        bits: b.declare_var(I64),
+                        tag: b.declare_var(I64),
+                    }
                 } else {
                     Repr::Boxed {
                         tag: b.declare_var(I64),
@@ -311,6 +288,7 @@ pub(crate) fn compile(
         b.switch_to_block(entry);
         let ctx = b.block_params(entry)[0];
         let sh = b.block_params(entry)[1];
+        let number_tag = b.ins().iconst(I64, TAG_NUMBER as i64);
         let mut lower = Lower {
             b,
             code,
@@ -318,6 +296,7 @@ pub(crate) fn compile(
             ptr,
             ctx,
             sh,
+            number_tag,
             calls: calls.map(|c| *c.layout),
             globals: calls.map_or(0, |c| c.globals.as_ptr() as usize),
             global: 0,
@@ -432,6 +411,7 @@ pub(crate) fn compile_thunk(
         b.switch_to_block(entry);
         let (ctx, sh) = (b.block_params(entry)[0], b.block_params(entry)[1]);
         let (ops, pc) = (b.block_params(entry)[2], b.block_params(entry)[3]);
+        let number_tag = b.ins().iconst(I64, TAG_NUMBER as i64);
         let mut lower = Lower {
             b,
             code,
@@ -439,6 +419,7 @@ pub(crate) fn compile_thunk(
             ptr,
             ctx,
             sh,
+            number_tag,
             calls: Some(*calls),
             globals: 0,
             global: 0,
@@ -479,11 +460,16 @@ enum Src {
     Imm(i32),
 }
 
-/// A value in two machine words; `tag` is `None` for an immediate number.
+/// A value in two machine words. `tag` is `None` for a value its readers
+/// take as a number without a test: an immediate, or a register speculated
+/// to hold one. `word` is then the tag word that goes with the payload
+/// wherever the value is stored and not computed with (`None`: plainly
+/// [`TAG_NUMBER`]); see [`Repr::Number`].
 #[derive(Clone, Copy)]
 struct Val {
     tag: Option<Ir>,
     pay: Ir,
+    word: Option<Ir>,
 }
 
 /// How a cached register is held.
@@ -491,8 +477,21 @@ struct Val {
 enum Repr {
     /// Tag word and payload word, as in the register file.
     Boxed { tag: Variable, pay: Variable },
-    /// The bits of an `f64`: the register was speculated to hold a number.
-    Number(Variable),
+    /// The register was speculated to hold a number: `bits` is the payload
+    /// word, which the instructions that compute with the register read as
+    /// an `f64` without a tag test. `tag` is the tag word that payload came
+    /// with: [`Lower::number_tag`] once the register has been guarded or
+    /// written, and until then the word loaded from the register file,
+    /// where the register was dead and so not guarded.
+    ///
+    /// The two together are always the register's value (TASK-103.34).
+    /// Whatever moves the value without computing with it (a spill at a
+    /// point, a write-back, a copy into another register or the
+    /// accumulator) moves both, so a register nothing has guarded yet
+    /// reaches the interpreter frame, a handler or a debugger as what it
+    /// held, never as that value's payload under a number's tag. The
+    /// liveness analysis only decides where a tag test may be skipped.
+    Number { bits: Variable, tag: Variable },
 }
 
 /// A register kept in machine state.
@@ -514,6 +513,11 @@ struct Lower<'a, 'c> {
     /// `exec::Shared`): the function's two arguments.
     ctx: Ir,
     sh: Ir,
+    /// The tag word of a number, as one value defined at the function's
+    /// start: the tag of every speculated register that has been guarded or
+    /// written ([`Repr::Number`]). One value, so that where every path
+    /// agrees on it the tag is a constant and costs nothing.
+    number_tag: Ir,
     /// The runtime's frame stack, for calls made in machine code.
     calls: Option<CallLayout>,
     /// The address of the block's first global site, and the index of the
@@ -615,9 +619,9 @@ impl Lower<'_, '_> {
     /// `pc`. A speculated register is guarded when it is live there: a
     /// non-number leaves through a point of `kind` (its guard being the
     /// register) at `pc`, nothing being dirty. One dead there is written
-    /// before read, so its payload is taken as it is (a non-number's shows
-    /// as a number only in a debugger's view of a variable not yet
-    /// assigned).
+    /// before anything reads it, on every path and after a throw too, so
+    /// no test is spent on it: it is taken as it is, tag word and payload,
+    /// and stays whatever it was until it is written ([`Repr::Number`]).
     fn load_cached(&mut self, pc: usize, kind: PointKind) {
         for i in 0..self.cached.len() {
             let c = self.cached[i];
@@ -627,8 +631,10 @@ impl Lower<'_, '_> {
                     self.b.def_var(tag, t);
                     self.b.def_var(pay, p);
                 }
-                Repr::Number(bits) => {
+                Repr::Number { bits, tag } => {
+                    let mut word = t;
                     if self.live_at(pc, i) {
+                        word = self.number_tag;
                         let kind = if matches!(kind, PointKind::Entry { .. }) {
                             PointKind::Entry { guard: c.reg }
                         } else {
@@ -642,6 +648,7 @@ impl Lower<'_, '_> {
                         self.b.switch_to_block(yes);
                     }
                     self.b.def_var(bits, p);
+                    self.b.def_var(tag, word);
                 }
             }
         }
@@ -660,6 +667,11 @@ impl Lower<'_, '_> {
     /// them (dead ones too: the frame the interpreter gets is complete, as
     /// a debugger expects it); store the point's id in the context.
     /// Returns the id.
+    ///
+    /// Every register is spilled as a value, tag word and payload. A
+    /// speculated one's tag is a number's only once it has been guarded or
+    /// written ([`Repr::Number`]); one taken unguarded is listed as what
+    /// the register file held, which is what it still holds.
     fn point(&mut self, pc: usize, kind: PointKind, dirty: Option<&Access>) -> u32 {
         let mut regs = Vec::new();
         for i in 0..self.cached.len() {
@@ -684,10 +696,19 @@ impl Lower<'_, '_> {
                     self.store_value(base, off, t, p);
                     regs.push((c.reg, Location::Spill(off)));
                 }
-                Repr::Number(bits) => {
-                    let v = self.b.use_var(bits);
-                    self.b.ins().store(flags(), v, base, off);
-                    regs.push((c.reg, Location::SpillNumber(off)));
+                Repr::Number { bits, tag } => {
+                    // Two plain stores: the tag is nearly always the
+                    // constant, and Rust reads a spill slot only when the
+                    // frame is materialised or traced, long after.
+                    let t = self.b.use_var(tag);
+                    let p = self.b.use_var(bits);
+                    self.b
+                        .ins()
+                        .store(flags(), t, base, off + TAG_OFFSET as i32);
+                    self.b
+                        .ins()
+                        .store(flags(), p, base, off + PAYLOAD_OFFSET as i32);
+                    regs.push((c.reg, Location::Spill(off)));
                 }
             }
         }
@@ -706,10 +727,7 @@ impl Lower<'_, '_> {
     fn write_back(&mut self, c: Cached) {
         let (t, p) = match c.repr {
             Repr::Boxed { tag, pay } => (self.b.use_var(tag), self.b.use_var(pay)),
-            Repr::Number(bits) => {
-                let t = self.b.ins().iconst(I64, TAG_NUMBER as i64);
-                (t, self.b.use_var(bits))
-            }
+            Repr::Number { bits, tag } => (self.b.use_var(tag), self.b.use_var(bits)),
         };
         self.store_file(c.reg, t, p);
     }
@@ -759,13 +777,15 @@ impl Lower<'_, '_> {
         self.store_value(regs, o, t, p);
     }
 
+    /// Register `r` as it is, tag word and payload.
     fn load_reg(&mut self, r: u16) -> (Ir, Ir) {
         let v = self.read_reg(r);
-        let t = match v.tag {
-            Some(t) => t,
-            None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
-        };
-        (t, v.pay)
+        (self.tag_word(v), v.pay)
+    }
+
+    /// The tag word to store with `v`: its own, or a number's.
+    fn tag_word(&mut self, v: Val) -> Ir {
+        v.tag.or(v.word).unwrap_or(self.number_tag)
     }
 
     /// Register `r` as a [`Val`]: without a tag when it is a speculated
@@ -775,32 +795,38 @@ impl Lower<'_, '_> {
             Some(Repr::Boxed { tag, pay }) => Val {
                 tag: Some(self.b.use_var(tag)),
                 pay: self.b.use_var(pay),
+                word: None,
             },
-            Some(Repr::Number(bits)) => Val {
+            Some(Repr::Number { bits, tag }) => Val {
                 tag: None,
                 pay: self.b.use_var(bits),
+                word: Some(self.b.use_var(tag)),
             },
             None => {
                 let (t, p) = self.load_file(r);
-                Val { tag: Some(t), pay: p }
+                Val {
+                    tag: Some(t),
+                    pay: p,
+                    word: None,
+                }
             }
         }
     }
 
     /// `r = v` by the instruction at `pc`: into a speculated register only
     /// a number goes; anything else is the guard failure that leaves at
-    /// `pc`, before the instruction.
+    /// `pc`, before the instruction. (A value taken as a number without a
+    /// test, another speculated register's, is copied with the tag word it
+    /// has.)
     fn store_reg(&mut self, pc: usize, r: u16, v: Val) {
         match self.cached(r).map(|c| c.repr) {
             Some(Repr::Boxed { tag, pay }) => {
-                let t = match v.tag {
-                    Some(t) => t,
-                    None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
-                };
+                let t = self.tag_word(v);
                 self.b.def_var(tag, t);
                 self.b.def_var(pay, v.pay);
             }
-            Some(Repr::Number(bits)) => {
+            Some(Repr::Number { bits, tag }) => {
+                let mut word = v.word.unwrap_or(self.number_tag);
                 if let Some(t) = v.tag {
                     let ok = self.is_tag(t, TAG_NUMBER);
                     let (yes, no) = self.guard(ok);
@@ -808,14 +834,13 @@ impl Lower<'_, '_> {
                     self.b.switch_to_block(no);
                     self.leave_at(pc, PointKind::Exit { guard: Some(r) }, true);
                     self.b.switch_to_block(yes);
+                    word = self.number_tag;
                 }
                 self.b.def_var(bits, v.pay);
+                self.b.def_var(tag, word);
             }
             None => {
-                let t = match v.tag {
-                    Some(t) => t,
-                    None => self.b.ins().iconst(I64, TAG_NUMBER as i64),
-                };
+                let t = self.tag_word(v);
                 self.store_file(r, t, v.pay);
             }
         }
@@ -863,12 +888,17 @@ impl Lower<'_, '_> {
         match s {
             Src::Acc => {
                 let (t, p) = self.acc();
-                Val { tag: Some(t), pay: p }
+                Val {
+                    tag: Some(t),
+                    pay: p,
+                    word: None,
+                }
             }
             Src::Reg(r) => self.read_reg(r),
             Src::Imm(i) => Val {
                 tag: None,
                 pay: self.b.ins().iconst(I64, (i as f64).to_bits() as i64),
+                word: None,
             },
         }
     }

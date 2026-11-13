@@ -1,6 +1,6 @@
 # Baseline JIT soundness review, November 2026
 
-A review of the baseline JIT (feature `jit`) for correctness and memory-safety defects, at commit `fea680f` (origin/main, 2026-11-13), on Windows 11 x64 with rustc 1.99.0. It found one wrong-result defect and two low-severity ones. They are filed as backlog tasks and not fixed here.
+A review of the baseline JIT (feature `jit`) for correctness and memory-safety defects, at commit `fea680f` (origin/main, 2026-11-13), on Windows 11 x64 with rustc 1.99.0. It found one wrong-result defect and two low-severity ones. They are filed as backlog tasks and not fixed here. (They were fixed afterwards, each under its task: the Status column says how. The rest of this document is the review as it was written.)
 
 Finding nothing in an area is not proof that the area is sound. The section [What was not reached](#what-was-not-reached) lists what this review did not cover.
 
@@ -8,7 +8,7 @@ Finding nothing in an area is not proof that the area is sound. The section [Wha
 
 | Task | Severity | Status | What |
 | --- | --- | --- | --- |
-| TASK-103.34 | High (wrong results; exposes stale memory bytes to script) | Confirmed: script reproduction from a clean build, in modes `on` and `force`; a red Rust test | A local not yet assigned reads as a garbage number in a `catch` handler after a throw inside a loop whose registers were speculated to be numbers. |
+| TASK-103.34 | High (wrong results; exposes stale memory bytes to script) | Confirmed: script reproduction from a clean build, in modes `on` and `force`; a red Rust test. **Fixed**: liveness has the edge from a throwing instruction to its handler, and a register taken unguarded is spilled and written back as the value it held, never as bits boxed as a number (`docs/design/jit-deopt-and-gc-maps.md`, section 8). The side-exit variant this review could not reproduce was reproduced and is covered too (`tests/jit_deopt.rs`). | A local not yet assigned reads as a garbage number in a `catch` handler after a throw inside a loop whose registers were speculated to be numbers. |
 | TASK-103.35 | Low | Confirmed with a Rust test against a toy runtime; not reachable from JavaScript without another bug | A panic in `Runtime::fast` or `Runtime::global` is swallowed by its trampoline; the instruction is re-run by the generic path and compiled code goes on. |
 | TASK-103.36 | Low | Latent: not reproduced, and argued unreachable today | The call thunk hands a directly called function's leftover pc to the caller's call site, which compares it with its own `pc + 1`. |
 

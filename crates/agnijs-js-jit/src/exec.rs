@@ -1028,7 +1028,9 @@ pub(crate) fn enter<V: JitValue, R: Runtime<V>>(
 // ---- the frame's state, read from the spill area ----------------------------
 
 /// The registers point `id` of `points` lists, read from the spill area
-/// of `ctx` (boxed values whole, numbers boxed by `V::number`).
+/// of `ctx`: each a value compiled code stored whole. Nothing here makes a
+/// value of bits (TASK-103.34): a register held unboxed is spilled with
+/// the tag it has.
 ///
 /// SAFETY: `ctx` must be the context of a machine frame that exists and
 /// has stored `id` (or `id` is the point it is about to leave at), with no
@@ -1045,14 +1047,12 @@ unsafe fn read_regs<V: JitValue>(ctx: *const Ctx<V>, points: &Points, id: u32) -
         .regs
         .iter()
         .map(|&(r, loc)| {
-            let v = match loc {
-                // SAFETY: the code generator wrote a value of `V`'s layout
-                // at the listed offset before storing the point.
-                Location::Spill(off) => ptr::read(spill.offset(off as isize) as *const V),
-                Location::SpillNumber(off) => {
-                    V::number(f64::from_bits(ptr::read(spill.offset(off as isize) as *const u64)))
-                }
-            };
+            let Location::Spill(off) = loc;
+            // SAFETY: the code generator wrote a value of `V`'s layout at
+            // the listed offset before storing the point: a tag word and a
+            // payload word it wrote together as a value of that layout, or
+            // loaded together from the register file.
+            let v = ptr::read(spill.offset(off as isize) as *const V);
             (r, v)
         })
         .collect()
@@ -1103,11 +1103,10 @@ impl<V: JitValue> FrameHandle<V> {
         // SAFETY: as in `point`.
         let spill = unsafe { (*self.ctx).spill };
         for &(_, loc) in &point.regs {
-            if let Location::Spill(off) = loc {
-                // SAFETY: the code generator wrote a value of `V`'s layout
-                // at the listed offset before storing the point.
-                f(unsafe { ptr::read(spill.offset(off as isize) as *const V) });
-            }
+            let Location::Spill(off) = loc;
+            // SAFETY: the code generator wrote a value of `V`'s layout at
+            // the listed offset before storing the point.
+            f(unsafe { ptr::read(spill.offset(off as isize) as *const V) });
         }
     }
 
@@ -1476,29 +1475,41 @@ mod tests {
                 Point {
                     pc: 3,
                     kind: PointKind::SafePoint { next: vec![4] },
-                    regs: vec![(2, Location::Spill(0)), (5, Location::SpillNumber(16))],
+                    regs: vec![
+                        (2, Location::Spill(0)),
+                        (5, Location::Spill(16)),
+                        (6, Location::Spill(32)),
+                    ],
                 },
                 Point {
                     pc: 7,
                     kind: PointKind::Exit { guard: Some(5) },
-                    regs: vec![(5, Location::SpillNumber(16))],
+                    regs: vec![(5, Location::Spill(16))],
                 },
             ],
         })
     }
 
-    /// A spill area as compiled code fills it: a boxed object at 0, the
-    /// bits of a number at 16. Typed fields rather than a byte buffer: a
+    /// A spill area as compiled code fills it, a value per slot: an object
+    /// at 0; at 16 a register held unboxed as a number, spilled under a
+    /// number's tag; at 32 another such register that compiled code took
+    /// without a guard and has not written, spilled as what the register
+    /// file held (TASK-103.34). Typed fields rather than a byte buffer: a
     /// `Val` has padding, and a byte array may not hold uninitialised bytes.
     #[repr(C, align(16))]
     struct Spill {
         obj: Val,
-        number_bits: u64,
+        number: Val,
+        unguarded: Val,
     }
 
     fn spill() -> Spill {
         const _: () = assert!(std::mem::size_of::<Val>() == 16);
-        Spill { obj: Val::Obj(42), number_bits: 2.5f64.to_bits() }
+        Spill {
+            obj: Val::Obj(42),
+            number: Val::Number(2.5),
+            unguarded: Val::Undefined,
+        }
     }
 
     #[test]
@@ -1510,10 +1521,21 @@ mod tests {
         assert_eq!(h.pc(), Some(3));
         let mut live = Vec::new();
         h.live(&mut |v| live.push(v));
-        assert_eq!(live, vec![Val::Obj(42)], "numbers are never heap values");
+        // Every listed value is offered to the collector, which knows a
+        // heap value when it sees one: the code generator cannot say which
+        // slot holds one.
+        assert_eq!(live, vec![Val::Obj(42), Val::Number(2.5), Val::Undefined]);
         let st = h.state();
         assert_eq!(st.point, 0);
-        assert_eq!(st.regs, vec![(2, Val::Obj(42)), (5, Val::Number(2.5))]);
+        assert_eq!(
+            st.regs,
+            vec![
+                (2, Val::Obj(42)),
+                (5, Val::Number(2.5)),
+                (6, Val::Undefined)
+            ],
+            "each as the value it is: nothing is boxed from bits"
+        );
         assert_eq!(st.exit, None);
     }
 
