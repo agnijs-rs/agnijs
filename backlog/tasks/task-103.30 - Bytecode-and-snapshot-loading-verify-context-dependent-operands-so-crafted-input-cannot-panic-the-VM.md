@@ -3,11 +3,11 @@ id: TASK-103.30
 title: >-
   Bytecode and snapshot loading: verify context-dependent operands so crafted
   input cannot panic the VM
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-12T06:25:00Z'
-updated_date: '2026-11-13T01:30:00Z'
+updated_date: '2026-11-13T02:34:00Z'
 labels:
   - ready-for-agent
   - security
@@ -27,9 +27,9 @@ Found by the security review (TASK-103.9, docs/security-model.md). ADR 0010 (M7 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Loading bytecode or a snapshot verifies every operand the interpreter or the JIT relies on (environment depth and slot, import slots, handler and generator state), or the interpreter checks it at run time, so that running any container that passes the loader cannot panic
-- [ ] #2 A fuzz test mutates bytecode and snapshots, reseals the checksum, and runs the result (with and without the jit feature) without a panic
-- [ ] #3 ADR 0010 and ADR 0022 record what is verified and what is still trusted
+- [x] #1 Loading bytecode or a snapshot verifies every operand the interpreter or the JIT relies on (environment depth and slot, import slots, handler and generator state), or the interpreter checks it at run time, so that running any container that passes the loader cannot panic
+- [x] #2 A fuzz test mutates bytecode and snapshots, reseals the checksum, and runs the result (with and without the jit feature) without a panic
+- [x] #3 ADR 0010 and ADR 0022 record what is verified and what is still trusted
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -67,3 +67,20 @@ Verification:
 - Seed 777, release, jit, 2000 iterations of each test in both modes: clean.
 - Miri: the script slice passed (2 cases).
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Crafted bytecode and snapshots that pass the loader can no longer panic the VM (commit 92243ac).
+
+Changes:
+- Decoder: verify_module checks module metadata (module scope, export names and slots, indirect export requests, namespace import and function declaration slots); a refused debug section is written as empty.
+- Interpreter: context-dependent operands are checked at run time and throw "internal error: invalid bytecode" (environment depth/slot, PopEnv/CopyEnv/ForInNext, private names, Yield/Await only in suspendable frames, async-from-sync iterator state); unwind_env_to no longer expects; modules.rs resolves exports and initializes environments without panicking.
+- handle_fault polls the host interrupt before routing a throw, so a crafted handler loop with no back-edge can be interrupted (found by the JIT fuzz).
+- New tests/bytecode_fuzz.rs: mutates script, module and snapshot code, reseals the checksum and runs it in the interpreter and (with jit) JitForce; a CI step runs it in release with jit.
+- ADR 0010 and ADR 0022 addenda and docs/security-model.md record what is verified, checked at run time, and still trusted (meaning, not safety).
+
+Verification: fuzz clean over 65k debug cases and 2000 release jit cases per test; GC-stress and Miri slices (script/module) pass; vm/compiler/capi suites and AGNIJS_JIT=force pass; test262 default, --precompile, --snapshot, --only-intl402, QuickJS-NG, jit tiered and GC-stress show 0 regressions; micro geomean 0.91-0.94 of base; CI run 43347239617 green.
+
+Risks / unmet: jit-force test262 shows Array/prototype/indexOf/resizable-buffer.js timing out, which also happens at base b82edfc on this machine; snapshot-startup load benchmark measured 1.05-1.08x on a very noisy machine while bundle-snapshot was faster, judged noise; Miri covers only 2 script and 2 module cases and skips the snapshot test (native function addresses are unstable under Miri).
+<!-- SECTION:FINAL_SUMMARY:END -->
