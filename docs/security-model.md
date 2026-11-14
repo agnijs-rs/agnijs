@@ -303,7 +303,7 @@ Every capability the host grants is attacker-reachable. Treat each host function
 - bound its work and its allocations, which the memory limit, fuel and interrupt do not see;
 - never let it return host internals.
 
-Module loading is a capability. `agnijs-js-resolve` implements Node's algorithm and does not confine paths: `../` and absolute specifiers resolve wherever they point (ADR 0023). Its package `exports` and `imports` targets are checked (`InvalidPackageTarget`), but confining loads to a directory is the host's job, in `Host::load_module`.
+Module loading is a capability. `agnijs-js-resolve` implements Node's algorithm and does not confine paths: `../` and absolute specifiers resolve wherever they point (ADR 0023). What stays inside a package is a bare specifier's subpath and the targets of its `exports` and `imports`: a `..` or `.` segment in any separator form (`/`, `\`, percent-encoded, or with the trailing dots and spaces Windows drops), a drive or stream colon, or a NUL is refused (`InvalidSpecifier`, `InvalidPackageTarget`), and every package path is checked again after it is joined to stay at or below the package directory (TASK-103.38). The check is lexical: a symlink inside the package is followed. Confining relative and absolute specifiers to a directory is the host's job, in `Host::load_module`.
 
 ### Bytecode and snapshots are trusted input
 

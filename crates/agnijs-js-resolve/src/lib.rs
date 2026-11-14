@@ -20,6 +20,16 @@
 //! Paths are strings with `/` separators. Results are never canonicalised
 //! through symlinks.
 //!
+//! A bare or `#` specifier never names a file outside the package it goes
+//! through: its subpath, and the `exports` and `imports` targets it picks,
+//! are refused if a segment is `.` or `..` or could be read as one. Both `/`
+//! and `\` separate segments on every platform; percent-encoded dots and
+//! separators, a `:`, and segments of only dots and spaces (which Windows
+//! reads as `.` or `..`) are refused too. The joined path is then checked to
+//! be inside the package directory. The check is lexical: a symlink inside
+//! the package that points out of it is followed, as in Node. Relative and
+//! absolute specifiers are not confined (ADR 0023).
+//!
 //! The [`ImportMap`] type is a second, independent resolver: WHATWG import
 //! maps over URLs (ADR 0025).
 
@@ -158,7 +168,7 @@ impl<F: FileSystem> Resolver<F> {
             return self.load_path(&path, specifier.ends_with('/')).ok_or_else(not_found);
         }
         if let Some(rest) = specifier.strip_prefix('#') {
-            if rest.is_empty() || rest.starts_with('/') {
+            if rest.is_empty() || rest.starts_with(['/', '\\']) {
                 return Err(invalid());
             }
             return self.resolve_import(specifier, dir);
@@ -299,7 +309,13 @@ impl<F: FileSystem> Resolver<F> {
             }
             return self.load_dir(pdir);
         }
-        self.load_path(&join(pdir, subpath), false)
+        let path = join(pdir, subpath);
+        // Backstop, as for exports targets: the checks in
+        // `parse_package_name` keep the subpath inside the package.
+        if !is_inside(&path, pdir) {
+            return None;
+        }
+        self.load_path(&path, false)
     }
 
     // ---- exports and imports ----
@@ -384,13 +400,16 @@ impl<F: FileSystem> Resolver<F> {
                     None => s.clone(),
                 };
                 if let Some(rest) = substituted.strip_prefix("./") {
-                    let bad = rest.split('/').any(|seg| {
-                        seg.is_empty() || seg == "." || seg == ".." || seg.eq_ignore_ascii_case("node_modules")
-                    });
-                    if bad {
+                    if !subpath_is_plain(rest, true) {
                         return Err(invalid(s.clone()));
                     }
-                    return Ok(Target::Found(join(pdir, &substituted)));
+                    let path = join(pdir, &substituted);
+                    // Backstop: whatever the checks above missed, a target
+                    // never names a file outside its package.
+                    if !is_inside(&path, pdir) {
+                        return Err(invalid(s.clone()));
+                    }
+                    return Ok(Target::Found(path));
                 }
                 let bare_ok = internal
                     && !substituted.starts_with("../")
@@ -494,11 +513,82 @@ fn parse_package_name(spec: &str) -> Option<(&str, String)> {
     if name.starts_with('@') && name.len() <= name.find('/')? + 1 {
         return None;
     }
-    let rest = &spec[name_end..];
-    if rest.split('/').skip(1).any(|s| s == "." || s == "..") {
+    // `@scope/..` would fold out of the scope directory.
+    if name.split('/').any(|seg| is_dot_segment(seg) || seg.contains(':')) {
         return None;
     }
+    let rest = &spec[name_end..];
+    if let Some(sub) = rest.strip_prefix('/') {
+        if !subpath_is_plain(sub, false) {
+            return None;
+        }
+    }
     Some((name, format!(".{rest}")))
+}
+
+/// A segment a file system could take as `.` or `..`: only dots and spaces,
+/// as Windows drops trailing dots and spaces from a name (`..`, `...`, `.. `).
+/// Empty counts too.
+fn is_dot_segment(seg: &str) -> bool {
+    seg.bytes().all(|b| b == b'.' || b == b' ')
+}
+
+/// `seg` with ASCII percent-escapes decoded, for the segment checks only: the
+/// resolver never decodes a path it opens, but a host that turns the result
+/// into a URL would.
+fn percent_decoded(seg: &str) -> std::borrow::Cow<'_, str> {
+    if !seg.contains('%') {
+        return seg.into();
+    }
+    let b = seg.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let (Some(h), Some(l)) = (hex(b[i + 1]), hex(b[i + 2])) {
+                let byte = (h * 16 + l) as u8;
+                if byte.is_ascii() {
+                    out.push(byte);
+                    i += 3;
+                    continue;
+                }
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned().into()
+}
+
+/// Whether the subpath `sub` (after the package name, or after a target's
+/// `./`) stays where it is put. Both `/` and `\` separate segments, as the
+/// path join treats them alike, on every platform. Refused: `.` and `..` and
+/// every name a file system could read as them, encoded separators, a `:`
+/// (a drive or a Windows stream), a NUL, and, when `strict` (targets, as
+/// Node does), empty and `node_modules` segments.
+fn subpath_is_plain(sub: &str, strict: bool) -> bool {
+    if sub.contains(':') || sub.contains('\0') {
+        return false;
+    }
+    sub.split(['/', '\\']).all(|raw| {
+        if raw.is_empty() {
+            return !strict;
+        }
+        let seg = percent_decoded(raw);
+        if seg.contains(['/', '\\', '\0', ':']) || is_dot_segment(&seg) {
+            return false;
+        }
+        let trimmed = seg.trim_end_matches(['.', ' ']);
+        !(strict && trimmed.eq_ignore_ascii_case("node_modules"))
+    })
+}
+
+/// Whether the normalized `path` is the directory `dir` or below it.
+fn is_inside(path: &str, dir: &str) -> bool {
+    let dir = normalize(dir);
+    let dir = dir.trim_end_matches('/');
+    path.strip_prefix(dir).is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
 }
 
 // ---- path strings ----

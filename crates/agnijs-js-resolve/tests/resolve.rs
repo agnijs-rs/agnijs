@@ -17,7 +17,7 @@
 //! node_modules/@scope/pkg      exports as a bare string
 //! ```
 
-use agnijs_js_resolve::{Options, ResolveError, Resolver, StdFs};
+use agnijs_js_resolve::{FileSystem, Options, ResolveError, Resolver, StdFs};
 
 fn root() -> String {
     format!("{}/tests/fixtures/project", env!("CARGO_MANIFEST_DIR")).replace('\\', "/")
@@ -146,6 +146,162 @@ fn exports_block_unlisted_and_null_targets() {
 fn exports_targets_may_not_climb_out_of_the_package() {
     let e = err("modern/escape", "src/main.js");
     assert!(matches!(e, ResolveError::InvalidPackageTarget { .. }), "{e:?}");
+    // The path join treats `\` as a separator, so the segment checks do too,
+    // on every platform; encoded dots and separators and Windows' trailing
+    // dots and spaces are refused the same way (TASK-103.38).
+    for spec in [
+        r"modern/sub/..\..\..\..\src/util",
+        r"modern/sub/..\..\x",
+        r"modern/sub/a\..\..\..\..\src/util",
+        "modern/sub/%2e%2e/%2e%2e/%2e%2e/%2e%2e/src/util",
+        "modern/sub/%2E./%2E./%2E./%2E./src/util",
+        "modern/sub/..%5c..%5c..%5c..%5csrc/util",
+        "modern/sub/..%2f..%2f..%2f..%2fsrc/util",
+        "modern/sub/.. /.. /.. /.. /src/util",
+        "modern/sub/..../x",
+        "modern/sub/NODE_MODULES./plain/other",
+        r"#internal/..\..\src/util",
+        r"#internal/..\..\..\x",
+        "#internal/%2e%2e/%2e%2e/src/util",
+        r"app/feature\..\x",
+    ] {
+        let e = err(spec, "src/main.js");
+        assert!(
+            matches!(
+                e,
+                ResolveError::InvalidPackageTarget { .. }
+                    | ResolveError::InvalidSpecifier { .. }
+                    | ResolveError::PackagePathNotExported { .. }
+            ),
+            "{spec}: {e:?}"
+        );
+    }
+}
+
+/// A file system where every path that is not a `package.json` is a file:
+/// whatever path the resolver builds, it gets back. Only the containment
+/// checks stand between a specifier and a file outside the package.
+struct EverythingIsAFile;
+
+impl FileSystem for EverythingIsAFile {
+    fn is_file(&self, path: &str) -> bool {
+        if path.ends_with("/package.json") {
+            StdFs.is_file(path)
+        } else {
+            !path.ends_with('/')
+        }
+    }
+    fn is_dir(&self, path: &str) -> bool {
+        StdFs.is_dir(path)
+    }
+    fn read_to_string(&self, path: &str) -> Option<String> {
+        StdFs.read_to_string(path)
+    }
+}
+
+/// A segment that a file system could take as `.` or `..` (or as
+/// `node_modules` when `node_modules` is set):
+/// after percent-decoding and dropping the trailing dots and spaces Windows
+/// ignores.
+fn sneaky_segment(seg: &str, node_modules: bool) -> bool {
+    let lower = seg
+        .to_ascii_lowercase()
+        .replace("%2e", ".")
+        .replace("%20", " ");
+    let t = lower.trim_end_matches(['.', ' ']);
+    t.is_empty() || (node_modules && t == "node_modules")
+}
+
+#[test]
+fn fuzzed_path_forms_never_leave_the_package() {
+    let r = Resolver::new(EverythingIsAFile, Options::default());
+    let root = root();
+    let from = format!("{root}/src/main.js");
+    // (specifier prefix, the directory every result must stay inside, whether
+    // it goes through exports or imports: a legacy package may hold its own
+    // node_modules)
+    let packages = [
+        ("modern/sub/", format!("{root}/node_modules/modern/"), true),
+        ("plain/", format!("{root}/node_modules/plain/"), false),
+        (
+            "@scope/pkg/",
+            format!("{root}/node_modules/@scope/pkg/"),
+            true,
+        ),
+        ("#internal/", format!("{root}/src/internal/"), true),
+        ("app/", format!("{root}/"), true),
+    ];
+    let pieces = [
+        "..",
+        ".",
+        "...",
+        ".. ",
+        ". ",
+        "%2e%2e",
+        "%2E.",
+        ".%2e",
+        "%2e",
+        "node_modules",
+        "NODE_MODULES.",
+        "node_modules ",
+        "C:",
+        "C:..",
+        "c:\\",
+        "\\\\srv\\share",
+        "\\\\?\\C:",
+        "//",
+        "%2f",
+        "%5c",
+        "%5C..",
+        "x",
+        "src",
+        "util",
+        "a",
+        "..:$DATA",
+        "",
+        " ",
+        "\u{0}",
+        "\u{e9}",
+    ];
+    let seps = ["/", "\\", "\\/", "/\\"];
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = |n: usize| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n as u64) as usize
+    };
+    let mut resolved = 0;
+    for _ in 0..30_000 {
+        let (prefix, inside, strict) = &packages[next(packages.len())];
+        let mut spec = prefix.to_string();
+        for i in 0..1 + next(5) {
+            if i > 0 {
+                spec.push_str(seps[next(seps.len())]);
+            }
+            spec.push_str(pieces[next(pieces.len())]);
+        }
+        let result = std::panic::catch_unwind(|| r.resolve(&spec, &from));
+        let Ok(result) = result else {
+            panic!("{spec:?} panicked")
+        };
+        let Ok(path) = result else { continue };
+        resolved += 1;
+        // The directory itself (`plain///` is the package root) is inside.
+        let rest = if path == inside.trim_end_matches('/') {
+            Some("")
+        } else {
+            path.strip_prefix(inside.as_str())
+        };
+        assert!(rest.is_some(), "{spec:?} resolved outside {inside}: {path}");
+        let rest = rest.unwrap();
+        assert!(
+            rest.is_empty() || !rest.split(['/', '\\']).any(|s| sneaky_segment(s, *strict)),
+            "{spec:?} resolved to {path}"
+        );
+        assert!(!rest.contains(':'), "{spec:?} resolved to {path}");
+    }
+    assert!(resolved > 1_000, "only {resolved} specifiers resolved");
 }
 
 #[test]
@@ -166,7 +322,24 @@ fn imports_map_hash_specifiers() {
 
 #[test]
 fn malformed_specifiers_are_invalid_not_panics() {
-    for spec in ["", "#", "@scope", "@/x", "plain/../x"] {
+    for spec in [
+        "",
+        "#",
+        "@scope",
+        "@/x",
+        "plain/../x",
+        r"plain/..\..\src/util",
+        r"plain/a\..\..\..\src/util",
+        r"plain\..\..\src/util",
+        "plain/%2e%2e/%2e%2e/src/util",
+        "plain/..%2f..%2fsrc/util",
+        "plain/.. /.. /src/util",
+        "plain/.../x",
+        "@scope/../plain/other",
+        r"@scope/..\plain/other",
+        "@../plain/other",
+        r"#internal/..\..\src/util",
+    ] {
         let e = resolver().resolve(spec, &format!("{}/src/main.js", root()));
         assert!(e.is_err(), "{spec:?} resolved to {e:?}");
     }
