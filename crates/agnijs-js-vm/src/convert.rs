@@ -580,48 +580,54 @@ impl Vm {
         let rn = self.to_numeric(r)?;
         match (ln, rn) {
             (Value::Number(a), Value::Number(b)) => Ok(Value::Number(number_arith(op, a, b))),
-            (Value::BigInt(a), Value::BigInt(b)) => {
-                let x = self.heap.bigint(a).0.clone();
-                let y = self.heap.bigint(b).0.clone();
-                // Products past the cap `<<` applies are refused up front,
-                // and the superlinear operations poll as they go
-                // (TASK-103.55).
-                let res = match op {
-                    ArithOp::Sub => x - y,
-                    ArithOp::Mul => {
-                        // A product has at least bits(x) + bits(y) - 1 bits.
-                        let bits = x.bits() + y.bits();
-                        if !x.is_zero() && !y.is_zero() && bits - 1 > crate::bigint::MAX_BITS + 1 {
-                            return Err(self.throw_range("Maximum BigInt size exceeded"));
-                        }
-                        self.check_memory(bits.div_ceil(8) as usize)?;
-                        crate::bigint::mul_polled(&x, &y, &mut |w| self.poll_work(w))?
-                    }
-                    ArithOp::Div | ArithOp::Mod => {
-                        if y.is_zero() {
-                            return Err(self.throw_range("Division by zero"));
-                        }
-                        let (q, r) = crate::bigint::div_rem_polled(&x, &y, &mut |w| self.poll_work(w))?;
-                        if op == ArithOp::Div { q } else { r }
-                    }
-                    ArithOp::Exp => {
-                        if y.is_negative() {
-                            return Err(self.throw_range("Exponent must be non-negative"));
-                        }
-                        let Some(bits) = crate::bigint::pow_bits(&x, &y) else {
-                            return Err(self.throw_range("Maximum BigInt size exceeded"));
-                        };
-                        self.check_memory(bits.div_ceil(8) as usize)?;
-                        crate::bigint::pow_polled(&x, &y, &mut |w| self.poll_work(w))?
-                    }
-                    _ => unreachable!(),
-                };
-                Ok(self.bigint_value(res))
-            }
+            (Value::BigInt(a), Value::BigInt(b)) => self.bigint_arith(op, a, b),
             _ => {
                 Err(self.throw_type("Cannot mix BigInt and other types, use explicit conversions"))
             }
         }
+    }
+
+    /// `-`, `*`, `/`, `%` and `**` on two BigInts. Out of line so that the
+    /// polled algorithms are not inlined into the dispatch loop with
+    /// `op_arith`.
+    #[cold]
+    #[inline(never)]
+    fn bigint_arith(&mut self, op: ArithOp, a: BigId, b: BigId) -> JsResult<Value> {
+        let x = self.heap.bigint(a).0.clone();
+        let y = self.heap.bigint(b).0.clone();
+        // Products past the cap `<<` applies are refused up front, and the
+        // superlinear operations poll as they go (TASK-103.55).
+        let res = match op {
+            ArithOp::Sub => x - y,
+            ArithOp::Mul => {
+                // A product has at least bits(x) + bits(y) - 1 bits.
+                let bits = x.bits() + y.bits();
+                if !x.is_zero() && !y.is_zero() && bits - 1 > crate::bigint::MAX_BITS + 1 {
+                    return Err(self.throw_range("Maximum BigInt size exceeded"));
+                }
+                self.check_memory(bits.div_ceil(8) as usize)?;
+                crate::bigint::mul_polled(&x, &y, &mut |w| self.poll_work(w))?
+            }
+            ArithOp::Div | ArithOp::Mod => {
+                if y.is_zero() {
+                    return Err(self.throw_range("Division by zero"));
+                }
+                let (q, r) = crate::bigint::div_rem_polled(&x, &y, &mut |w| self.poll_work(w))?;
+                if op == ArithOp::Div { q } else { r }
+            }
+            ArithOp::Exp => {
+                if y.is_negative() {
+                    return Err(self.throw_range("Exponent must be non-negative"));
+                }
+                let Some(bits) = crate::bigint::pow_bits(&x, &y) else {
+                    return Err(self.throw_range("Maximum BigInt size exceeded"));
+                };
+                self.check_memory(bits.div_ceil(8) as usize)?;
+                crate::bigint::pow_polled(&x, &y, &mut |w| self.poll_work(w))?
+            }
+            _ => unreachable!(),
+        };
+        Ok(self.bigint_value(res))
     }
 
     pub fn op_bitwise(&mut self, op: ArithOp, l: Value, r: Value) -> JsResult<Value> {
