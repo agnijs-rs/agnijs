@@ -83,7 +83,7 @@ Every exported function runs under `catch_unwind` (`ffi` in `crates/agnijs-capi/
 - refuses to build with `panic=abort` (`compile_error!` in `crates/agnijs-capi/src/lib.rs`);
 - denies `unwrap`, `expect`, indexing and slicing through Clippy.
 
-Ids are checked on every use, so a stale, foreign or forged id is refused and never dereferenced. Tests:
+Ids are checked on every use, so a stale, foreign or forged id is refused and never dereferenced. No two live engines share the tag their ids carry, so an id of another live engine is always refused, however many engines the process has made (TASK-103.40). An id kept past `agnijs_engine_free` is not guaranteed to stay foreign once its tag is reused, about a million engines later; it is then checked against the new engine's table like a forged id ([c-api.md](c-api.md)). Tests:
 
 - hostile inputs in `tests/hostile.rs`, for example `garbage_and_stale_ids_are_refused` and `misbehaving_host_functions_become_errors`;
 - panic injection in `tests/fault_injection.rs`;

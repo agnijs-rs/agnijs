@@ -1,11 +1,15 @@
 //! The per-engine table behind value and buffer ids.
 //!
-//! An id is 64 bits: `tag:16 | generation:16 | index:32`. The tag names the
-//! engine (so an id given to the wrong engine is caught), the generation
+//! An id is 64 bits: `tag:20 | generation:16 | index:28`. The tag names the
+//! engine (so an id given to the wrong engine is caught) and no two live
+//! engines share one (`crate::registry`, TASK-103.40). The generation
 //! changes every time a slot is freed (so a freed or stale id is caught),
 //! and a slot whose generation would wrap is retired instead of reused, so
 //! an old id can never alias a new value. Generation 0 marks realm ids and
 //! 0xFFFF class ids, so no value id is ever mistaken for one of those.
+//!
+//! The layout is private: the header only promises an opaque nonzero
+//! `uint64_t`, so changing it is not an ABI change.
 
 use crate::guard::{Fail, Res};
 use crate::types::*;
@@ -16,8 +20,12 @@ const GEN_FIRST: u16 = 1;
 const GEN_LAST: u16 = 0xFFFE;
 pub(crate) const GEN_REALM: u16 = 0;
 pub(crate) const GEN_CLASS: u16 = 0xFFFF;
+/// The largest engine tag; tags run from 1 to this.
+pub(crate) const TAG_MAX: u32 = (1 << 20) - 1;
+/// The largest slot index an id can carry.
+pub(crate) const INDEX_MAX: u32 = (1 << 28) - 1;
 /// The most slots one engine's table may hold.
-const MAX_SLOTS: usize = 1 << 31;
+const MAX_SLOTS: usize = 1 << 28;
 
 /// What an id refers to.
 pub enum Entry {
@@ -31,26 +39,28 @@ struct Slot {
 }
 
 pub struct Table {
-    tag: u16,
+    tag: u32,
     slots: Vec<Slot>,
     free: Vec<u32>,
     live: usize,
 }
 
 /// Split an id into (tag, generation, index).
-pub fn split(id: u64) -> (u16, u16, u32) {
-    let tag = u16::try_from(id >> 48).unwrap_or(0);
-    let generation = u16::try_from((id >> 32) & 0xFFFF).unwrap_or(0);
-    let index = u32::try_from(id & 0xFFFF_FFFF).unwrap_or(0);
+pub fn split(id: u64) -> (u32, u16, u32) {
+    let tag = u32::try_from(id >> 44).unwrap_or(0);
+    let generation = u16::try_from((id >> 28) & 0xFFFF).unwrap_or(0);
+    let index = u32::try_from(id & u64::from(INDEX_MAX)).unwrap_or(0);
     (tag, generation, index)
 }
 
-pub fn join(tag: u16, generation: u16, index: u32) -> u64 {
-    (u64::from(tag) << 48) | (u64::from(generation) << 32) | u64::from(index)
+/// Build an id. Each part is masked to its field, so no part can spill
+/// into another; callers keep `tag <= TAG_MAX` and `index <= INDEX_MAX`.
+pub fn join(tag: u32, generation: u16, index: u32) -> u64 {
+    (u64::from(tag & TAG_MAX) << 44) | (u64::from(generation) << 28) | u64::from(index & INDEX_MAX)
 }
 
 impl Table {
-    pub fn new(tag: u16) -> Table {
+    pub fn new(tag: u32) -> Table {
         Table { tag, slots: Vec::new(), free: Vec::new(), live: 0 }
     }
 

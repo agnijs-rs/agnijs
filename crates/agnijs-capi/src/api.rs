@@ -163,7 +163,7 @@ pub unsafe extern "C" fn agnijs_engine_new(options: *const AgnijsEngineOptions, 
                 ))
             }
         };
-        let (id, tag) = registry::next_engine_id();
+        let (id, tag) = registry::next_engine_id()?;
         let flag = Arc::new(AtomicBool::new(false));
         let host = Rc::new(CHost { engine: id, opts, interrupt_flag: flag.clone() });
         let mut engine = agnijs_js_vm::make_engine(host);

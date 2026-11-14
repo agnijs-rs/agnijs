@@ -33,12 +33,12 @@
 //! bounds how much native stack nested host calls can use.
 
 use crate::guard::{drop_payload, panic_message, Fail, Res};
-use crate::table::{join, split, Table, GEN_CLASS, GEN_REALM};
+use crate::table::{join, split, Table, GEN_CLASS, GEN_REALM, INDEX_MAX, TAG_MAX};
 use crate::types::*;
 use agnijs_engine_api as api;
 use agnijs_engine_api::Engine;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -53,7 +53,7 @@ struct Lent {
 /// One engine and everything the host holds in it.
 pub struct EngineState {
     pub id: AgnijsEngine,
-    pub tag: u16,
+    pub tag: u32,
     /// The ids the host holds. Declared before `engine` so it is dropped
     /// first.
     pub table: Table,
@@ -69,14 +69,23 @@ pub struct EngineState {
     pub classes: Vec<(api::HostClassId, AgnijsFinalizer)>,
     lent: Vec<Lent>,
     engine: Option<Box<dyn Engine>>,
+    /// Holds `tag` for this engine alone. Declared last so the tag is
+    /// released only after everything else is dropped.
+    _tag_lease: TagLease,
 }
 
 impl EngineState {
-    pub fn new(id: AgnijsEngine, tag: u16, engine: Box<dyn Engine>, max_reentrancy: u32, stack_budget: usize) -> EngineState {
+    pub fn new(
+        id: AgnijsEngine,
+        tag: TagLease,
+        engine: Box<dyn Engine>,
+        max_reentrancy: u32,
+        stack_budget: usize,
+    ) -> EngineState {
         EngineState {
             id,
-            tag,
-            table: Table::new(tag),
+            tag: tag.0,
+            table: Table::new(tag.0),
             exception: None,
             pending_throw: None,
             poisoned: false,
@@ -85,11 +94,18 @@ impl EngineState {
             classes: Vec::new(),
             lent: Vec::new(),
             engine: Some(engine),
+            _tag_lease: tag,
         }
     }
 
+    /// A realm id. (An engine cannot hold 2^28 realms, so the index always
+    /// fits; it saturates rather than wrap if it ever did not.)
     pub fn realm_id(&self, realm: api::RealmId) -> AgnijsRealm {
-        join(self.tag, GEN_REALM, realm.0.saturating_add(1))
+        join(
+            self.tag,
+            GEN_REALM,
+            realm.0.saturating_add(1).min(INDEX_MAX),
+        )
     }
 
     pub fn realm(&self, id: AgnijsRealm) -> Res<api::RealmId> {
@@ -104,7 +120,14 @@ impl EngineState {
     }
 
     pub fn class_id(&self, index: usize) -> AgnijsClass {
-        join(self.tag, GEN_CLASS, u32::try_from(index).unwrap_or(u32::MAX).saturating_add(1))
+        join(
+            self.tag,
+            GEN_CLASS,
+            u32::try_from(index)
+                .unwrap_or(u32::MAX)
+                .saturating_add(1)
+                .min(INDEX_MAX),
+        )
     }
 
     /// The class index behind a class id.
@@ -205,12 +228,56 @@ fn owners_remove(id: AgnijsEngine) {
     owners().remove(&id);
 }
 
-/// A fresh engine id (never reused) and its table tag.
-pub fn next_engine_id() -> (AgnijsEngine, u16) {
+/// The engine tags held by live engines, process-wide. Ids carry a 20-bit
+/// tag, not the 64-bit engine id, so the tag is what tells one engine's ids
+/// from another's: no two live engines may share one (TASK-103.40). The
+/// set is process-wide, not per thread, because an id can be passed to
+/// another thread's engine.
+static LIVE_TAGS: Mutex<BTreeSet<u32>> = Mutex::new(BTreeSet::new());
+
+fn live_tags() -> MutexGuard<'static, BTreeSet<u32>> {
+    match LIVE_TAGS.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+/// A tag in `1..=max` not in `live`, starting from the one the engine id
+/// `id` maps to (so tags still rotate through the whole space, and a freed
+/// engine's tag comes back as late as possible), and marks it live. `None`
+/// when every tag is live.
+fn take_tag(live: &mut BTreeSet<u32>, id: u64, max: u32) -> Option<u32> {
+    let start = id.wrapping_sub(1).checked_rem(u64::from(max)).unwrap_or(0);
+    let start = u32::try_from(start).unwrap_or(0);
+    for step in 0..max {
+        let tag = start
+            .wrapping_add(step)
+            .checked_rem(max)
+            .unwrap_or(0)
+            .wrapping_add(1);
+        if live.insert(tag) {
+            return Some(tag);
+        }
+    }
+    None
+}
+
+/// An engine tag held for one engine; dropping it frees the tag.
+pub struct TagLease(u32);
+
+impl Drop for TagLease {
+    fn drop(&mut self) {
+        live_tags().remove(&self.0);
+    }
+}
+
+/// A fresh engine id (never reused) and a tag no other live engine holds.
+/// `AGNIJS_ERR_LIMIT` when 2^20 - 1 engines are alive at once.
+pub fn next_engine_id() -> Res<(AgnijsEngine, TagLease)> {
     let id = NEXT_ENGINE.fetch_add(1, Ordering::Relaxed);
-    let tag = id.wrapping_sub(1).checked_rem(0xFFFF).unwrap_or(0);
-    let tag = u16::try_from(tag).unwrap_or(0).wrapping_add(1);
-    (id, tag)
+    let tag = take_tag(&mut live_tags(), id, TAG_MAX)
+        .ok_or_else(|| Fail::new(AGNIJS_ERR_LIMIT, "too many live engines; free some"))?;
+    Ok((id, TagLease(tag)))
 }
 
 /// Register a new engine on this thread.
@@ -438,4 +505,108 @@ pub fn engine_error(e: AgnijsEngine, err: api::Error) -> Fail {
 /// Map an engine result.
 pub fn eng<T>(e: AgnijsEngine, r: api::Result<T>) -> Res<T> {
     r.map_err(|err| engine_error(e, err))
+}
+
+/// Move the engine counter, so a test reaches the tag wrap without creating
+/// a million engines.
+#[cfg(test)]
+pub(crate) fn set_next_engine(n: AgnijsEngine) {
+    NEXT_ENGINE.store(n, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+    use crate::api::*;
+
+    fn engine() -> AgnijsEngine {
+        let o = AgnijsEngineOptions {
+            struct_size: u32::try_from(std::mem::size_of::<AgnijsEngineOptions>()).unwrap(),
+            ..AgnijsEngineOptions::default()
+        };
+        let mut e = 0;
+        // SAFETY: both pointers are to live locals.
+        assert_eq!(unsafe { agnijs_engine_new(&o, &mut e) }, AGNIJS_OK);
+        e
+    }
+
+    fn realm(e: AgnijsEngine) -> AgnijsRealm {
+        let mut r = 0;
+        // SAFETY: the out pointer is to a live local.
+        assert_eq!(unsafe { agnijs_engine_main_realm(e, &mut r) }, AGNIJS_OK);
+        r
+    }
+
+    fn number(e: AgnijsEngine, n: f64) -> AgnijsValue {
+        let mut v = 0;
+        // SAFETY: the out pointer is to a live local.
+        assert_eq!(unsafe { agnijs_new_number(e, n, &mut v) }, AGNIJS_OK);
+        v
+    }
+
+    fn get(e: AgnijsEngine, v: AgnijsValue) -> Result<f64, AgnijsStatus> {
+        let mut n = 0.0;
+        // SAFETY: the out pointer is to a live local.
+        match unsafe { agnijs_value_get_number(e, v, &mut n) } {
+            AGNIJS_OK => Ok(n),
+            st => Err(st),
+        }
+    }
+
+    /// TASK-103.40: engine tags used to repeat every 65,535 engines, and an
+    /// engine then took another live engine's ids for its own. The counter
+    /// is moved to each point where a 16-, 20- or 24-bit tag would repeat.
+    #[test]
+    fn ids_of_another_live_engine_are_refused_however_many_engines_were_made() {
+        let a = engine();
+        let ra = realm(a);
+        let va = number(a, 1111.0);
+        for k in [0xFFFF, 0x1_0000, 0xF_FFFF, 0x10_0000, 0xFF_FFFF, 0x100_0000] {
+            set_next_engine(a + k);
+            let b = engine();
+            let rb = realm(b);
+            let vb = number(b, 2222.0);
+            assert_ne!(ra, rb, "{k:#x}");
+            assert_eq!(get(b, va), Err(AGNIJS_ERR_WRONG_ENGINE), "{k:#x}");
+            assert_eq!(get(a, vb), Err(AGNIJS_ERR_WRONG_ENGINE), "{k:#x}");
+            assert_eq!(agnijs_value_free(b, va), AGNIJS_ERR_WRONG_ENGINE, "{k:#x}");
+            let mut g = 0;
+            assert_eq!(
+                // SAFETY: the out pointer is to a live local.
+                unsafe { agnijs_global_object(b, ra, &mut g) },
+                AGNIJS_ERR_WRONG_ENGINE,
+                "{k:#x}"
+            );
+            assert_eq!(get(b, vb), Ok(2222.0));
+            assert_eq!(agnijs_engine_free(b), AGNIJS_OK);
+        }
+        assert_eq!(get(a, va), Ok(1111.0));
+        assert_eq!(agnijs_engine_free(a), AGNIJS_OK);
+    }
+
+    #[test]
+    fn a_tag_is_never_handed_out_twice_while_held() {
+        let mut live = BTreeSet::new();
+        // Engine ids 1, 4 and 7 all map to tag 1 out of 3.
+        assert_eq!(take_tag(&mut live, 1, 3), Some(1));
+        assert_eq!(take_tag(&mut live, 4, 3), Some(2));
+        assert_eq!(take_tag(&mut live, 7, 3), Some(3));
+        assert_eq!(take_tag(&mut live, 10, 3), None);
+        live.remove(&2);
+        assert_eq!(take_tag(&mut live, 3, 3), Some(2));
+        assert_eq!(take_tag(&mut live, u64::MAX, 3), None);
+        live.clear();
+        assert_eq!(take_tag(&mut live, 0, 3), Some(1));
+    }
+
+    #[test]
+    fn ids_keep_their_parts_apart() {
+        use crate::table::{join, split};
+        let id = join(TAG_MAX, 0xABCD, INDEX_MAX);
+        assert_eq!(split(id), (TAG_MAX, 0xABCD, INDEX_MAX));
+        assert_eq!(split(join(1, 1, 1)), (1, 1, 1));
+        // Out-of-range parts are masked, never spilled into the tag.
+        assert_eq!(split(join(1, 1, u32::MAX)).0, 1);
+    }
 }
