@@ -56,6 +56,125 @@ fn put_u64(buf: &mut [u8], len: &mut usize, mut v: u64) {
     put(buf, len, &tmp[i..]);
 }
 
+/// The most digits a shortest round-tripping form of an f64 has.
+pub const SHORTEST_DIGITS_LEN: usize = 17;
+
+/// The shortest decimal digits that round-trip to `x` (finite, > 0), as
+/// ASCII in `digits[..k]`, with `x = d1.d2d3... * 10^exp`: returns
+/// `(k, exp)`. When two k-digit numbers round-trip and are equally close to
+/// `x`, the even one is taken (the specification's recommendation in
+/// Number::toString, and V8's choice; TASK-103.59).
+pub fn shortest_digits(x: f64, digits: &mut [u8; SHORTEST_DIGITS_LEN]) -> (usize, i32) {
+    // Rust's `{:e}` gives the shortest digits, rounding a tie up.
+    let mut sci = [0u8; NUMBER_BUF_LEN];
+    let mut w = StackWriter { buf: &mut sci, len: 0 };
+    core::fmt::write(&mut w, format_args!("{x:e}")).expect("an f64 in {:e} fits the buffer");
+    let sci_len = w.len;
+    let sci = &sci[..sci_len];
+    let e_at = sci.iter().position(|&c| c == b'e').expect("{:e} has an exponent");
+    let mut k = 0usize;
+    for &c in &sci[..e_at] {
+        if c != b'.' {
+            digits[k] = c;
+            k += 1;
+        }
+    }
+    let exp_text = core::str::from_utf8(&sci[e_at + 1..]).expect("ASCII");
+    let exp: i32 = exp_text.parse().expect("{:e} exponent is an integer");
+    // Only odd digits can need the even neighbour, and only an exact
+    // decimal of at most 18 digits can be a tie (see `exact_decimal`).
+    if digits[k - 1] % 2 == 1 {
+        if let Some((n, s)) = exact_decimal(x) {
+            break_tie_to_even(x, &mut digits[..k], exp, n, s);
+        }
+    }
+    (k, exp)
+}
+
+/// 5^0 to 5^25; 5^26 is over 10^18.
+const POW5: [u64; 26] = {
+    let mut t = [1u64; 26];
+    let mut i = 1;
+    while i < 26 {
+        t[i] = t[i - 1] * 5;
+        i += 1;
+    }
+    t
+};
+
+/// `x`'s (finite, > 0) exact value as `n * 10^q` when it has at most 18
+/// digits, the most a tie between two shortest candidates (17 digits at
+/// most) can have. With `x = m * 2^q` and `m` odd, the exact form is
+/// `(m * 5^-q) * 10^q` for `q < 0`. For `q >= 0` there is no tie: the two
+/// candidates would be `5 * 10^q` from `x`, more than the half-ulp
+/// (at most `2^(q-1)`) that still rounds back to `x`.
+#[inline]
+fn exact_decimal(x: f64) -> Option<(u64, i32)> {
+    let bits = x.to_bits();
+    let biased = ((bits >> 52) & 0x7ff) as i32;
+    let frac = bits & ((1 << 52) - 1);
+    let (m, q) = if biased == 0 { (frac, -1074) } else { (frac | (1 << 52), biased - 1075) };
+    let tz = m.trailing_zeros();
+    let (m, q) = (m >> tz, q + tz as i32);
+    if !(-25..0).contains(&q) {
+        return None;
+    }
+    let n = m.checked_mul(POW5[q.unsigned_abs() as usize])?;
+    (n < 1_000_000_000_000_000_000).then_some((n, q))
+}
+
+/// Digits `digits` (shortest for `x`, `x = d1.d2... * 10^exp`) are odd and
+/// `x = n * 10^s` exactly: if `x` lies halfway between the digits and the
+/// even neighbour that also has `digits.len()` digits, take the neighbour
+/// when it round-trips.
+#[cold]
+#[inline(never)]
+fn break_tie_to_even(x: f64, digits: &mut [u8], exp: i32, n: u64, s: i32) {
+    let k = digits.len();
+    // A tie: n has one digit more than the shortest form and ends in 5.
+    if n % 10 != 5 || decimal_len(n) != k + 1 || decimal_len(n) as i32 - 1 + s != exp {
+        return;
+    }
+    let value = digits.iter().fold(0u64, |v, &c| v * 10 + u64::from(c - b'0'));
+    let lower = n / 10;
+    let other = if value == lower {
+        lower + 1
+    } else if value == lower + 1 {
+        lower
+    } else {
+        return;
+    };
+    // The neighbour ends in 0 only past a carry; a shorter form would then
+    // round-trip and the shortest digits would not have k of them.
+    if other % 10 == 0 || decimal_len(other) != k {
+        return;
+    }
+    // Both are as far from x as each other, and the digits round-trip, so
+    // the neighbour does too unless x's rounding interval is lopsided: a
+    // power-of-two significand has the double below it twice as close.
+    // Then parse the neighbour back.
+    if x.to_bits() & ((1 << 52) - 1) == 0 && x.to_bits() >> 52 > 1 {
+        let mut text = [0u8; NUMBER_BUF_LEN];
+        let mut w = StackWriter { buf: &mut text, len: 0 };
+        core::fmt::write(&mut w, format_args!("{other}e{}", exp - (k as i32 - 1)))
+            .expect("the neighbour fits the buffer");
+        let len = w.len;
+        let parsed: f64 = core::str::from_utf8(&text[..len]).expect("ASCII").parse().expect("a decimal");
+        if parsed != x {
+            return;
+        }
+    }
+    let mut v = other;
+    for d in digits.iter_mut().rev() {
+        *d = b'0' + (v % 10) as u8;
+        v /= 10;
+    }
+}
+
+fn decimal_len(n: u64) -> usize {
+    n.checked_ilog10().map_or(1, |l| l as usize + 1)
+}
+
 fn format_into(x: f64, buf: &mut [u8; NUMBER_BUF_LEN]) -> usize {
     let mut len = 0;
     if x.is_nan() {
@@ -80,24 +199,9 @@ fn format_into(x: f64, buf: &mut [u8; NUMBER_BUF_LEN]) -> usize {
         put_u64(buf, &mut len, x as u64);
         return len;
     }
-    // Shortest round-tripping digits: Rust's `{:e}` gives them.
-    let mut sci = [0u8; NUMBER_BUF_LEN];
-    let mut w = StackWriter { buf: &mut sci, len: 0 };
-    core::fmt::write(&mut w, format_args!("{x:e}")).expect("an f64 in {:e} fits the buffer");
-    let sci_len = w.len;
-    let sci = &sci[..sci_len];
-    let e_at = sci.iter().position(|&c| c == b'e').expect("{:e} has an exponent");
-    let mut digits = [0u8; 20];
-    let mut k = 0usize;
-    for &c in &sci[..e_at] {
-        if c != b'.' {
-            digits[k] = c;
-            k += 1;
-        }
-    }
+    let mut digits = [0u8; SHORTEST_DIGITS_LEN];
+    let (k, exp) = shortest_digits(x, &mut digits);
     let digits = &digits[..k];
-    let exp_text = core::str::from_utf8(&sci[e_at + 1..]).expect("ASCII");
-    let exp: i32 = exp_text.parse().expect("{:e} exponent is an integer");
     let k = k as i32;
     let n = exp + 1; // position of the decimal point relative to digits
     if k <= n && n <= 21 {
@@ -152,6 +256,7 @@ mod tests {
         let (mantissa, exp) = sci.split_once('e').unwrap();
         let exp: i32 = exp.parse().unwrap();
         let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let digits = even_on_a_tie(x, digits, exp);
         let k = digits.len() as i32;
         let n = exp + 1;
         if k <= n && n <= 21 {
@@ -182,6 +287,34 @@ mod tests {
         }
     }
 
+    /// The tie rule worked out the slow way: `x`'s exact decimal expansion
+    /// (`{:.800e}` is exact for every f64) is the midpoint of two k-digit
+    /// numbers when it has k + 1 digits ending in 5; then the even one is
+    /// taken if it round-trips.
+    fn even_on_a_tie(x: f64, digits: String, exp: i32) -> String {
+        let exact = format!("{x:.800e}");
+        let (mantissa, exact_exp) = exact.split_once('e').unwrap();
+        let exact_digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+        let exact_digits = exact_digits.trim_end_matches('0');
+        if exact_exp.parse::<i32>().unwrap() != exp
+            || exact_digits.len() != digits.len() + 1
+            || !exact_digits.ends_with('5')
+        {
+            return digits;
+        }
+        let lower: u64 = exact_digits[..digits.len()].parse().unwrap();
+        for candidate in [lower, lower + 1] {
+            let text = candidate.to_string();
+            if candidate % 2 == 0 && text.len() == digits.len() {
+                let value: f64 = format!("{}.{}e{exp}", &text[..1], &text[1..]).parse().unwrap();
+                if value == x {
+                    return text;
+                }
+            }
+        }
+        digits
+    }
+
     #[test]
     fn matches_the_spec_examples() {
         assert_eq!(to_js_string(1.0), "1");
@@ -207,6 +340,34 @@ mod tests {
         assert_eq!(to_js_string(-0.0000012345), "-0.0000012345");
     }
 
+    /// An exact tie between two shortest candidates takes the even one, as
+    /// V8 does and the specification recommends (TASK-103.59). Expected
+    /// values are Node's.
+    #[test]
+    fn exact_ties_take_the_even_digit() {
+        let cases: &[(f64, &str)] = &[
+            (2f64.powi(-25), "2.9802322387695312e-8"),
+            (-(2f64.powi(-25)), "-2.9802322387695312e-8"),
+            (5.0 * 2f64.powi(-23), "5.960464477539062e-7"),
+            (9.0 * 2f64.powi(-23), "0.0000010728836059570312"),
+            // 2^-24 is a power of two: the even neighbour, ...062, is closer
+            // to the double below, so the odd ...063 is the only choice.
+            (2f64.powi(-24), "5.960464477539063e-8"),
+            (2f64.powi(-21), "4.76837158203125e-7"),
+            (2059402675471610.2, "2059402675471610.2"),
+            (-2221614920546122.2, "-2221614920546122.2"),
+            (901134.0629882812, "901134.0629882812"),
+            (-638993.1938476562, "-638993.1938476562"),
+            (0.023691177368164062, "0.023691177368164062"),
+            (1173.6775512695312, "1173.6775512695312"),
+            (-120696.92993164062, "-120696.92993164062"),
+            (0.00008440017700195312, "0.00008440017700195312"),
+        ];
+        for &(x, want) in cases {
+            assert_eq!(to_js_string(x), want, "{x:e} ({:#x})", x.to_bits());
+        }
+    }
+
     #[test]
     fn agrees_with_the_reference_on_many_values() {
         let mut edge = vec![
@@ -221,6 +382,14 @@ mod tests {
         }
         // Random bit patterns (an LCG) cover every exponent and mantissa.
         let mut s: u64 = 0x9E3779B97F4A7C15;
+        // Odd m times 2^-q: exact decimals of at most 18 digits, the only
+        // values with a tie between two shortest candidates.
+        for _ in 0..100_000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            let q = (s % 30) as i32;
+            let m = ((s >> 11) >> (s >> 58)) | 1;
+            edge.push(m as f64 * 2f64.powi(-q));
+        }
         for _ in 0..200_000 {
             s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             edge.push(f64::from_bits(s));

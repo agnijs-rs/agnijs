@@ -348,12 +348,12 @@ fn exponent_digits(x: f64, f: i32) -> (String, i32) {
 }
 
 /// Shortest round-trip digits of `x` (finite, > 0): (digits, e) with
-/// x = 0.d1d2... * 10^(e+1), i.e. d1.d2d3... * 10^e.
+/// x = 0.d1d2... * 10^(e+1), i.e. d1.d2d3... * 10^e. A tie takes the even
+/// digit, as Number::toString does.
 fn shortest_digits(x: f64) -> (String, i32) {
-    let s = format!("{x:e}");
-    let (mant, exp) = s.split_once('e').unwrap();
-    let e: i32 = exp.parse().unwrap();
-    let digits: String = mant.chars().filter(|c| *c != '.').collect();
+    let mut digits = [0u8; agnijs_js_parser::number::SHORTEST_DIGITS_LEN];
+    let (k, e) = agnijs_js_parser::number::shortest_digits(x, &mut digits);
+    let digits = core::str::from_utf8(&digits[..k]).expect("digits are ASCII").to_owned();
     (digits, e)
 }
 
