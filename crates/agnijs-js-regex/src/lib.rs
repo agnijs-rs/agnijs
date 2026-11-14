@@ -152,9 +152,26 @@ struct Program {
     linear: Result<linear::Linear, &'static str>,
 }
 
+impl Program {
+    fn heap_bytes(&self) -> usize {
+        let names: usize = self
+            .names
+            .iter()
+            .map(|n| std::mem::size_of_val(n) + n.as_ref().map_or(0, String::len))
+            .sum();
+        #[cfg(feature = "linear")]
+        let linear = self.linear.as_ref().map_or(0, linear::Linear::heap_bytes);
+        #[cfg(not(feature = "linear"))]
+        let linear = 0;
+        std::mem::size_of::<Program>() + names + self.backtrack.heap_bytes() + linear
+    }
+}
+
 /// A compiled pattern under a matcher mode, with its working memory.
 pub struct Regex {
     program: Arc<Program>,
+    /// What [`Regex::heap_bytes`] reports, measured once.
+    bytes: usize,
     mode: MatcherMode,
     bt_scratch: RefCell<backtrack::Scratch>,
     #[cfg(feature = "linear")]
@@ -236,12 +253,21 @@ impl Regex {
 
     fn from_program(program: Arc<Program>, mode: MatcherMode) -> Regex {
         Regex {
+            bytes: program.heap_bytes(),
             program,
             mode,
             bt_scratch: RefCell::new(backtrack::Scratch::default()),
             #[cfg(feature = "linear")]
             lin_scratch: RefCell::new(None),
         }
+    }
+
+    /// The bytes the compiled program holds: its instructions, character
+    /// sets, literals and group names, so an embedder can count them
+    /// towards a memory limit (TASK-103.52). The scratch space a search
+    /// grows is not included.
+    pub fn heap_bytes(&self) -> usize {
+        self.bytes
     }
 
     /// Whether every alternative of the pattern begins with a `^` that the

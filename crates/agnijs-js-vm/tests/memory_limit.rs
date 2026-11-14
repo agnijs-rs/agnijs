@@ -362,9 +362,8 @@ fn payload_may_be_uncounted(class: &agnijs_js_vm::object::Class) -> bool {
     match class {
         // Counted: the program chooses how much these hold.
         ArrayBuffer(_) | Map(_) | Set(_) | WeakMap(_) | WeakSet(_) | FinalizationRegistry(_)
-        | DisposableStack(_) | Bound(_) | Generator(_) | Error(Some(_)) | ForIn(_) | Promise(_) => {
-            false
-        }
+        | DisposableStack(_) | Bound(_) | Generator(_) | Error(Some(_)) | ForIn(_) | Promise(_)
+        | RegExp(_) => false,
         // A fixed amount per object, or a payload that refers to values
         // counted on their own (strings, buffers, other objects).
         Ordinary | Array(_) | Function(_) | Error(None) | Boolean(_) | Number(_) | String(_)
@@ -372,10 +371,9 @@ fn payload_may_be_uncounted(class: &agnijs_js_vm::object::Class) -> bool {
         | MapIterator(_) | SetIterator(_) | WeakRef(_) | TypedArray(_) | DataView(_) | Proxy(_)
         | AsyncFromSyncIterator(_) | RegExpStringIterator(_) | IteratorHelper(_)
         | WrapForValidIterator(_) | RawJSON | CallSite(_) => true,
-        // The engine's own data: natives are made by the realm, regex
-        // programs are compiled code (TASK-103.52), and modules and their
-        // namespaces come from the host's loader.
-        Native(_) | RegExp(_) | Namespace(_) | Module(_) => true,
+        // The engine's own data: natives are made by the realm, and
+        // modules and their namespaces come from the host's loader.
+        Native(_) | Namespace(_) | Module(_) => true,
         // The host owns its objects' data and ICU4X its formatters.
         Host(_) => true,
         #[cfg(feature = "intl")]
@@ -400,11 +398,12 @@ fn every_growable_payload_is_counted() {
          const o = { a: 1, b: 2 };
          function* walk() { for (const k in o) yield k; }
          const w = walk(); w.next(); keep.push(w);
+         keep.push(/a(b)c/);
          undefined",
     )
     .unwrap();
     vm.collect_garbage();
-    // Each of the twelve counted classes has a probe above whose payload
+    // Each of the thirteen counted classes has a probe above whose payload
     // is not empty, and it reports bytes.
     let mut reported = std::collections::HashSet::new();
     for (_, o) in vm.heap.objects.iter() {
@@ -412,7 +411,34 @@ fn every_growable_payload_is_counted() {
             reported.insert(std::mem::discriminant(&o.class));
         }
     }
-    assert_eq!(reported.len(), 12);
+    assert_eq!(reported.len(), 13);
+}
+
+// ---- compiled regular expressions -------------------------------------------------------------
+
+/// The probe from the review (TASK-103.52): a script that compiles many
+/// large distinct patterns. Those it keeps count towards the limit; those
+/// it drops are not kept by the compile cache, which is bounded by bytes.
+/// `agnijs-js-bench/tests/memory_limit_peak.rs` checks what the process
+/// allocates for the same scripts.
+#[test]
+#[cfg_attr(miri, ignore = "thousands of compiles are too slow under Miri")]
+fn compiled_regexps_count_towards_the_limit() {
+    let mut vm = limited(16 * MIB);
+    out_of_memory(
+        &mut vm,
+        "const keep = [], src = '(a)'.repeat(3000);
+         for (let i = 0; i < 1000; i++) keep.push(new RegExp('x' + i + src)); keep.length",
+    );
+    // A pattern whose compile alone could not fit is refused before it
+    // starts.
+    out_of_memory(&mut vm, "new RegExp('(a)'.repeat(2e6)).source.length");
+    let dropped = eval(
+        &mut vm,
+        "const src = '(a)'.repeat(2500); for (let i = 0; i < 300; i++) new RegExp('x' + i + src); 0",
+    );
+    assert!(matches!(dropped, Ok(Value::Number(n)) if n == 0.0), "{dropped:?}");
+    assert!(vm.regex_cache.bytes() <= 4 << 20, "{}", vm.regex_cache.bytes());
 }
 
 // ---- native loops -----------------------------------------------------------------------------

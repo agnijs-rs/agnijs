@@ -370,6 +370,16 @@ fn last_char(units: &[u16], unicode: bool) -> u32 {
 }
 
 impl Prog {
+    /// The bytes the program's tables hold (TASK-103.52).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use std::mem::size_of_val;
+        size_of_val(&*self.insts)
+            + self.sets.iter().map(SetMatcher::heap_bytes).sum::<usize>()
+            + size_of_val(&*self.lits)
+            + size_of_val(&*self.loops)
+            + self.refs.iter().map(|r| size_of_val(r) + size_of_val(&**r)).sum::<usize>()
+    }
+
     pub(crate) fn compile(p: &Pattern) -> Prog {
         let mut c = Compiler {
             insts: Vec::new(),

@@ -316,6 +316,15 @@ fn is_lt(u: u32) -> bool {
 }
 
 impl Linear {
+    /// The bytes the program's tables hold (TASK-103.52).
+    pub(crate) fn heap_bytes(&self) -> usize {
+        use std::mem::size_of_val;
+        size_of_val(&*self.prog)
+            + self.sets.iter().map(SetMatcher::heap_bytes).sum::<usize>()
+            + self.first.as_ref().map_or(0, |f| size_of_val(&**f))
+            + size_of_val(&*self.relevant)
+    }
+
     /// Compile the parsed pattern, or say why it is not eligible.
     pub(crate) fn compile(p: &Pattern) -> Result<Linear, Ineligible> {
         let mut sets = Vec::new();

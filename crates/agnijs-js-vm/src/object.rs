@@ -494,6 +494,9 @@ impl Class {
             Class::Error(Some(s)) => s.frames.len() * size_of::<crate::stack_trace::CapturedFrame>(),
             Class::ForIn(f) => (f.keys.len() + f.visited.len()) * size_of::<PropKey>(),
             Class::Promise(p) => p.reactions.bytes(),
+            // Shared with every RegExp of the same source and flags, and
+            // with the compile cache; each counts it (TASK-103.52).
+            Class::RegExp(r) => r.matcher.heap_bytes(),
             _ => 0,
         }
     }

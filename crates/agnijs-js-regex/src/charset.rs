@@ -157,6 +157,11 @@ pub(crate) struct SetMatcher {
 }
 
 impl SetMatcher {
+    /// The bytes this matcher holds, itself included.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<SetMatcher>() + std::mem::size_of_val(&*self.high)
+    }
+
     pub(crate) fn new(set: &CharSet) -> SetMatcher {
         let mut latin1 = [0u64; 4];
         let mut high = Vec::new();

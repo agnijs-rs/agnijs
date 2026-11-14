@@ -42,6 +42,19 @@ pub struct RegExpIterState {
 }
 
 const CACHE_LIMIT: usize = 1024;
+/// What the cache may hold, in programs and patterns, before it starts
+/// again (TASK-103.52). Nothing the cache alone keeps counts towards the
+/// memory limit, so this is a fixed allowance like the engine's tables.
+const CACHE_BYTES: usize = 4 << 20;
+/// A larger entry is not cached: the RegExp objects that share it count
+/// it themselves, and a program this size costs far more to compile than
+/// the lookup saves.
+const CACHE_ENTRY_MAX: usize = 256 << 10;
+/// Bytes a compile is assumed to need for each unit of its pattern,
+/// checked against the memory limit first: a program is about 28 bytes per
+/// unit of a pattern like `(a)(a)`, and the parse that builds it more
+/// (TASK-103.52).
+const COMPILE_BYTES_PER_UNIT: usize = 32;
 
 /// Compiled matchers by (pattern, flags). A lookup hashes the pattern's
 /// code units in place, so a hit allocates nothing whatever the string's
@@ -49,6 +62,8 @@ const CACHE_LIMIT: usize = 1024;
 #[derive(Default)]
 pub struct RegexCache {
     table: hashbrown::HashTable<CacheEntry>,
+    /// The bytes of the cached programs and patterns.
+    bytes: usize,
 }
 
 struct CacheEntry {
@@ -71,9 +86,15 @@ impl RegexCache {
     }
 
     fn insert(&mut self, pattern: Vec<u16>, flags: u8, re: Rc<Regex>) {
-        if self.table.len() >= CACHE_LIMIT {
-            self.table.clear();
+        let cost = std::mem::size_of::<CacheEntry>() + std::mem::size_of_val(&*pattern) + re.heap_bytes();
+        if cost > CACHE_ENTRY_MAX {
+            return;
         }
+        if self.table.len() >= CACHE_LIMIT || self.bytes + cost > CACHE_BYTES {
+            self.table.clear();
+            self.bytes = 0;
+        }
+        self.bytes += cost;
         let hash = Self::hash(&Units::Two(&pattern), flags);
         self.table.insert_unique(hash, CacheEntry { pattern, flags, hash, re }, |e| e.hash);
     }
@@ -93,6 +114,12 @@ impl RegexCache {
 
     pub fn is_empty(&self) -> bool {
         self.table.is_empty()
+    }
+
+    /// The bytes of the cached programs and patterns, at most
+    /// `CACHE_BYTES`.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 }
 
@@ -134,6 +161,7 @@ pub(crate) fn compile(vm: &mut Vm, pattern: StrId, flags: StrId) -> JsResult<(Rc
         return Ok((r.clone(), parsed));
     }
     let p_units = vm.heap.units(pattern).to_vec();
+    vm.check_memory(p_units.len().saturating_mul(COMPILE_BYTES_PER_UNIT))?;
     let re = match Regex::compile_with(&p_units, &parsed, vm.regex_mode) {
         Ok(r) => Rc::new(r),
         Err(msg) => return vm.syntax_error(&msg),
@@ -183,15 +211,19 @@ fn regexp_initialize(vm: &mut Vm, obj: ObjId, pattern: Value, flags: Value) -> J
         vm.to_string(flags)?
     };
     let (matcher, parsed) = compile(vm, p, f)?;
-    match &mut vm.heap.obj_mut(obj).class {
+    // The object counts its program (Class::payload_bytes, TASK-103.52).
+    let grown = match &mut vm.heap.obj_mut(obj).class {
         Class::RegExp(d) => {
+            let grown = matcher.heap_bytes().saturating_sub(d.matcher.heap_bytes());
             d.source = p;
             d.flags = f;
             d.matcher = matcher;
             d.parsed = parsed;
+            grown
         }
         _ => unreachable!("RegExpInitialize on a non-RegExp"),
-    }
+    };
+    vm.heap.note_growth(grown);
     let key = PropKey::Str(vm.names.lastIndex);
     vm.set(obj, key, Value::Number(0.0), true)?;
     Ok(Value::Object(obj))

@@ -274,3 +274,54 @@ fn html_methods_and_big_int_to_string_check_the_memory_before_building() {
     let peak = peak_while_refused("const b = 1n << (1n << 26n); b.toString(2).length");
     assert!(peak < BOUND, "BigInt: peak {} MiB", peak / MIB);
 }
+
+// ---- compiled regular expressions (TASK-103.52) ----------------------------------------------
+//
+// A compiled program is about 28 bytes per unit of a pattern like `(a)`.
+// Programs a script holds count towards the limit, the compile cache is
+// bounded by bytes, and a compile is refused when its pattern alone could
+// not fit. Before TASK-103.52 the cache kept 1,024 programs of any size:
+// the first two scenarios here held 250 MiB and more.
+
+/// The bytes this thread allocated, at their peak, while `src` ran under a
+/// 16 MiB limit, and what `src` returned.
+fn peak_under_limit(src: &str) -> (Result<agnijs_engine_api::Value, Error>, usize) {
+    let mut vm = Vm::new(TestHost::new());
+    vm.heap.stress = false;
+    vm.collect_garbage();
+    let used = vm.memory_usage().heap_bytes;
+    vm.set_memory_limit(Some(used + 16 * MIB));
+    let realm = vm.main_realm();
+    let before = HELD.with(Cell::get);
+    PEAK.with(|p| p.set(before));
+    let r = vm.eval_script(realm, "t.js", src);
+    let peak = PEAK.with(Cell::get) - before;
+    (r, peak.max(0) as usize)
+}
+
+#[test]
+fn regexps_the_script_drops_are_not_kept_by_the_cache() {
+    // 210 KB programs, under what the cache keeps, then 420 KB ones,
+    // which it does not keep.
+    for n in [2500, 5000] {
+        let (r, peak) = peak_under_limit(&format!(
+            "const src = '(a)'.repeat({n}); for (let i = 0; i < 1000; i++) new RegExp('x' + i + src); 0"
+        ));
+        assert!(r.is_ok(), "{n}: {r:?}");
+        assert!(peak < BOUND, "{n}: peak {} MiB", peak / MIB);
+    }
+}
+
+#[test]
+fn regexps_the_script_keeps_count_towards_the_limit() {
+    let src = "const keep = [], src = '(a)'.repeat(3000);
+               for (let i = 0; i < 1000; i++) keep.push(new RegExp('x' + i + src)); keep.length";
+    let peak = peak_while_refused(src);
+    assert!(peak < BOUND, "peak {} MiB", peak / MIB);
+}
+
+#[test]
+fn a_pattern_too_large_to_compile_under_the_limit_is_refused() {
+    let peak = peak_while_refused("new RegExp('(a)'.repeat(2e6)).source.length");
+    assert!(peak < BOUND, "peak {} MiB", peak / MIB);
+}
