@@ -153,7 +153,7 @@ fn string_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let v = a.arg(0);
         if !a.is_construct() {
             if let Value::Symbol(sym) = v {
-                return Ok(super::symbol::symbol_descriptive_string(vm, sym));
+                return super::symbol::symbol_descriptive_string(vm, sym);
             }
         }
         vm.to_string(v)?
@@ -1311,11 +1311,24 @@ fn create_html(vm: &mut Vm, a: &CallArgs, tag: &str, attribute: Option<&str>) ->
         ));
     }
     let s = vm.to_string(a.this)?;
-    let mut b = StrBuilder::new();
+    let value = match attribute {
+        Some(_) => {
+            let v = vm.to_string(a.arg(0))?;
+            Some(units_of(vm, v))
+        }
+        None => None,
+    };
+    // The length is known before the string is built (TASK-103.54): each
+    // `"` in the value becomes the six units of `&quot;`.
+    let mut len = 2 * tag.len() + 5 + vm.heap.str_len(s);
+    if let (Some(attr), Some(vu)) = (attribute, &value) {
+        let quotes = vu.iter().filter(|&&c| c == 0x22).count();
+        len += attr.len() + 4 + vu.len() + 5 * quotes;
+    }
+    vm.check_string_len(len)?;
+    let mut b = StrBuilder::with_capacity(len);
     b.push_str(&format!("<{tag}"));
-    if let Some(attr) = attribute {
-        let v = vm.to_string(a.arg(0))?;
-        let vu = units_of(vm, v);
+    if let (Some(attr), Some(vu)) = (attribute, value) {
         b.push_str(&format!(" {attr}=\""));
         for &c in &vu {
             if c == 0x22 {

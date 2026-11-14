@@ -113,8 +113,7 @@ fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if !(2.0..=36.0).contains(&radix) {
         return vm.range_error("toString() radix must be between 2 and 36");
     }
-    let s = bigint::to_string_radix(&vm.heap.bigint(b).0, radix as u32);
-    Ok(vm.str(&s))
+    Ok(Value::String(vm.bigint_to_string(b, radix as u32)?))
 }
 
 /// Wrap a BigInt in a BigInt object (ToObject).

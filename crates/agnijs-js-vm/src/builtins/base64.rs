@@ -114,9 +114,16 @@ fn to_base64(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let omit_padding = get_option(vm, opts, "omitPadding")?;
     let omit_padding = vm.to_boolean(omit_padding);
     let (buffer, off, len) = view(vm, o)?;
+    // The length is known before the string is built (TASK-103.54).
+    let out_len = if omit_padding {
+        len.saturating_mul(4).div_ceil(3)
+    } else {
+        len.div_ceil(3).saturating_mul(4)
+    };
+    vm.check_string_len(out_len)?;
     let table = if url { URL } else { STD };
     let bytes = &buffer_bytes(vm, buffer)[off..off + len];
-    let mut out = String::with_capacity(len.div_ceil(3) * 4);
+    let mut out = Vec::with_capacity(out_len);
     for chunk in bytes.chunks(3) {
         let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
         let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
@@ -124,25 +131,28 @@ fn to_base64(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let keep = chunk.len() + 1;
         for (i, &c) in chars.iter().enumerate() {
             if i < keep {
-                out.push(table[c as usize] as char);
+                out.push(table[c as usize]);
             } else if !omit_padding {
-                out.push('=');
+                out.push(b'=');
             }
         }
     }
-    Ok(vm.str(&out))
+    Ok(Value::String(vm.heap.alloc_str_latin1(out)))
 }
 
 fn to_hex(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = validate_uint8(vm, a.this, "toHex")?;
     let (buffer, off, len) = view(vm, o)?;
+    // The length is known before the string is built (TASK-103.54).
+    vm.check_string_len(len.saturating_mul(2))?;
     let bytes = &buffer_bytes(vm, buffer)[off..off + len];
-    let mut out = String::with_capacity(len * 2);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = Vec::with_capacity(len * 2);
     for &b in bytes {
-        out.push(char::from_digit((b >> 4) as u32, 16).unwrap_or('0'));
-        out.push(char::from_digit((b & 15) as u32, 16).unwrap_or('0'));
+        out.push(HEX[(b >> 4) as usize]);
+        out.push(HEX[(b & 15) as usize]);
     }
-    Ok(vm.str(&out))
+    Ok(Value::String(vm.heap.alloc_str_latin1(out)))
 }
 
 // ---- decoding -----------------------------------------------------------------------------

@@ -185,6 +185,17 @@ fn every_path_that_makes_strings_checks_the_maximum() {
             "Function toString",
             "return String(Function('a'.repeat(1000), ''))",
         ),
+        // Lengths known from the input (TASK-103.54).
+        ("toHex", "return new Uint8Array(501).toHex()"),
+        ("toBase64", "return new Uint8Array(751).toBase64()"),
+        (
+            "toBase64 omitPadding",
+            "return new Uint8Array(751).toBase64({ omitPadding: true })",
+        ),
+        ("anchor", "return 'x'.anchor('\"'.repeat(165))"),
+        ("BigInt toString", "return (1n << 1000n).toString(2)"),
+        ("BigInt toString 10", "return (10n ** 1000n).toString()"),
+        ("ListFormat", "return new Intl.ListFormat('en').format([a, b])"),
     ];
     for (what, src) in cases {
         too_long(&mut vm, &format!("/* {what} */ {a} {src}"));
@@ -199,6 +210,19 @@ fn every_path_that_makes_strings_checks_the_maximum() {
         MAX,
     );
     fits(&mut vm, "return JSON.stringify('a'.repeat(998))", MAX);
+    fits(&mut vm, "return new Uint8Array(500).toHex()", MAX);
+    fits(&mut vm, "return new Uint8Array(750).toBase64()", MAX);
+    fits(
+        &mut vm,
+        "return new Uint8Array(750).toBase64({ omitPadding: true })",
+        MAX,
+    );
+    fits(&mut vm, "return 'x'.anchor('\"'.repeat(164))", MAX);
+    fits(&mut vm, "return (1n << 999n).toString(2)", MAX);
+    fits(&mut vm, "return (10n ** 999n).toString()", MAX);
+    fits(&mut vm, "return (10n ** 998n).toString(10)", 999);
+    fits(&mut vm, "return (-(10n ** 998n)).toString()", MAX);
+    fits(&mut vm, "return (2n ** 4999n).toString(32)", MAX);
 }
 
 /// The host sees the same RangeError when a script's result is too long.

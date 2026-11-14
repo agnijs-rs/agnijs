@@ -308,15 +308,21 @@ impl Vm {
             Value::Bool(false) => Ok(self.names.false_),
             Value::Number(n) => Ok(self.number_to_string(n)),
             Value::Symbol(_) => Err(self.throw_type("Cannot convert a Symbol value to a string")),
-            Value::BigInt(b) => {
-                let s = self.heap.bigint(b).0.to_string();
-                Ok(self.heap.alloc_str(&s))
-            }
+            Value::BigInt(b) => self.bigint_to_string(b, 10),
             Value::Object(_) => {
                 let p = self.to_primitive(v, Hint::String)?;
                 self.to_string(p)
             }
         }
+    }
+
+    /// BigInt::toString in `radix` (2 to 36). The length is checked from
+    /// the bit length before the digits are made (TASK-103.54).
+    pub fn bigint_to_string(&mut self, b: crate::value::BigId, radix: u32) -> JsResult<StrId> {
+        let min = crate::bigint::min_string_len(&self.heap.bigint(b).0, radix);
+        self.check_string_len(min)?;
+        let s = crate::bigint::to_string_radix(&self.heap.bigint(b).0, radix);
+        Ok(self.heap.alloc_str_latin1(s.into_bytes()))
     }
 
     pub fn number_to_string(&mut self, n: f64) -> StrId {

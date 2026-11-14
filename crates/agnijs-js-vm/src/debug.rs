@@ -792,7 +792,7 @@ impl Vm {
             Value::Symbol(s) => {
                 let d = crate::builtins::symbol::symbol_descriptive_string(self, s);
                 let d = match d {
-                    Value::String(d) => self.heap.str_to_string(d),
+                    Ok(Value::String(d)) => self.heap.str_to_string(d),
                     _ => "Symbol()".into(),
                 };
                 prim(ValueKind::Symbol, d)

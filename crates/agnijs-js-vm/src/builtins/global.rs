@@ -421,10 +421,8 @@ fn console_emit(vm: &mut Vm, a: &CallArgs, level: ConsoleLevel) -> JsResult<Valu
     for &v in a.args {
         let s = match v {
             Value::Symbol(s) => {
-                let Value::String(d) = super::symbol::symbol_descriptive_string(vm, s) else {
-                    unreachable!()
-                };
-                vm.heap.str_to_string(d)
+                let d = super::symbol::symbol_descriptive_string(vm, s)?;
+                vm.to_rust_string(d)?
             }
             _ => vm.to_rust_string(v)?,
         };

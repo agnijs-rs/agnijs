@@ -113,13 +113,19 @@ fn this_symbol_value(vm: &mut Vm, v: Value) -> JsResult<SymId> {
     }
 }
 
-/// SymbolDescriptiveString(sym).
-pub fn symbol_descriptive_string(vm: &mut Vm, s: SymId) -> Value {
-    let desc = match vm.heap.sym(s).description {
-        Some(d) => vm.heap.str_to_string(d),
-        None => String::new(),
-    };
-    vm.str(&format!("Symbol({desc})"))
+/// SymbolDescriptiveString(sym). The description may be the longest string
+/// there is, so the length is checked first (TASK-103.54).
+pub fn symbol_descriptive_string(vm: &mut Vm, s: SymId) -> JsResult<Value> {
+    let desc = vm.heap.sym(s).description;
+    let len = 8 + desc.map_or(0, |d| vm.heap.str_len(d));
+    vm.check_string_len(len)?;
+    let mut b = crate::string::StrBuilder::with_capacity(len);
+    b.push_str("Symbol(");
+    if let Some(d) = desc {
+        b.push_units(&vm.heap.units(d));
+    }
+    b.push(u16::from(b')'));
+    vm.string_from_builder(b)
 }
 
 fn proto_description(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -134,7 +140,7 @@ fn proto_description(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn proto_to_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let s = this_symbol_value(vm, a.this)?;
-    Ok(symbol_descriptive_string(vm, s))
+    symbol_descriptive_string(vm, s)
 }
 
 fn proto_value_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

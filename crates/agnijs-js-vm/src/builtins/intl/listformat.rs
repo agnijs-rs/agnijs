@@ -105,6 +105,10 @@ fn string_list_from_iterable(vm: &mut Vm, iterable: Value) -> JsResult<Vec<Strin
 fn format(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let lf = this_lf(vm, a.this, "format")?;
     let list = string_list_from_iterable(vm, a.arg(0))?;
+    // The result holds every item, so its length is checked before it is
+    // built (TASK-103.54).
+    let min: usize = list.iter().map(|s| s.encode_utf16().count()).sum();
+    vm.check_string_len(min)?;
     let s = record(vm, lf).formatter.format(&list);
     Ok(vm.str(&s))
 }

@@ -217,3 +217,60 @@ fn native_loop_object_entries_of_a_typed_array() {
 fn native_loop_list_format_of_one_string_many_times() {
     native_loop_peak("new Intl.ListFormat('en').format(new Array(6e5).fill('a'.repeat(1000))).length");
 }
+
+// ---- strings whose length is known before they are built (TASK-103.54) -----------------------
+//
+// These built-ins know their result's length from their input, so they
+// check it before building: past the maximum string length, they throw
+// with no allocation the size of the result. Before TASK-103.54 each built
+// the whole result in Rust first (toHex of 512 MiB peaked at 2.57 GiB).
+
+/// The bytes this thread allocated, at their peak, while `src` ran with the
+/// maximum string length lowered to 1,000 units, after `setup` made its
+/// input; `src` must throw the RangeError for a string that is too long.
+fn peak_while_too_long(setup: &str, src: &str) -> usize {
+    let mut vm = Vm::new(TestHost::new());
+    vm.heap.stress = false;
+    vm.set_max_string_length(1000);
+    let realm = vm.main_realm();
+    vm.eval_script(realm, "setup.js", setup).unwrap();
+    let before = HELD.with(Cell::get);
+    PEAK.with(|p| p.set(before));
+    let r = vm.eval_script(realm, "t.js", src);
+    let peak = PEAK.with(Cell::get) - before;
+    match r {
+        Err(Error::Exception(x)) => assert_eq!(
+            (x.name.as_str(), x.message.as_str()),
+            ("RangeError", "Invalid string length"),
+            "{src}"
+        ),
+        r => panic!("{src}: {r:?}"),
+    }
+    peak.max(0) as usize
+}
+
+/// The 16 MiB input is made before the peak is measured and is not copied;
+/// the results these no longer build are 22 to 32 MiB.
+const LENGTH_KNOWN_BOUND: usize = 4 * MIB;
+
+#[test]
+fn to_hex_and_to_base64_check_the_length_before_building() {
+    let setup = "globalThis.u = new Uint8Array(2 ** 24);";
+    for src in ["u.toHex()", "u.toBase64()", "u.toBase64({ omitPadding: true })"] {
+        let peak = peak_while_too_long(setup, src);
+        assert!(peak < LENGTH_KNOWN_BOUND, "{src}: peak {} MiB", peak / MIB);
+    }
+}
+
+/// The input of these is a string, which cannot pass the lowered maximum,
+/// so the memory limit refuses them instead: 8 MiB of quotes, and a BigInt
+/// of 2^26 bits, each under 16 MiB.
+#[test]
+fn html_methods_and_big_int_to_string_check_the_memory_before_building() {
+    // `"` expands to `&quot;`, six units for one: 48 MiB.
+    let peak = peak_while_refused("const q = '\"'.repeat(2 ** 23); 'x'.anchor(q).length");
+    assert!(peak < BOUND, "anchor: peak {} MiB", peak / MIB);
+    // 64 MiB of binary digits.
+    let peak = peak_while_refused("const b = 1n << (1n << 26n); b.toString(2).length");
+    assert!(peak < BOUND, "BigInt: peak {} MiB", peak / MIB);
+}

@@ -169,6 +169,19 @@ pub fn to_string_radix(b: &BigInt, radix: u32) -> String {
     b.to_str_radix(radix)
 }
 
+/// At most two fewer code units than `b` takes in `radix` (2 to 36), from
+/// its bit length alone: a value of n bits has at least
+/// floor((n - 1) / log2(radix)) + 1 digits, and one is dropped for the
+/// rounding of the float. The sign counts.
+pub fn min_string_len(b: &BigInt, radix: u32) -> usize {
+    let bits = b.bits();
+    if bits <= 1 {
+        return 1;
+    }
+    let digits = ((bits - 1) as f64 / f64::from(radix).log2()).floor() as usize;
+    digits.max(1) + usize::from(b.sign() == num_bigint::Sign::Minus)
+}
+
 /// Exponentiation with a non-negative exponent (RangeError otherwise is the
 /// caller's job). `None` when the exponent does not fit.
 pub fn pow(base: &BigInt, exp: &BigInt) -> Option<BigInt> {
