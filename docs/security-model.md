@@ -245,6 +245,20 @@ Tests in `crates/agnijs-js-vm/tests/string_length.rs`: doubling a string past th
 - **The backstop's empty string.** A built-in that reaches the backstop carries on with the empty string until the next safe point, so its result is discarded but its other effects happen. Every built-in known to make a string this long checks before the backstop.
 - **Memory.** The maximum bounds one string, not the heap. Many strings near it are the memory limit's job.
 
+### Lists sized by a script's `length`
+
+**What it is.** A script controls the `length` of an array-like for free: a sparse array or a plain object can claim 2^53-1 elements. Native code that builds a Rust list from such a `length` must not preallocate from it.
+
+**How it is enforced.**
+
+- **Argument and capture lists.** CreateListFromArrayLike (`apply`, `Reflect.apply`, `Reflect.construct`, a proxy's `ownKeys` result) and the capture list of `RegExp.prototype[Symbol.replace]` refuse more than 2^22 values (`MAX_LIST_LENGTH` in `crates/agnijs-js-vm/src/ops.rs`) with a catchable `RangeError`, charge the list to the memory limit before allocating it (`Vm::check_list_length`), and poll the interrupt while they fill it. A dense array passed to `apply` takes a fast path that copies the elements that already exist, so its size is the memory limit's job. TASK-103.48, 103.49.
+- **Rust API conversion.** `from_value`, `eval::<T>` and host-function arguments convert at most 2^22 array elements and object members per value, summed over the whole tree (`agnijs::MAX_CONVERTED_VALUES`). More gives `Error::Convert`, a `TypeError` in the script for host-function arguments. TASK-103.39.
+- **BigInt widths.** `BigInt.asUintN` of a negative value has as many bits as asked for. Past 2^30 bits, the same maximum as `<<`, it throws a `RangeError`, and below that the result is charged to the memory limit before it is built. `asIntN`, and `asUintN` of a non-negative value, return the input when it already fits, so a huge width allocates nothing. TASK-103.44.
+
+Tests in `crates/agnijs-js-vm/tests/untrusted_lengths.rs` and `crates/agnijs/tests/long_arrays.rs`.
+
+**What it does not cover.** A BigInt's size is checked when `asUintN` builds it, but the collector still counts each live BigInt at a fixed size (TASK-103.50).
+
 ### Regular expressions (ReDoS)
 
 **What it is.** `Host::regex_matcher` picks the policy per engine (ADR 0013 addenda):

@@ -1,9 +1,11 @@
 ---
 id: TASK-103.44
 title: BigInt.asIntN and asUintN with a huge bit count abort the process
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
   - security
@@ -44,7 +46,35 @@ Test that should catch it: a VM test for `asIntN` and `asUintN` with `bits` of 2
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 asIntN and asUintN with bits up to 2^53-1 return the spec value or a catchable RangeError without a large allocation
-- [ ] #2 Large results are charged to the memory limit
-- [ ] #3 A VM test covers bits of 2^31, 2^40 and 2^53-1 with positive, zero and negative values
+- [x] #1 asIntN and asUintN with bits up to 2^53-1 return the spec value or a catchable RangeError without a large allocation
+- [x] #2 Large results are charged to the memory limit
+- [x] #3 A VM test covers bits of 2^31, 2^40 and 2^53-1 with positive, zero and negative values
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test: bits 2^31, 2^40, 2^53-1 with positive, zero, negative values; a lowered memory limit.
+2. Return x unchanged when it already fits; else mask only the low bits.
+3. asUintN of a negative value: RangeError past 2^30 bits (the << maximum), else charge the memory limit before building.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: untrusted_lengths.rs aborted with 0xc0000409 before the fix.
+
+Fix (74a0c56): when the input already fits in bits, it is returned as is; otherwise only the low bits are masked. asUintN of a negative value really has bits bits: past 2^30 (bigint::MAX_BITS, the same maximum as <<) it throws RangeError, and below that the result size is charged with check_memory before it is built.
+
+Limit: the memory check is up front only. The collector still counts each live BigInt at a fixed size; that is TASK-103.50.
+
+Micro-benchmark: asIntN/asUintN 0.81x, wide widths 0.53x.
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+BigInt.asIntN and asUintN no longer build a 2^bits mask. A value that fits is returned unchanged and the rest mask only the low bits, so any width up to 2^53-1 gives the spec value. asUintN of a negative value throws RangeError past 2^30 bits and is charged to the memory limit below that. Tests cover widths 2^31, 2^40 and 2^53-1 with positive, zero and negative values, wrap cases and a 1 MiB limit. Commit 74a0c56. Persistent BigInt accounting stays with TASK-103.50.
+<!-- SECTION:FINAL_SUMMARY:END -->

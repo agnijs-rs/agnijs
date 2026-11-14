@@ -3,9 +3,11 @@ id: TASK-103.42
 title: >-
   ArrayBuffer.prototype.slice panics when the buffer shrinks during argument
   conversion or the species constructor
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
 dependencies: []
@@ -45,6 +47,32 @@ Test that should catch it: a VM test that shrinks a resizable buffer from the st
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shrinking the buffer from either argument or from a species constructor never panics and gives the spec result
-- [ ] #2 A VM test covers all three shrink points
+- [x] #1 Shrinking the buffer from either argument or from a species constructor never panics and gives the spec result
+- [x] #2 A VM test covers all three shrink points
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test: shrink from start, from end and from the species constructor.
+2. Re-read the source length before copying; copy only when first < current length, clamping the count.
+3. Sweep transfer and SharedArrayBuffer slice.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: resizable_reentry.rs panicked at arraybuffer.rs:386 before the fix.
+
+Fix (977e84d): slice copies only when first < the current length, clamping the count to what is left; the rest of the new buffer stays zero.
+
+Sibling check: transfer reads the length after its only conversion; SharedArrayBuffer cannot shrink.
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+ArrayBuffer.prototype.slice reads the source length again after its conversions and the species constructor, copying only the bytes still there. Tests cover a shrink in start, in end and in the species constructor (below the start and mid-range). Commit 977e84d.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,9 +3,11 @@ id: TASK-103.41
 title: >-
   TypedArray.prototype.copyWithin panics when an argument shrinks the resizable
   buffer
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
 dependencies: []
@@ -46,6 +48,34 @@ Test that should catch it: a VM test that shrinks the buffer from each of the th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Shrinking the buffer from the target, start or end valueOf never panics and gives the spec result
-- [ ] #2 A VM test covers length-tracking and fixed-length views
+- [x] #1 Shrinking the buffer from the target, start or end valueOf never panics and gives the spec result
+- [x] #2 A VM test covers length-tracking and fixed-length views
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test: shrink from each of target, start and end on length-tracking and fixed-length views, under catch_unwind.
+2. After the conversions, re-read the length; copy nothing when from or to is at or past the new end, else clamp the count to the bytes left (test262 coerced-target-start-end-shrink).
+3. Sweep sibling TypedArray and DataView methods that convert after reading a length.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: crates/agnijs-js-vm/tests/resizable_reentry.rs panicked at typedarray_ctor.rs:583 before the fix.
+
+Fix (977e84d): after the conversions, re-read the length; nothing is copied when from or to is at or past the new end, else the count is clamped to the bytes left. This matches test262 coerced-target-start-end-shrink.js. A fixed-length view that goes out of bounds throws TypeError as before.
+
+Sibling sweep, no bug found: fill, sort, slice, set, subarray, with, the constructor from a buffer, DataView get/set, setFromBase64/setFromHex.
+
+Micro-benchmark: copyWithin 1.00x, on a resizable buffer 1.07x (the extra length read).
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+copyWithin re-reads the typed array length after converting its arguments and copies only the bytes below the new end, so a valueOf that shrinks a resizable buffer no longer panics. Tests in resizable_reentry.rs cover target, start and end shrinks on length-tracking, offset and fixed-length views, Uint8, Int32 and BigInt64. Commit 977e84d.
+<!-- SECTION:FINAL_SUMMARY:END -->

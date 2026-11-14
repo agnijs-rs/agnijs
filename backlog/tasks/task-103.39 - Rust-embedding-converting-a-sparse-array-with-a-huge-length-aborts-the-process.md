@@ -3,9 +3,11 @@ id: TASK-103.39
 title: >-
   Rust embedding: converting a sparse array with a huge length aborts the
   process
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
   - security
@@ -51,8 +53,36 @@ Test that should catch it: an embed test that passes `Object.assign([], { length
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Passing an array with length 2^32-1 to a registered host function gives a catchable error, not an abort
-- [ ] #2 eval::<serde_json::Value> of such an array returns Error::Convert without allocating per the length
-- [ ] #3 Conversion of a long array is bounded by a documented cap or the memory limit, and does not run unpolled for 2^32 steps
-- [ ] #4 crates/agnijs/tests has a regression test for both paths
+- [x] #1 Passing an array with length 2^32-1 to a registered host function gives a catchable error, not an abort
+- [x] #2 eval::<serde_json::Value> of such an array returns Error::Convert without allocating per the length
+- [x] #3 Conversion of a long array is bounded by a documented cap or the memory limit, and does not run unpolled for 2^32 steps
+- [x] #4 crates/agnijs/tests has a regression test for both paths
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test in crates/agnijs/tests: eval::<serde_json::Value> and a host-function argument with a sparse length 2^32-1 and a nested 2^23.
+2. A per-conversion budget (MAX_CONVERTED_VALUES = 2^22 elements and members over the whole tree), charged before each allocation; Error::Convert past it.
+3. Check the CLI's own conversions.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: crates/agnijs/tests/long_arrays.rs aborted with 0xc0000409 before the fix.
+
+Fix (9203079): js_to_json carries a budget of MAX_CONVERTED_VALUES (2^22) array elements and object members over the whole value, charged before each array or object is allocated. Past it the result is Error::Convert, a TypeError in the script for host-function arguments. agnijs::MAX_CONVERTED_VALUES is exported and documented.
+
+Decision: a cap rather than an interrupt poll, because the Engine trait has no poll; at most 2^22 steps per conversion.
+
+CLI: the setTimeout argument Vec no longer sizes from the rest array length (dense today, hardening only).
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Rust-API conversion (from_value, eval::<T>, host-function arguments) now has a documented budget of 2^22 array elements and object members per value, so a sparse array with length 2^32-1, alone or nested, gives Error::Convert (TypeError for host functions) instead of a 128 GiB preallocation and abort. long_arrays.rs covers eval and a host function, plus a 100,000-element array still converting. Commit 9203079.
+<!-- SECTION:FINAL_SUMMARY:END -->

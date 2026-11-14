@@ -1,9 +1,11 @@
 ---
 id: TASK-103.45
 title: ArrayBuffer.prototype.transfer ignores maxByteLength
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
 dependencies: []
@@ -47,6 +49,29 @@ Test that should catch it: a VM test for `transfer(n)` with n above maxByteLengt
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 transfer(n) on a resizable buffer with n above maxByteLength throws RangeError and leaves the source attached
-- [ ] #2 A VM test covers transfer and transferToFixedLength
+- [x] #1 transfer(n) on a resizable buffer with n above maxByteLength throws RangeError and leaves the source attached
+- [x] #2 A VM test covers transfer and transferToFixedLength
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test: transfer above maxByteLength, transfer up to it, transferToFixedLength.
+2. AllocateArrayBuffer throws RangeError when byteLength > maxByteLength; transfer allocates before detaching, so the source stays attached.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: resizable_reentry.rs got byteLength 100 with maxByteLength 8 before the fix.
+
+Fix (977e84d): AllocateArrayBuffer (allocate_buffer) throws RangeError when byteLength exceeds maxByteLength. transfer allocates the new buffer before detaching the source, so the source stays attached on the error.
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+allocate_buffer now enforces byteLength <= maxByteLength as AllocateArrayBuffer requires, so transfer(n) above the maximum throws RangeError and leaves the source attached; transfer up to the maximum keeps resizability and transferToFixedLength is unaffected. Commit 977e84d.
+<!-- SECTION:FINAL_SUMMARY:END -->

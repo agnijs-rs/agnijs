@@ -3,9 +3,11 @@ id: TASK-103.43
 title: >-
   Atomics operations panic when an index or value conversion shrinks a
   length-tracking view
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T01:12:00Z'
 labels:
   - bug
 dependencies: []
@@ -47,7 +49,35 @@ Test that should catch it: a VM test that shrinks a length-tracking view from th
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every Atomics read-modify-write, load and store throws RangeError when a conversion leaves the index out of bounds
-- [ ] #2 Out-of-range access in raw_read and raw_write is an error, not a panic
-- [ ] #3 A VM test covers each operation, including the BigInt64 variants
+- [x] #1 Every Atomics read-modify-write, load and store throws RangeError when a conversion leaves the index out of bounds
+- [x] #2 Out-of-range access in raw_read and raw_write is an error, not a panic
+- [x] #3 A VM test covers each operation, including the BigInt64 variants
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test: every RMW op, load, store and compareExchange, shrinking at each conversion, Int32 and BigInt64.
+2. RevalidateAtomicAccess after conversions: RangeError when the element is past the buffer's current byte length.
+3. raw_read and raw_write return errors on out-of-range slices instead of panicking.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: resizable_reentry.rs panicked at atomics.rs:99 before the fix.
+
+Fix (977e84d): revalidate checks the element against the buffer current byte length after the conversions and throws RangeError (RevalidateAtomicAccess). raw_read and raw_write return JsResult and use get/get_mut, so an out-of-range slice is an error, not a panic.
+
+wait/notify: shared buffers cannot shrink, and wait on a non-shared buffer throws before any access.
+
+Micro-benchmark: Int32 Atomics 1.085x (the spec-required length check), BigInt64 Atomics 0.73x.
+
+Gates: test262 0 regressions in default, --precompile, --snapshot, --only-intl402, the QuickJS-NG baseline and the GC-stress slice; JIT forced and tiered slices (CI filters plus apply, Reflect, TypedArray copyWithin, ArrayBuffer, Atomics, BigInt, RegExp replace/split, Proxy ownKeys) 0 regressions; cargo test -p agnijs-js-vm --features jit green. Bench suite JIT off vs 226e6d1, 8 alternating rounds: geomean 1.005x.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Every Atomics read-modify-write, compareExchange, load and store re-validates the index after converting its arguments and throws RangeError when the buffer shrank under it; the raw byte accessors return errors instead of panicking. Tests run each operation with a shrink at each conversion on Int32 and BigInt64 views. Commit 977e84d.
+<!-- SECTION:FINAL_SUMMARY:END -->

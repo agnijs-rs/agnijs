@@ -30,22 +30,22 @@ The backlog priority is in brackets where it differs from the severity.
 | TASK-103.38 | Capability bypass [medium priority] | Confirmed: Rust test | The resolver's segment checks split on `/` only, but the join turns `\` into `/`. So `pkg/sub/..\..\x` escapes the package through exports patterns, imports patterns (`#internal/..\..\x`) and legacy subpaths, on every platform. The forward-slash forms are refused. |
 | TASK-103.40 | Capability bypass, low | Confirmed: Rust test, 201 s | C API engine tags are 16 bits and wrap after 65,535 engines. A live engine then accepts another live engine's value and realm ids: status 0, the other engine's value is read, and `free` succeeds. |
 | TASK-103.37 | Medium | Confirmed: CLI, exit 101 | The CLI's `data:` sourceMappingURL percent-decoder slices a `&str` at a byte offset. A multi-byte character after `%` panics, in a script or in a module loaded by `import()`. |
-| TASK-103.39 | Medium | Confirmed: Rust test, abort 0xc0000409 | Rust-API conversion of a sparse array preallocates from the JS `length`. `[]` with length 2^32-1, passed to a registered function or returned to `eval::<serde_json::Value>`, aborts the process with a 128 GiB allocation. |
-| TASK-103.41 | Medium | Confirmed: CLI, exit 101 | `TypedArray.prototype.copyWithin` panics when an argument's `valueOf` shrinks a resizable buffer. |
-| TASK-103.42 | Medium | Confirmed: CLI, exit 101 | `ArrayBuffer.prototype.slice` panics (arraybuffer.rs:386) when the buffer shrinks during argument conversion or in the species constructor. |
-| TASK-103.43 | Medium | Confirmed: CLI, exit 101 | Atomics operations panic (atomics.rs:99) when an index or value conversion shrinks a length-tracking view. |
-| TASK-103.44 | Medium | Confirmed: CLI, abort | `BigInt.asIntN` / `asUintN` with `bits` near 2^53 abort the process with a 1 PB allocation. Below that, the result is not counted against the memory limit. |
+| TASK-103.39 | Medium | Fixed in 9203079 (was confirmed: Rust test, abort 0xc0000409) | Rust-API conversion of a sparse array preallocates from the JS `length`. `[]` with length 2^32-1, passed to a registered function or returned to `eval::<serde_json::Value>`, aborts the process with a 128 GiB allocation. |
+| TASK-103.41 | Medium | Fixed in 977e84d (was confirmed: CLI, exit 101) | `TypedArray.prototype.copyWithin` panics when an argument's `valueOf` shrinks a resizable buffer. |
+| TASK-103.42 | Medium | Fixed in 977e84d (was confirmed: CLI, exit 101) | `ArrayBuffer.prototype.slice` panics (arraybuffer.rs:386) when the buffer shrinks during argument conversion or in the species constructor. |
+| TASK-103.43 | Medium | Fixed in 977e84d (was confirmed: CLI, exit 101) | Atomics operations panic (atomics.rs:99) when an index or value conversion shrinks a length-tracking view. |
+| TASK-103.44 | Medium | Fixed in 74a0c56 (was confirmed: CLI, abort) | `BigInt.asIntN` / `asUintN` with `bits` near 2^53 abort the process with a 1 PB allocation. Below that, the result is not counted against the memory limit. |
 | TASK-103.46 | Medium | Confirmed: CLI, 0xc00000fd | Deep left-associative chains (binary, member, call and others) overflow the native stack when the syntax tree is dropped, after the parser accepted them. |
 | TASK-103.47 | Medium | Confirmed: CLI, 0xc00000fd (debug build) | IsArray, IsConstructor and GetFunctionRealm recurse through proxy and bound-function chains without a stack check. |
-| TASK-103.48 | Medium | Confirmed: CLI, abort | `apply`, `Reflect.apply` and `Reflect.construct` preallocate an argument list from an attacker-chosen `length` (16 TiB). |
-| TASK-103.49 | Medium | Confirmed: CLI, abort | `RegExp.prototype[Symbol.replace]` preallocates captures from a custom `exec` result's `length`. |
+| TASK-103.48 | Medium | Fixed in 74a0c56, 1100ba9 (was confirmed: CLI, abort) | `apply`, `Reflect.apply` and `Reflect.construct` preallocate an argument list from an attacker-chosen `length` (16 TiB). |
+| TASK-103.49 | Medium | Fixed in 74a0c56 (was confirmed: CLI, abort) | `RegExp.prototype[Symbol.replace]` preallocates captures from a custom `exec` result's `length`. |
 | TASK-103.50 | Medium | Confirmed: CLI | The collector counts each live BigInt as 48 bytes. 1,000 BigInts of 2 MiB stay alive under `--max-memory 16M` (2,019 MiB peak, exit 0). |
 | TASK-103.51 | Medium | Confirmed: CLI | `payload_bytes` is 0 for FinalizationRegistry cells, DisposableStack resources and bound-function arguments. These reach 3.0 GiB, 2.5 GiB and 330 MiB under a 16 MiB limit with no out-of-memory error. |
 | TASK-103.53 | Medium | Confirmed: CLI | Native loops that allocate from a bare length or a native iterator never check the limit. Under 16 MiB, peaks reach 525 MiB to 3.6 GiB before exit 3. The loops are `fill`, Promise combinators, spread, `Intl.ListFormat` and typed-array `entries`. |
 | TASK-103.55 | Medium | Confirmed: CLI | BigInt parsing, division, `toString` and `**` are superlinear and never poll the interrupt. Parsing ran past 120 s, one division took 51 s, and `3n ** 100000000n` ran past 40 s. |
 | TASK-103.52 | Low-medium [low priority] | Confirmed: CLI | The regex compile cache and large compiles amplify memory: 525 MiB under 16 MiB with nothing kept. |
 | TASK-103.54 | Low-medium [low priority] | Confirmed: CLI | `toHex` and `toBase64` build the whole result (2.57 GiB) before the string-length check throws. |
-| TASK-103.45 | Low | Confirmed: CLI | `ArrayBuffer.prototype.transfer` ignores `maxByteLength`: the result has `byteLength` 100 with `maxByteLength` 8. |
+| TASK-103.45 | Low | Fixed in 977e84d (was confirmed: CLI) | `ArrayBuffer.prototype.transfer` ignores `maxByteLength`: the result has `byteLength` 100 with `maxByteLength` 8. |
 
 Two kinds of failure are worth separating:
 
