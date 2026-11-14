@@ -44,7 +44,7 @@ A longer run, for example before a change to the JIT lands: `node tools/jit-fuzz
 
 A JIT run that times out when the interpreter was itself slow, or under GC stress (where a run can be hundreds of times slower), is counted as inconclusive, not as a divergence. A program the interpreter cannot finish in time is skipped.
 
-`--node` compares the interpreter's stdout with Node's (the file runs as a classic script, `tools/jit-fuzz/node-run.cjs`). A difference there is an interpreter bug or a known difference between engines, not a JIT one; it is reported the same way. Known difference: `String(2 ** -25)` (`docs/jit-review-2026-11.md`, observations).
+`--node` compares the interpreter's stdout with Node's (the file runs as a classic script, `tools/jit-fuzz/node-run.cjs`). A difference there is an interpreter bug or a known difference between engines, not a JIT one; it is reported the same way.
 
 ## Reports
 

@@ -113,7 +113,6 @@ Heavy-lock time used: about 35 minutes.
 
 - **Aliasing model.** The addresses given to machine code (`CallView`, the heap bases, the global stamp) are raw pointers taken from short-lived `&mut` borrows, and Rust code uses the same fields through other references between machine-code accesses. Rust cannot exploit this, since the accesses are in code it does not see, but it is outside what Miri or the aliasing models can vouch for.
 - **Code size and compile time.** Blocks in these programs compiled to about 130 to 170 KB of machine code and 90 ms each, far above the figures in ADR 0020. One warm-up program ran in 0.5 s interpreted and 1.4 s in mode `on`, nearly all of it compile time. This is a tiering cost, not a soundness matter.
-- **Number to string on ties (not the JIT).** `String(2 ** -25)` gives `2.9802322387695313e-8` where V8 gives `...12`. Both round-trip; the specification recommends the even digit on a tie but allows either. Not filed.
 
 ## What was not reached
 
