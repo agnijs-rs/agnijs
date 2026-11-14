@@ -195,6 +195,9 @@ impl Vm {
         let regs = self.regs[base..].to_vec();
         let mut frame = self.pop_frame();
         frame.exit = true;
+        // Later suspensions save as many registers, so the first one is
+        // what the memory limit counts (`Class::payload_bytes`).
+        self.heap.note_growth(regs.len() * std::mem::size_of::<Value>());
         let g = gen_data(self, gen);
         g.saved = Some(SavedFrame { frame, regs });
         g.resume_reg = None;

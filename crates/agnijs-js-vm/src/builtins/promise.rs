@@ -161,14 +161,33 @@ pub enum Reactions {
 }
 
 impl Reactions {
-    fn push(&mut self, r: ThenRecord) {
+    /// Add a reaction; returns the bytes the list grew outside the
+    /// promise's own payload, for the memory limit (TASK-103.51).
+    fn push(&mut self, r: ThenRecord) -> usize {
+        const RECORD: usize = std::mem::size_of::<ThenRecord>();
         match std::mem::take(self) {
-            Reactions::None => *self = Reactions::One(r),
-            Reactions::One(first) => *self = Reactions::Many(vec![first, r]),
+            Reactions::None => {
+                *self = Reactions::One(r);
+                0
+            }
+            Reactions::One(first) => {
+                *self = Reactions::Many(vec![first, r]);
+                2 * RECORD
+            }
             Reactions::Many(mut v) => {
                 v.push(r);
                 *self = Reactions::Many(v);
+                RECORD
             }
+        }
+    }
+
+    /// What `Class::payload_bytes` counts: the list of a promise with more
+    /// than one reaction (the first is held inline).
+    pub fn bytes(&self) -> usize {
+        match self {
+            Reactions::Many(v) => v.len() * std::mem::size_of::<ThenRecord>(),
+            _ => 0,
         }
     }
 
@@ -560,7 +579,10 @@ pub fn perform_then_handlers(
     let (status, result, was_handled) = (d.status, d.result, d.is_handled);
     d.is_handled = true;
     match status {
-        PromiseStatus::Pending => d.reactions.push(record),
+        PromiseStatus::Pending => {
+            let grew = d.reactions.push(record);
+            vm.heap.note_growth(grew);
+        }
         PromiseStatus::Fulfilled => vm.jobs.push_back(Job::Reaction {
             reaction: record.into_reaction(ReactionKind::Fulfill),
             argument: result,

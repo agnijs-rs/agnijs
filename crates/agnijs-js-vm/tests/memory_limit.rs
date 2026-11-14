@@ -295,6 +295,126 @@ fn memory_usage_reports_bigint_digits_and_releases_them() {
     assert!(released < base + 4096, "{base} -> {held} -> {released}");
 }
 
+// ---- payloads that grow after allocation ------------------------------------------------------
+
+/// The probes from the review (TASK-103.51): a FinalizationRegistry's
+/// cells, a DisposableStack's resources and bound functions' arguments.
+#[test]
+#[cfg_attr(miri, ignore = "hundreds of thousands of calls are too slow under Miri")]
+fn a_16_mib_limit_stops_growing_registries_stacks_and_bound_arguments() {
+    let mut vm = limited(16 * MIB);
+    out_of_memory(
+        &mut vm,
+        "const r = new FinalizationRegistry(() => {}); const t = {}; for (;;) r.register(t, 1);",
+    );
+    out_of_memory(
+        &mut vm,
+        "const s = new DisposableStack(); const f = () => {}; for (;;) s.defer(f);",
+    );
+    out_of_memory(
+        &mut vm,
+        "const s = new AsyncDisposableStack(); const r = { [Symbol.asyncDispose]() {} };
+         for (;;) s.use(r);",
+    );
+    out_of_memory(
+        &mut vm,
+        "const big = new Array(1e4).fill(0); const k = []; function f() {}
+         for (;;) k.push(f.bind(null, ...big));",
+    );
+}
+
+/// Found by the audit below: one generator function with many registers
+/// suspended many times, errors capturing deep stacks, for-in key lists
+/// over one shared object and many reactions on one pending promise.
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
+fn a_16_mib_limit_stops_payloads_the_program_sizes() {
+    let mut vm = limited(16 * MIB);
+    let regs: String = (0..2000).map(|i| format!("let v{i} = {i};")).collect();
+    out_of_memory(
+        &mut vm,
+        &format!("function* g() {{ {regs} yield 1; }} const k = []; for (;;) {{ const it = g(); it.next(); k.push(it); }}"),
+    );
+    out_of_memory(
+        &mut vm,
+        "Error.stackTraceLimit = 1000; const k = [];
+         function deep(n) { if (n) return deep(n - 1); for (;;) k.push(new Error()); }
+         deep(900);",
+    );
+    out_of_memory(
+        &mut vm,
+        "const o = {}; for (let i = 0; i < 10000; i++) o['k' + i] = i;
+         function* walk() { for (const key in o) yield key; }
+         const k = []; for (;;) { const it = walk(); it.next(); k.push(it); }",
+    );
+    out_of_memory(
+        &mut vm,
+        "const p = new Promise(() => {}); for (;;) p.then();",
+    );
+}
+
+/// Which classes' payloads the memory limit counts. The match is
+/// exhaustive, so a new class must be sorted into one list or the other:
+/// a class whose payload the program sizes at run time must report it
+/// from `Class::payload_bytes`.
+fn payload_may_be_uncounted(class: &agnijs_js_vm::object::Class) -> bool {
+    use agnijs_js_vm::object::Class::*;
+    match class {
+        // Counted: the program chooses how much these hold.
+        ArrayBuffer(_) | Map(_) | Set(_) | WeakMap(_) | WeakSet(_) | FinalizationRegistry(_)
+        | DisposableStack(_) | Bound(_) | Generator(_) | Error(Some(_)) | ForIn(_) | Promise(_) => {
+            false
+        }
+        // A fixed amount per object, or a payload that refers to values
+        // counted on their own (strings, buffers, other objects).
+        Ordinary | Array(_) | Function(_) | Error(None) | Boolean(_) | Number(_) | String(_)
+        | Symbol(_) | BigInt(_) | Arguments(_) | ArrayIterator(_) | StringIterator { .. } | Date(_)
+        | MapIterator(_) | SetIterator(_) | WeakRef(_) | TypedArray(_) | DataView(_) | Proxy(_)
+        | AsyncFromSyncIterator(_) | RegExpStringIterator(_) | IteratorHelper(_)
+        | WrapForValidIterator(_) | RawJSON | CallSite(_) => true,
+        // The engine's own data: natives are made by the realm, regex
+        // programs are compiled code (TASK-103.52), and modules and their
+        // namespaces come from the host's loader.
+        Native(_) | RegExp(_) | Namespace(_) | Module(_) => true,
+        // The host owns its objects' data and ICU4X its formatters.
+        Host(_) => true,
+        #[cfg(feature = "intl")]
+        Intl(_) => true,
+    }
+}
+
+#[test]
+fn every_growable_payload_is_counted() {
+    let mut vm = vm();
+    eval(
+        &mut vm,
+        "const key = {}; globalThis.keep = [
+           new ArrayBuffer(8), new Map([[1, 1]]), new Set([1]), new WeakMap([[key, 1]]),
+           new WeakSet([key]), new DisposableStack(), function () {}.bind(null, 1),
+           (function* () { yield 1; })(), new Error('e'), new Promise(() => {}),
+         ];
+         const r = new FinalizationRegistry(() => {}); r.register(key, 1); keep.push(r);
+         keep[5].defer(() => {});
+         keep[7].next();
+         keep[9].then(); keep[9].then();
+         const o = { a: 1, b: 2 };
+         function* walk() { for (const k in o) yield k; }
+         const w = walk(); w.next(); keep.push(w);
+         undefined",
+    )
+    .unwrap();
+    vm.collect_garbage();
+    // Each of the twelve counted classes has a probe above whose payload
+    // is not empty, and it reports bytes.
+    let mut reported = std::collections::HashSet::new();
+    for (_, o) in vm.heap.objects.iter() {
+        if !payload_may_be_uncounted(&o.class) && o.class.payload_bytes() > 0 {
+            reported.insert(std::mem::discriminant(&o.class));
+        }
+    }
+    assert_eq!(reported.len(), 12);
+}
+
 // ---- built-ins that allocate a large block ----------------------------------------------------
 
 #[test]

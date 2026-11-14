@@ -1308,6 +1308,7 @@ fn finreg_register(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     if let Class::FinalizationRegistry(f) = &mut vm.heap.obj_mut(o).class {
         f.cells.push(FinCell { target, held, token });
+        vm.heap.note_growth(std::mem::size_of::<FinCell>());
     }
     Ok(Value::Undefined)
 }

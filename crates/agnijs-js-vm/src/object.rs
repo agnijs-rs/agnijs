@@ -464,16 +464,36 @@ pub struct ArrayData {
 
 impl Class {
     /// Bytes the payload holds for the program's data, which the memory
-    /// limit and `memory_usage` count with the object (TASK-103.25): an
-    /// ArrayBuffer's or SharedArrayBuffer's store and the entries of the
-    /// four collections. Growth after allocation is counted where it
-    /// happens (`resize_bytes` in `builtins/arraybuffer.rs`, `map_insert`
-    /// in `builtins/collections.rs`).
+    /// limit and `memory_usage` count with the object (TASK-103.25,
+    /// 103.51): every payload whose size the program chooses at run time.
+    /// That is an ArrayBuffer's or SharedArrayBuffer's store, the entries
+    /// of the four collections, a FinalizationRegistry's cells, a
+    /// DisposableStack's resources, a bound function's arguments, a
+    /// generator's saved registers, an error's captured frames, a for-in
+    /// key list and a pending promise's reactions. Growth after
+    /// allocation is counted where it happens (`resize_bytes` in
+    /// `builtins/arraybuffer.rs`, `map_insert` and `register` in
+    /// `builtins/collections.rs`, `add` in `builtins/disposable.rs`, and
+    /// so on). The other classes hold a fixed amount, or what the engine
+    /// or the host owns; `every_growable_payload_is_counted` in
+    /// `tests/memory_limit.rs` lists them.
     #[inline]
     pub fn payload_bytes(&self) -> usize {
+        use std::mem::size_of;
         match self {
             Class::ArrayBuffer(b) => b.bytes.len(),
             Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m.heap_bytes(),
+            Class::FinalizationRegistry(f) => {
+                f.cells.len() * size_of::<crate::builtins::collections::FinCell>()
+            }
+            Class::DisposableStack(d) => {
+                d.resources.len() * size_of::<crate::builtins::disposable::Resource>()
+            }
+            Class::Bound(b) => b.args.len() * size_of::<Value>(),
+            Class::Generator(g) => g.saved.as_ref().map_or(0, |s| s.regs.len() * size_of::<Value>()),
+            Class::Error(Some(s)) => s.frames.len() * size_of::<crate::stack_trace::CapturedFrame>(),
+            Class::ForIn(f) => (f.keys.len() + f.visited.len()) * size_of::<PropKey>(),
+            Class::Promise(p) => p.reactions.bytes(),
             _ => 0,
         }
     }

@@ -136,6 +136,7 @@ pub fn add_value(vm: &mut Vm, stack: ObjId, v: Value, is_async: bool) -> JsResul
         _ => return vm.type_error("a disposable resource must be an object, null or undefined"),
     };
     data(vm, stack).resources.push(resource);
+    vm.heap.note_growth(std::mem::size_of::<Resource>());
     Ok(())
 }
 
@@ -143,6 +144,7 @@ fn add_method(vm: &mut Vm, stack: ObjId, value: Value, method: Value, call: Call
     let d = data(vm, stack);
     let is_async = d.is_async;
     d.resources.push(Resource { value, method, is_async, call });
+    vm.heap.note_growth(std::mem::size_of::<Resource>());
 }
 
 /// Start DisposeResources with the scope's completion (`error` when it is

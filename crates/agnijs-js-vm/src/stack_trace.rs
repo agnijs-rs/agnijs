@@ -402,6 +402,8 @@ impl Vm {
             return;
         };
         let frames = self.capture_frames(limit, None);
+        self.heap
+            .note_growth(frames.len() * std::mem::size_of::<CapturedFrame>());
         if let Class::Error(slot) = &mut self.heap.obj_mut(o).class {
             *slot = Some(Box::new(ErrorStack {
                 frames,
