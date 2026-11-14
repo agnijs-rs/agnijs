@@ -766,7 +766,7 @@ impl Vm {
         // arena counts, is left out of the pacing basis.
         let mut retained_bytes = 0;
         if vm.retain_from != 0 {
-            use crate::heap::{ENV_BYTES, OBJECT_BYTES, STRING_BYTES, SYMBOL_BYTES};
+            use crate::heap::{BIGINT_BYTES, ENV_BYTES, OBJECT_BYTES, STRING_BYTES, SYMBOL_BYTES};
             let before = t.marked_counts();
             let from = vm.retain_from;
             for i in vm.heap.objects.born_before(from) {
@@ -789,7 +789,7 @@ impl Vm {
             retained_bytes = (after[0] - before[0]) * OBJECT_BYTES
                 + (after[1] - before[1]) * STRING_BYTES
                 + (after[2] - before[2]) * SYMBOL_BYTES
-                + (after[3] - before[3]) * 48
+                + (after[3] - before[3]) * BIGINT_BYTES
                 + (after[4] - before[4]) * ENV_BYTES;
         }
         t.ephemerons();
@@ -863,7 +863,7 @@ impl Vm {
             );
             heap.strings.sweep(|s| live_bytes += STRING_BYTES + s.byte_len(), |_| {});
             heap.symbols.sweep(|_| live_bytes += SYMBOL_BYTES, |_| {});
-            heap.bigints.sweep(|_| live_bytes += 48, |_| {});
+            heap.bigints.sweep(|b| live_bytes += b.heap_bytes(), |_| {});
         }
         if watched_died {
             self.heap.bump_proto_epoch();

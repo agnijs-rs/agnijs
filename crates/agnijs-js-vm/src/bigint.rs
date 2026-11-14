@@ -12,6 +12,15 @@ impl BigIntData {
     pub fn is_zero(&self) -> bool {
         self.0.is_zero()
     }
+
+    /// What the memory limit counts for this BigInt: the fixed part plus
+    /// its digits. The allocation charge, the collector's live size and
+    /// `memory_usage` all use it, so a BigInt that survives a collection
+    /// keeps counting at its real size (TASK-103.50).
+    #[inline]
+    pub fn heap_bytes(&self) -> usize {
+        crate::heap::BIGINT_BYTES + self.0.bits().div_ceil(8) as usize
+    }
 }
 
 /// `NumberToBigInt`: exact integral doubles only.

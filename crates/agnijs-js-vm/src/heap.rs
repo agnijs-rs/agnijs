@@ -273,6 +273,8 @@ pub(crate) const OBJECT_BYTES: usize = 160;
 pub(crate) const ENV_BYTES: usize = 64;
 pub(crate) const SYMBOL_BYTES: usize = 32;
 pub(crate) const STRING_BYTES: usize = 40;
+/// A BigInt's fixed part; its digits count on top (`BigIntData::heap_bytes`).
+pub(crate) const BIGINT_BYTES: usize = 48;
 /// The floor of the collection threshold: the least allocation between two
 /// collections, which bounds the garbage a small heap holds. 2 MiB: a
 /// collection with a small live set marks in about 0.2 ms, and the Gable
@@ -720,7 +722,7 @@ impl Heap {
     // ---- bigints -------------------------------------------------------------
 
     pub fn alloc_bigint(&mut self, data: BigIntData) -> BigId {
-        self.charge(32 + data.0.bits() as usize / 8);
+        self.charge(data.heap_bytes());
         let s = self.next_serial();
         BigId(self.bigints.alloc(data, s))
     }
@@ -1169,8 +1171,10 @@ impl Heap {
     pub fn approx_live_bytes(&self) -> usize {
         let mut bytes = self.objects.live() * OBJECT_BYTES
             + self.envs.live() * ENV_BYTES
-            + self.symbols.live() * SYMBOL_BYTES
-            + self.bigints.live() * 48;
+            + self.symbols.live() * SYMBOL_BYTES;
+        for (_, b) in self.bigints.iter() {
+            bytes += b.heap_bytes();
+        }
         for (_, s) in self.strings.iter() {
             bytes += STRING_BYTES + s.byte_len();
         }

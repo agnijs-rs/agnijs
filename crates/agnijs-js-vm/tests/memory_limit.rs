@@ -264,6 +264,37 @@ fn weak_entries_whose_keys_die_leave_the_count() {
     assert_eq!(v, Value::string("done"));
 }
 
+// ---- BigInts ----------------------------------------------------------------------------------
+
+/// The probe from the review (TASK-103.50), smaller: 64 live BigInts of
+/// 1 MiB each. Their digits are charged when they are made, and must
+/// still count after the collections the loop triggers.
+#[test]
+fn live_bigints_count_their_digits_across_collections() {
+    let mut vm = limited(16 * MIB);
+    out_of_memory(
+        &mut vm,
+        "const b = 1n << (2n ** 23n); const k = [];
+         for (let i = 1; i <= 64; i++) k.push(b + BigInt(i));
+         k.length",
+    );
+}
+
+#[test]
+fn memory_usage_reports_bigint_digits_and_releases_them() {
+    let mut vm = vm();
+    vm.collect_garbage();
+    let base = heap_bytes(&mut vm);
+    eval(&mut vm, "globalThis.big = 1n << (2n ** 23n); undefined").unwrap();
+    vm.collect_garbage();
+    let held = heap_bytes(&mut vm);
+    assert!(held >= base + MIB, "{base} -> {held}");
+    eval(&mut vm, "big = null;").unwrap();
+    vm.collect_garbage();
+    let released = heap_bytes(&mut vm);
+    assert!(released < base + 4096, "{base} -> {held} -> {released}");
+}
+
 // ---- built-ins that allocate a large block ----------------------------------------------------
 
 #[test]
