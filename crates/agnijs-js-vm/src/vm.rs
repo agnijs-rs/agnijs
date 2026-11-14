@@ -1069,6 +1069,24 @@ impl Vm {
         self.poll_interrupt()
     }
 
+    /// The poll for native work of a measured size (TASK-103.55): the BigInt
+    /// algorithms report the digit operations of each step, and the host
+    /// is asked about once per 2^20 of them, however they are split. The
+    /// memory limit is checked as [`Vm::poll`] does.
+    pub(crate) fn poll_work(&mut self, work: usize) -> JsResult<()> {
+        if self.heap.attention & crate::heap::ATTENTION_GC != 0 {
+            self.check_memory(0)?;
+        }
+        // At most one ask's worth per call, so no boundary is skipped.
+        let add = (work >> 8).clamp(1, 0x1000) as u32;
+        let before = self.interrupt_counter;
+        self.interrupt_counter = before.wrapping_add(add);
+        if (before ^ self.interrupt_counter) & !0xfff != 0 {
+            return self.ask_host_interrupt();
+        }
+        Ok(())
+    }
+
     #[cold]
     #[inline(never)]
     pub(crate) fn ask_host_interrupt(&mut self) -> JsResult<()> {

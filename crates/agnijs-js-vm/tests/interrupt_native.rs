@@ -245,3 +245,113 @@ fn loops_over_native_iterators_are_interrupted() {
         interrupted(RegexMatcher::Auto, setup, hot);
     }
 }
+
+// ---- BigInt arithmetic (TASK-103.55) -------------------------------------------------------------
+
+/// Parsing, division, multiplication, exponentiation and conversion to a
+/// string are superlinear in the digits; the large ones run in steps of
+/// bounded work and poll between them.
+#[test]
+fn superlinear_big_int_work_is_interrupted() {
+    let setup = "globalThis.a = (1n << 8000000n) - 1n; globalThis.b = (1n << 4000000n) - 3n;
+                 globalThis.c = (1n << 100000000n) - 1n; globalThis.t = 1n << 2000000n;
+                 globalThis.nines = '9'.repeat(1e6);";
+    for hot in [
+        "t.toString().length",
+        "BigInt(nines); 0",
+        "1n < nines",
+        "1n == nines",
+        "a / b; 0",
+        "a % b; 0",
+        "c * (c - 2n); 0",
+        "3n ** 100000000n; 0",
+        "String(t).length",
+        "t.toString(7).length",
+        "new Intl.NumberFormat('en').format(t).length",
+    ] {
+        interrupted(RegexMatcher::Auto, setup, hot);
+    }
+}
+
+/// A result past 2^30 bits, the cap `<<` already applies, is refused
+/// before any of it is computed.
+#[test]
+fn big_int_results_past_the_cap_are_refused_up_front() {
+    let (_host, mut e, realm) = engine(RegexMatcher::Auto);
+    for src in [
+        "(1n << 1000000n) ** 100000n",
+        "2n ** (2n ** 31n)",
+        "(-3n) ** 10000000000n",
+        "(1n << (1n << 29n)) * (1n << ((1n << 29n) + 2n))",
+    ] {
+        let t = Instant::now();
+        let caught = format!(
+            "try {{ {src}; 'no error' }} catch (e) {{ e instanceof RangeError ? e.message : String(e) }}"
+        );
+        let r = e.eval_script(realm, "t.js", &caught);
+        assert_eq!(r.unwrap(), Value::string("Maximum BigInt size exceeded"), "{src}");
+        assert!(t.elapsed() < BOUND, "{src}: took {:?}", t.elapsed());
+    }
+    // Trivial bases and the largest powers still work.
+    for (src, want) in [
+        ("1n ** (2n ** 64n)", "1"),
+        ("(-1n) ** (2n ** 64n + 1n)", "-1"),
+        ("0n ** (2n ** 64n)", "0"),
+        ("2n ** 4096n === 1n << 4096n", "true"),
+        ("(7n ** 100n) * (7n ** 50n) === 7n ** 150n", "true"),
+    ] {
+        let r = e.eval_script(realm, "t.js", &format!("String({src})"));
+        assert_eq!(r.unwrap(), Value::string(want), "{src}");
+    }
+}
+
+/// Power-of-two radixes are linear: a long hex string parses at once.
+#[test]
+fn power_of_two_radix_big_int_parsing_is_linear() {
+    let (_host, mut e, realm) = engine(RegexMatcher::Auto);
+    let t = Instant::now();
+    let r = e.eval_script(
+        realm,
+        "t.js",
+        "BigInt('0x' + 'f'.repeat(4e6)) === (1n << 16000000n) - 1n && BigInt('0b' + '1'.repeat(1e6)) === (1n << 1000000n) - 1n",
+    );
+    assert_eq!(r.unwrap(), Value::Bool(true));
+    assert!(t.elapsed() < BOUND, "took {:?}", t.elapsed());
+}
+
+/// The polled paths give num-bigint's results: each operand is past the
+/// size where the block algorithms take over, and each identity's other
+/// side uses only shifts and additions, which are linear.
+#[test]
+fn polled_big_int_work_gives_exact_results() {
+    let (_host, mut e, realm) = engine(RegexMatcher::Auto);
+    let checks = [
+        // Block multiplication: both operands over 65,536 digits.
+        "const n = 2300000n, m = 2200000n;
+         ((1n << n) - 1n) * ((1n << m) - 1n) === (1n << (n + m)) - (1n << n) - (1n << m) + 1n",
+        "const n = 2300000n; -((1n << n) + 7n) * ((1n << n) - 5n) === -((1n << (2n * n)) + (2n << n) - 35n)",
+        // Block division: 8,192 digits by 2,048.
+        "const x = (1n << 262000n) + 123456789n * (1n << 100000n) + 987654321n, d = (1n << 65000n) - 12345n;
+         const q = x / d, r = x % d;
+         q * d + r === x && r >= 0n && r < d",
+        "const x = (1n << 262000n) + 99n, d = (1n << 65000n) + 1n;
+         (-x) / d === -(x / d) && (-x) % d === -(x % d) && x / (-d) === -(x / d) && x % (-d) === x % d",
+        // Conversion to a string, in chunks of 19 digits, and parsing back.
+        "(10n ** 50000n).toString() === '1' + '0'.repeat(50000)",
+        "(10n ** 50000n - 1n).toString() === '9'.repeat(50000)",
+        "String(-(10n ** 50000n) - 1n) === '-1' + '0'.repeat(49999) + '1'",
+        "(7n ** 30000n).toString(7) === '1' + '0'.repeat(30000)",
+        "(36n ** 20000n - 1n).toString(36) === 'z'.repeat(20000)",
+        "BigInt('1' + '0'.repeat(50000)) === 10n ** 50000n",
+        "BigInt('-' + '9'.repeat(50001)) === -(10n ** 50001n - 1n)",
+        "const t = (1n << 300000n) / 3n; BigInt(t.toString()) === t && BigInt(String(-t)) === -t",
+        "'1' + '0'.repeat(50000) == 10n ** 50000n && 10n ** 50000n > '9'.repeat(50000)",
+        // Powers.
+        "3n ** 2000000n === (3n ** 1000000n) * (3n ** 1000000n)",
+        "(-2n) ** 3000001n === -(1n << 3000001n)",
+    ];
+    for src in checks {
+        let r = e.eval_script(realm, "t.js", &format!("{{ {src} }}"));
+        assert_eq!(r.unwrap(), Value::Bool(true), "{src}");
+    }
+}

@@ -317,11 +317,15 @@ impl Vm {
     }
 
     /// BigInt::toString in `radix` (2 to 36). The length is checked from
-    /// the bit length before the digits are made (TASK-103.54).
+    /// the bit length before the digits are made (TASK-103.54), and a
+    /// long conversion polls (TASK-103.55).
     pub fn bigint_to_string(&mut self, b: crate::value::BigId, radix: u32) -> JsResult<StrId> {
         let min = crate::bigint::min_string_len(&self.heap.bigint(b).0, radix);
         self.check_string_len(min)?;
-        let s = crate::bigint::to_string_radix(&self.heap.bigint(b).0, radix);
+        // The digits are a copy: the conversion polls, and a poll may not
+        // borrow the heap.
+        let v = self.heap.bigint(b).0.clone();
+        let s = crate::bigint::to_string_polled(&v, radix, &mut |w| self.poll_work(w))?;
         Ok(self.heap.alloc_str_latin1(s.into_bytes()))
     }
 
@@ -399,8 +403,8 @@ impl Vm {
             Value::BigInt(b) => Ok(b),
             Value::Bool(b) => Ok(self.alloc_bigint(BigInt::from(b as u8))),
             Value::String(s) => {
-                let u = self.heap.units(s);
-                match crate::bigint::parse(u.iter()) {
+                let u: Vec<u16> = self.heap.units(s).iter().collect();
+                match crate::bigint::parse(&u, &mut |w| self.poll_work(w))? {
                     Some(b) => Ok(self.alloc_bigint(b)),
                     None => {
                         let text = self.heap.str_to_string(s);
@@ -479,8 +483,8 @@ impl Vm {
                 Ok(self.strict_equals(Value::Number(n), b))
             }
             (Value::BigInt(x), Value::String(s)) | (Value::String(s), Value::BigInt(x)) => {
-                let u = self.heap.units(s);
-                match crate::bigint::parse(u.iter()) {
+                let u: Vec<u16> = self.heap.units(s).iter().collect();
+                match crate::bigint::parse(&u, &mut |w| self.poll_work(w))? {
                     Some(n) => Ok(self.heap.bigint(x).0 == n),
                     None => Ok(false),
                 }
@@ -579,29 +583,36 @@ impl Vm {
             (Value::BigInt(a), Value::BigInt(b)) => {
                 let x = self.heap.bigint(a).0.clone();
                 let y = self.heap.bigint(b).0.clone();
+                // Products past the cap `<<` applies are refused up front,
+                // and the superlinear operations poll as they go
+                // (TASK-103.55).
                 let res = match op {
                     ArithOp::Sub => x - y,
-                    ArithOp::Mul => x * y,
-                    ArithOp::Div => {
-                        if y.is_zero() {
-                            return Err(self.throw_range("Division by zero"));
+                    ArithOp::Mul => {
+                        // A product has at least bits(x) + bits(y) - 1 bits.
+                        let bits = x.bits() + y.bits();
+                        if !x.is_zero() && !y.is_zero() && bits - 1 > crate::bigint::MAX_BITS + 1 {
+                            return Err(self.throw_range("Maximum BigInt size exceeded"));
                         }
-                        x / y
+                        self.check_memory(bits.div_ceil(8) as usize)?;
+                        crate::bigint::mul_polled(&x, &y, &mut |w| self.poll_work(w))?
                     }
-                    ArithOp::Mod => {
+                    ArithOp::Div | ArithOp::Mod => {
                         if y.is_zero() {
                             return Err(self.throw_range("Division by zero"));
                         }
-                        x % y
+                        let (q, r) = crate::bigint::div_rem_polled(&x, &y, &mut |w| self.poll_work(w))?;
+                        if op == ArithOp::Div { q } else { r }
                     }
                     ArithOp::Exp => {
                         if y.is_negative() {
                             return Err(self.throw_range("Exponent must be non-negative"));
                         }
-                        match crate::bigint::pow(&x, &y) {
-                            Some(v) => v,
-                            None => return Err(self.throw_range("Maximum BigInt size exceeded")),
-                        }
+                        let Some(bits) = crate::bigint::pow_bits(&x, &y) else {
+                            return Err(self.throw_range("Maximum BigInt size exceeded"));
+                        };
+                        self.check_memory(bits.div_ceil(8) as usize)?;
+                        crate::bigint::pow_polled(&x, &y, &mut |w| self.poll_work(w))?
                     }
                     _ => unreachable!(),
                 };
@@ -701,15 +712,15 @@ impl Vm {
         }
         match (px, py) {
             (Value::BigInt(a), Value::String(s)) => {
-                let u = self.heap.units(s);
-                let Some(n) = crate::bigint::parse(u.iter()) else {
+                let u: Vec<u16> = self.heap.units(s).iter().collect();
+                let Some(n) = crate::bigint::parse(&u, &mut |w| self.poll_work(w))? else {
                     return Ok(None);
                 };
                 return Ok(Some(self.heap.bigint(a).0 < n));
             }
             (Value::String(s), Value::BigInt(b)) => {
-                let u = self.heap.units(s);
-                let Some(n) = crate::bigint::parse(u.iter()) else {
+                let u: Vec<u16> = self.heap.units(s).iter().collect();
+                let Some(n) = crate::bigint::parse(&u, &mut |w| self.poll_work(w))? else {
                     return Ok(None);
                 };
                 return Ok(Some(n < self.heap.bigint(b).0));

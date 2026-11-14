@@ -314,7 +314,8 @@ pub fn num_of(vm: &mut Vm, v: Value) -> JsResult<agnijs_js_intl::number::Num> {
     use agnijs_js_intl::number::Num;
     match v {
         Value::BigInt(b) => {
-            let s = vm.heap.bigint(b).0.to_string();
+            let s = vm.bigint_to_string(b, 10)?;
+            let s = vm.heap.str_to_string(s);
             Ok(Num::Finite(Dec::parse(&s).unwrap_or_else(Dec::zero)))
         }
         _ => {
@@ -332,7 +333,8 @@ pub fn to_intl_mathematical_value(vm: &mut Vm, v: Value) -> JsResult<agnijs_js_i
     let prim = vm.to_primitive(v, crate::convert::Hint::Number)?;
     match prim {
         Value::BigInt(b) => {
-            let s = vm.heap.bigint(b).0.to_string();
+            let s = vm.bigint_to_string(b, 10)?;
+            let s = vm.heap.str_to_string(s);
             Ok(Num::Finite(Dec::parse(&s).unwrap_or_else(Dec::zero)))
         }
         Value::String(s) => {
