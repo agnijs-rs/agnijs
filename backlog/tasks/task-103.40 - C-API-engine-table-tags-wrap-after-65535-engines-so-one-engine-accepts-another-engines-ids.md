@@ -3,9 +3,11 @@ id: TASK-103.40
 title: >-
   C API: engine table tags wrap after 65,535 engines, so one engine accepts
   another engine's ids
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T06:25:00Z'
 labels:
   - bug
   - security
@@ -44,7 +46,30 @@ Test that should catch it: a test that allocates tags past the wrap and checks t
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An id of another live engine is refused with AGNIJS_ERR_WRONG_ENGINE however many engines the process has created
-- [ ] #2 The behaviour for ids of freed engines is either refused or precisely documented in docs/c-api.md and docs/security-model.md
-- [ ] #3 A test covers the wrap without creating 65,535 full engines
+- [x] #1 An id of another live engine is refused with AGNIJS_ERR_WRONG_ENGINE however many engines the process has created
+- [x] #2 The behaviour for ids of freed engines is either refused or precisely documented in docs/c-api.md and docs/security-model.md
+- [x] #3 A test covers the wrap without creating 65,535 full engines
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red unit test: move the engine counter to each 16/20/24-bit wrap point and check ids of a live engine are refused by the other both ways.
+2. Id layout tag:20|gen:16|index:28 with masked join; tags held in a process-wide live set, so no two live engines share one; AGNIJS_ERR_LIMIT when all are live; a TagLease drop frees the tag.
+3. Layout is private (header promises an opaque uint64_t): no ABI bump.
+4. Document precisely what stale ids of freed engines can do in docs/c-api.md.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in dadf526. Id layout is now tag:20 | generation:16 | index:28, joined with masks. Tags come from a process-wide LIVE_TAGS set: the candidate follows the engine counter and a live tag is skipped; a TagLease in EngineState frees it on drop; with 2^20-1 engines alive agnijs_engine_new returns AGNIJS_ERR_LIMIT. agnijs.h is unchanged (ids are opaque uint64_t), so no ABI bump. Freed-engine ids: refused until the tag is reused about a million engines later, then checked like a forged id; documented in docs/c-api.md and docs/security-model.md. Tests move the engine counter to the 16-, 20- and 24-bit wrap points and check both engines refuse each other's values, realms and frees (red before the fix), plus tag-uniqueness and field round-trip tests.
+
+Gates on the rebased tree (base 32efdce): workspace tests pass; test262 0 regressions in quickjs, parse, agnijs default, --precompile, --snapshot, --only-intl402; GC-stress slice and GC-stress unit tests pass; JIT feature VM tests and AGNIJS_JIT=force/on slices 0 regressions; C API fault-injection, fuzz (10x) and cbindgen header drift clean; clippy -D warnings clean on capi, cli, resolve and debugger, and no clippy finding on the touched lines in parser and vm (their pre-existing findings are elsewhere); benchmark with JIT off against 8af8d4a, 4 interleaved rounds of 10 iterations: geomean 0.985, compile-source 0.971, json-stringify 0.981, json-parse 0.983.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+No two live engines can share an id tag, however many engines the process creates, so one engine always refuses another live engine's ids with AGNIJS_ERR_WRONG_ENGINE. The rule for ids of freed engines is documented. The header and ABI are unchanged. Commit dadf526.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -1,9 +1,11 @@
 ---
 id: TASK-103.37
 title: 'CLI: a sourceMappingURL with a non-ASCII byte after % panics the process'
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T06:25:00Z'
 labels:
   - bug
 dependencies: []
@@ -42,7 +44,30 @@ Test that should catch it: a unit test in agnijs-cli for `source_map_for` / `per
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A script or module whose data: sourceMappingURL has a multi-byte character after % runs (the map is ignored) instead of panicking
-- [ ] #2 A trailing escape such as %41 at the end of the URL is decoded
-- [ ] #3 agnijs-cli has a test for both cases
+- [x] #1 A script or module whose data: sourceMappingURL has a multi-byte character after % runs (the map is ignored) instead of panicking
+- [x] #2 A trailing escape such as %41 at the end of the URL is decoded
+- [x] #3 agnijs-cli has a test for both cases
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red unit tests for the CLI percent decoder and data: URLs, plus a CLI integration test running a script and a module with the bad escape; and a drive-relative path with a multi-byte name through absolute().
+2. Replace the CLI's string-slicing percent_decode with the debugger's byte-based one (made pub).
+3. Fix absolute() splitting C:<multi-byte> inside a character.
+4. Sweep for other from_str_radix/byte-offset slicing on user text.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in caa2984. The CLI's str-slicing percent decoder is replaced by the debugger's byte-based one (agnijs_js_debugger::source_map::percent_decode, made public), which keeps a % not followed by two hex digits; a bad escape now yields an unparsable map that is ignored. Same class in the same file: absolute() split C: paths at byte 3, inside a multi-byte character for drive-relative paths like C:é.js; fixed. Tests: host.rs unit tests (decoder, trailing %41, data: URLs, absolute()) and tests/cli.rs a_source_map_url_with_a_bad_escape_does_not_crash for a script and an imported module; red before the fix.
+
+Gates on the rebased tree (base 32efdce): workspace tests pass; test262 0 regressions in quickjs, parse, agnijs default, --precompile, --snapshot, --only-intl402; GC-stress slice and GC-stress unit tests pass; JIT feature VM tests and AGNIJS_JIT=force/on slices 0 regressions; C API fault-injection, fuzz (10x) and cbindgen header drift clean; clippy -D warnings clean on capi, cli, resolve and debugger, and no clippy finding on the touched lines in parser and vm (their pre-existing findings are elsewhere); benchmark with JIT off against 8af8d4a, 4 interleaved rounds of 10 iterations: geomean 0.985, compile-source 0.971, json-stringify 0.981, json-parse 0.983.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A data: sourceMappingURL with a multi-byte character after % no longer panics the CLI; the map is ignored and the script or module runs. A trailing escape is still decoded. The CLI now shares the debugger's byte-based decoder, and absolute() no longer splits a path inside a character. Commit caa2984.
+<!-- SECTION:FINAL_SUMMARY:END -->

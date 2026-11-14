@@ -3,9 +3,11 @@ id: TASK-103.47
 title: >-
   IsArray, IsConstructor and GetFunctionRealm recurse through proxy and
   bound-function chains without a stack check
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T06:25:00Z'
 labels:
   - bug
   - security
@@ -47,7 +49,29 @@ Test that should catch it: VM tests with chains of 1e6 proxies and bound functio
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Array.isArray, new and Reflect.construct over 1e6-link proxy or bound chains give a correct result or a catchable RangeError
-- [ ] #2 The fix holds in debug and release builds
-- [ ] #3 VM tests cover the three operations
+- [x] #1 Array.isArray, new and Reflect.construct over 1e6-link proxy or bound chains give a correct result or a catchable RangeError
+- [x] #2 The fix holds in debug and release builds
+- [x] #3 VM tests cover the three operations
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red tests in child processes: a million-deep proxy chain through Array.isArray, toString and concat; bound-function chains through new, Reflect.construct and instanceof.
+2. Turn IsArray, IsConstructor and GetFunctionRealm into loops.
+3. Sweep other spec operations that follow proxy targets or bound targets recursively.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in 771fff6. is_array, is_constructor and function_realm follow proxy and bound-function chains in a loop; the common case stays an inline match and the loops are out of line. Same class found and fixed: InstanceofOperator over bound functions without @@hasInstance recursed per link. That recursion is spec-shaped (it looks up @@hasInstance at each link), so it stays and now calls check_stack. Tests: vm/tests/deep_native_chains.rs, 8 cases in child processes (Array.isArray, toString and concat over proxies; new, Reflect.construct and instanceof over bound chains, with and without prototypes; proxied and bound new.target); red before the fix, green in debug and release.
+
+Gates on the rebased tree (base 32efdce): workspace tests pass; test262 0 regressions in quickjs, parse, agnijs default, --precompile, --snapshot, --only-intl402; GC-stress slice and GC-stress unit tests pass; JIT feature VM tests and AGNIJS_JIT=force/on slices 0 regressions; C API fault-injection, fuzz (10x) and cbindgen header drift clean; clippy -D warnings clean on capi, cli, resolve and debugger, and no clippy finding on the touched lines in parser and vm (their pre-existing findings are elsewhere); benchmark with JIT off against 8af8d4a, 4 interleaved rounds of 10 iterations: geomean 0.985, compile-source 0.971, json-stringify 0.981, json-parse 0.983.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Array.isArray, new, Reflect.construct, Object.prototype.toString and instanceof over chains of a million proxies or bound functions return the right result or a catchable RangeError, in debug and release, instead of overflowing the native stack. Commit 771fff6.
+<!-- SECTION:FINAL_SUMMARY:END -->

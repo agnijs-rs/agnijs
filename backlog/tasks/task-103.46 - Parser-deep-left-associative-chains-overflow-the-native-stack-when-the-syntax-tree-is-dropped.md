@@ -3,9 +3,11 @@ id: TASK-103.46
 title: >-
   Parser: deep left-associative chains overflow the native stack when the syntax
   tree is dropped
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:48:00Z'
+updated_date: '2026-11-14T06:25:00Z'
 labels:
   - bug
   - security
@@ -42,7 +44,29 @@ Test that should catch it: parser and VM tests for each chain form (binary, logi
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Binary, logical, ??, member, optional-chain, call, new and tagged-template chains of 1e6 links give a catchable error at top level and in eval
-- [ ] #2 No AST drop recurses deeper than the compiler accepts
-- [ ] #3 Parser or VM tests cover each chain form on a default-size thread
+- [x] #1 Binary, logical, ??, member, optional-chain, call, new and tagged-template chains of 1e6 links give a catchable error at top level and in eval
+- [x] #2 No AST drop recurses deeper than the compiler accepts
+- [x] #3 Parser or VM tests cover each chain form on a default-size thread
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red tests that run each deep-chain form in a child process (a stack overflow fails one test, not the suite): parser parse+drop and VM top-level and eval.
+2. Drop impls for Binary, Logical, Member, Call, New and TaggedTemplate that detach the left spine and drop it in a loop.
+3. Check the compiler and other AST walkers stop at the budget.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Fixed in b5f79bb. BinaryExpression, LogicalExpression, MemberExpression, CallExpression, NewExpression and TaggedTemplate implement Drop: when the left spine below a node is more than one chain link deep, the node detaches it and drops the links in a loop, so no AST drop recurses along a chain; short chains pay one check. The compiler already stops at the stack budget, so a 1e6-link chain is a catchable RangeError/SyntaxError. parser/expr.rs uses mem::take for call.arguments (Drop forbids the move). Sweep: no other unchecked recursive AST walkers (compiler and analysis check the stack). Tests run each form in a child process: parser/tests/deep_chains.rs (14 forms, script and module, default-size thread) and vm/tests/deep_chains.rs (11 forms, top level and eval); red before the fix, green in debug and release.
+
+Gates on the rebased tree (base 32efdce): workspace tests pass; test262 0 regressions in quickjs, parse, agnijs default, --precompile, --snapshot, --only-intl402; GC-stress slice and GC-stress unit tests pass; JIT feature VM tests and AGNIJS_JIT=force/on slices 0 regressions; C API fault-injection, fuzz (10x) and cbindgen header drift clean; clippy -D warnings clean on capi, cli, resolve and debugger, and no clippy finding on the touched lines in parser and vm (their pre-existing findings are elsewhere); benchmark with JIT off against 8af8d4a, 4 interleaved rounds of 10 iterations: geomean 0.985, compile-source 0.971, json-stringify 0.981, json-parse 0.983.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Parsing and then dropping a left-associative chain of a million links (binary, logical, ??, member, optional, call, new, tagged template) no longer overflows the native stack. The AST drops such chains iteratively, and the VM reports a catchable error at top level and in eval. Commit b5f79bb.
+<!-- SECTION:FINAL_SUMMARY:END -->
