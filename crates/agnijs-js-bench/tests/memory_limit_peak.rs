@@ -133,3 +133,26 @@ fn a_16_mib_limit_stops_a_one_gib_repeat_without_allocating_it() {
     let peak = peak_while_refused("new ArrayBuffer(4294967295).byteLength");
     assert!(peak < BOUND, "peak {} MiB", peak / MIB);
 }
+
+/// Set/delete churn reuses a Map's and a Set's slots (TASK-103.32): two
+/// million rounds, which once kept a 32-byte slot each, allocate almost
+/// nothing. No limit is set, so this measures the collections themselves.
+#[test]
+fn set_delete_churn_does_not_grow_the_process() {
+    let mut vm = Vm::new(TestHost::new());
+    vm.heap.stress = false;
+    vm.collect_garbage();
+    let realm = vm.main_realm();
+    let before = HELD.with(Cell::get);
+    PEAK.with(|p| p.set(before));
+    let r = vm.eval_script(
+        realm,
+        "t.js",
+        "const m = new Map(), s = new Set();
+         for (let i = 0; i < 2e6; i++) { m.set(i, i); m.delete(i); s.add(i); s.delete(i); }
+         m.size + s.size",
+    );
+    let peak = PEAK.with(Cell::get) - before;
+    assert!(r.is_ok(), "{r:?}");
+    assert!(peak < 8 * MIB as isize, "peak {} MiB", peak / MIB as isize);
+}

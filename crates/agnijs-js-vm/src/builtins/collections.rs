@@ -10,23 +10,58 @@ use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Value};
 use crate::vm::{JsResult, Job, Vm};
 
-/// Insertion-ordered entries with tombstones so live iterators survive
-/// deletions; `index` maps a normalised key to its entry slot.
+/// Insertion-ordered entries; `index` maps a normalised key to its entry
+/// slot. A deletion leaves an empty slot so that positions held by live
+/// iterators and native loops stay meaningful, and once empty slots
+/// outnumber live entries they are dropped (`compact_if_sparse`,
+/// TASK-103.32). Every slot carries an insertion sequence number, so a
+/// position held across a compaction (`Cursor`) finds its place again.
 pub struct MapData {
-    pub entries: Vec<Option<(Value, Value)>>,
+    entries: Vec<Slot>,
     pub index: hashbrown::HashMap<MapKey, usize>,
     pub live: usize,
     pub weak: bool,
     /// Bytes the live keys hold outside the index (string and BigInt
     /// contents), for `heap_bytes`.
     key_bytes: usize,
+    /// The sequence number of the next entry added. Slots in `entries`
+    /// are in increasing sequence order.
+    next_seq: u64,
 }
+
+/// One entry slot: `None` once its entry was deleted.
+#[derive(Clone, Copy)]
+struct Slot {
+    seq: u64,
+    entry: Option<(Value, Value)>,
+}
+
+/// What one slot in `entries` costs in the memory limit, whether or not
+/// its entry is still there.
+const SLOT_BYTES: usize = std::mem::size_of::<Slot>();
 
 /// What one live entry costs in the memory limit (TASK-103.25): its slot
 /// in `entries` and its key and position in `index` (with hashbrown's
 /// control byte), not counting the contents of a string or BigInt key.
-pub const MAP_ENTRY_BYTES: usize =
-    std::mem::size_of::<Option<(Value, Value)>>() + std::mem::size_of::<(MapKey, usize)>() + 1;
+pub const MAP_ENTRY_BYTES: usize = SLOT_BYTES + std::mem::size_of::<(MapKey, usize)>() + 1;
+
+/// Empty slots a collection keeps before it compacts, at most: more than
+/// this many and more than it has live entries.
+const MAX_SPARE_SLOTS: usize = 16;
+
+/// A position in a collection's insertion order: the next entry to visit
+/// is the first live one whose sequence number is at least `seq`. `index`
+/// is where that entry was last found; a compaction moves it, and the
+/// next step then finds it again by sequence number. Entries added later
+/// have larger numbers, so a cursor reaches them; an entry deleted and
+/// added again comes after every cursor. A cleared collection keeps
+/// counting, so a cursor taken before `clear` sees only what is added
+/// after it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Cursor {
+    index: usize,
+    seq: u64,
+}
 
 /// A SameValueZero-normalised key: `-0` is `+0`, NaN equals NaN, strings
 /// compare by content.
@@ -50,6 +85,7 @@ impl MapData {
             live: 0,
             weak,
             key_bytes: 0,
+            next_seq: 0,
         }
     }
 
@@ -67,13 +103,25 @@ impl MapData {
         MAP_ENTRY_BYTES + Self::key_payload(key)
     }
 
-    /// The bytes the live entries hold, which the memory limit and
-    /// `memory_usage` count with the collection object (TASK-103.25).
-    /// The tombstones a Map or Set keeps for its iterators after a
-    /// deletion are not counted (see `docs/security-model.md`); a WeakMap
-    /// or WeakSet, which has no iterators, drops them (`remove`).
+    /// The bytes the collection holds, which the memory limit and
+    /// `memory_usage` count with the collection object (TASK-103.25):
+    /// every slot, empty or not, and the index entries and key contents
+    /// of the live entries. Empty slots are bounded by the compaction
+    /// in `remove` (TASK-103.32).
     pub fn heap_bytes(&self) -> usize {
-        self.live * MAP_ENTRY_BYTES + self.key_bytes
+        self.entries.len() * SLOT_BYTES
+            + self.live * (MAP_ENTRY_BYTES - SLOT_BYTES)
+            + self.key_bytes
+    }
+
+    /// The live entries in insertion order.
+    pub fn iter(&self) -> impl Iterator<Item = &(Value, Value)> {
+        self.entries.iter().filter_map(|s| s.entry.as_ref())
+    }
+
+    /// The entry in slot `i`, as `index` records it.
+    pub fn slot(&self, i: usize) -> Option<(Value, Value)> {
+        self.entries.get(i).and_then(|s| s.entry)
     }
 
     /// Strong collections trace keys and values. Weak ones trace nothing
@@ -83,16 +131,14 @@ impl MapData {
         if self.weak {
             return;
         }
-        for e in self.entries.iter().flatten() {
+        for e in self.iter() {
             t.value(e.0);
             t.value(e.1);
         }
     }
 
     pub fn get(&self, key: &MapKey) -> Option<Value> {
-        self.index
-            .get(key)
-            .and_then(|&i| self.entries[i].as_ref().map(|e| e.1))
+        self.index.get(key).and_then(|&i| self.slot(i).map(|e| e.1))
     }
 
     pub fn has(&self, key: &MapKey) -> bool {
@@ -102,14 +148,18 @@ impl MapData {
     /// Insert or overwrite; returns `true` when the key was new.
     pub fn set(&mut self, key: MapKey, k: Value, v: Value) -> bool {
         if let Some(&i) = self.index.get(&key) {
-            if let Some(e) = &mut self.entries[i] {
+            if let Some(Slot { entry: Some(e), .. }) = self.entries.get_mut(i) {
                 e.1 = v;
             }
             return false;
         }
         self.key_bytes += Self::key_payload(&key);
         self.index.insert(key, self.entries.len());
-        self.entries.push(Some((k, v)));
+        self.entries.push(Slot {
+            seq: self.next_seq,
+            entry: Some((k, v)),
+        });
+        self.next_seq += 1;
         self.live += 1;
         true
     }
@@ -118,35 +168,39 @@ impl MapData {
         match self.index.remove_entry(key) {
             Some((key, i)) => {
                 self.key_bytes -= Self::key_payload(&key);
-                self.entries[i] = None;
-                self.live -= 1;
-                if self.weak {
-                    self.compact_if_sparse();
+                if let Some(s) = self.entries.get_mut(i) {
+                    s.entry = None;
                 }
+                self.live -= 1;
+                self.compact_if_sparse();
                 true
             }
             None => false,
         }
     }
 
-    /// A weak collection has no iterators, so nothing holds a position in
-    /// `entries`: once tombstones outnumber the live entries, drop them
-    /// and renumber the index. Without this, a WeakMap whose keys keep
-    /// dying would grow by a slot per key it ever held.
+    /// Once empty slots outnumber the live entries (and there are more
+    /// than `MAX_SPARE_SLOTS`), drop them and renumber the index. Cursors
+    /// find their place again by sequence number, so this may run while
+    /// an iterator or a native loop is partway through. Without it, a
+    /// collection that keeps adding and deleting would grow by a slot per
+    /// entry it ever held (TASK-103.32); with it, the slots are at most
+    /// twice the live entries plus `MAX_SPARE_SLOTS`, and each compaction
+    /// is paid for by the deletions since the last.
     fn compact_if_sparse(&mut self) {
         let dead = self.entries.len() - self.live;
-        if dead <= 16 || dead <= self.live {
+        if dead <= MAX_SPARE_SLOTS || dead <= self.live {
             return;
         }
         let mut renumber = vec![0usize; self.entries.len()];
         let mut next = 0;
-        for (i, e) in self.entries.iter().enumerate() {
-            if e.is_some() {
+        for (i, s) in self.entries.iter().enumerate() {
+            if s.entry.is_some() {
                 renumber[i] = next;
                 next += 1;
             }
         }
-        self.entries.retain(Option::is_some);
+        self.entries.retain(|s| s.entry.is_some());
         self.entries.shrink_to_fit();
         for i in self.index.values_mut() {
             *i = renumber[*i];
@@ -154,13 +208,43 @@ impl MapData {
         self.index.shrink_to_fit();
     }
 
+    /// Delete every entry. Sequence numbers keep counting, so a cursor
+    /// taken before goes on with the entries added after.
     pub fn clear(&mut self) {
-        for e in self.entries.iter_mut() {
-            *e = None;
-        }
-        self.index.clear();
+        self.entries = Vec::new();
+        self.index = hashbrown::HashMap::new();
         self.live = 0;
         self.key_bytes = 0;
+    }
+
+    /// The next live entry at or after `c`, moving `c` past it; `None`
+    /// at the end, with `c` at the end.
+    pub fn next_entry(&self, c: &mut Cursor) -> Option<(Value, Value)> {
+        let e = &self.entries;
+        // `c.index` is still right unless a compaction moved its entry:
+        // then find the first slot at or after `c.seq` again.
+        let at_or_after = e.get(c.index).is_none_or(|s| s.seq >= c.seq);
+        let before = c.index == 0 || e.get(c.index - 1).is_some_and(|s| s.seq < c.seq);
+        let mut i = if c.index <= e.len() && at_or_after && before {
+            c.index
+        } else {
+            e.partition_point(|s| s.seq < c.seq)
+        };
+        while let Some(s) = e.get(i) {
+            i += 1;
+            if let Some(entry) = s.entry {
+                *c = Cursor {
+                    index: i,
+                    seq: s.seq + 1,
+                };
+                return Some(entry);
+            }
+        }
+        *c = Cursor {
+            index: i,
+            seq: self.next_seq,
+        };
+        None
     }
 
     /// A compacted copy in insertion order (no live iterators point into
@@ -170,7 +254,7 @@ impl MapData {
         by_slot.sort_by_key(|(i, _)| *i);
         let mut out = MapData::new(self.weak);
         for (i, key) in by_slot {
-            if let Some((k, v)) = self.entries[i] {
+            if let Some((k, v)) = self.slot(i) {
                 out.set(key.clone(), k, v);
             }
         }
@@ -180,7 +264,7 @@ impl MapData {
 
 pub struct MapIterState {
     pub target: Option<ObjId>,
-    pub index: usize,
+    pub cursor: Cursor,
     pub kind: IterKind,
 }
 
@@ -230,11 +314,7 @@ pub fn process_weak(vm: &mut Vm, weak: &[ObjId]) {
             Class::WeakMap(m) | Class::WeakSet(m) => m
                 .index
                 .iter()
-                .filter(|(_, &i)| {
-                    m.entries[i]
-                        .map(|(k, _)| !vm.is_value_marked(k))
-                        .unwrap_or(false)
-                })
+                .filter(|(_, &i)| m.slot(i).is_some_and(|(k, _)| !vm.is_value_marked(k)))
                 .map(|(k, _)| k.clone())
                 .collect(),
             _ => Vec::new(),
@@ -672,20 +752,13 @@ fn map_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     // Series (`Vm::callback_series`): the entry is read from the map and
     // passed straight to the call; nothing else is held between calls.
     vm.callback_series(&[a.this, f, this_arg], |vm| {
-        let mut i = 0;
+        let mut c = Cursor::default();
         loop {
             vm.poll_interrupt()?;
-            let entry = {
-                let d = data_ref(vm, o);
-                if i >= d.entries.len() {
-                    break;
-                }
-                d.entries[i]
+            let Some((k, v)) = data_ref(vm, o).next_entry(&mut c) else {
+                break;
             };
-            i += 1;
-            if let Some((k, v)) = entry {
-                vm.call_value(f, this_arg, &[v, k, a.this])?;
-            }
+            vm.call_value(f, this_arg, &[v, k, a.this])?;
         }
         Ok(Value::Undefined)
     })
@@ -699,7 +772,7 @@ fn create_map_iterator(vm: &mut Vm, o: ObjId, kind: IterKind, set: bool) -> Valu
     });
     let st = Box::new(MapIterState {
         target: Some(o),
-        index: 0,
+        cursor: Cursor::default(),
         kind,
     });
     let class = if set {
@@ -729,8 +802,8 @@ fn iterator_next(vm: &mut Vm, a: &CallArgs, set: bool) -> JsResult<Value> {
     let Some(o) = a.this.as_object() else {
         return vm.type_error(&format!("%{name}IteratorPrototype%.next called on incompatible receiver"));
     };
-    let (target, index, kind) = match (&vm.heap.obj(o).class, set) {
-        (Class::MapIterator(s), false) | (Class::SetIterator(s), true) => (s.target, s.index, s.kind),
+    let (target, mut cursor, kind) = match (&vm.heap.obj(o).class, set) {
+        (Class::MapIterator(s), false) | (Class::SetIterator(s), true) => (s.target, s.cursor, s.kind),
         _ => {
             return vm.type_error(&format!("%{name}IteratorPrototype%.next called on incompatible receiver"))
         }
@@ -738,18 +811,7 @@ fn iterator_next(vm: &mut Vm, a: &CallArgs, set: bool) -> JsResult<Value> {
     let Some(t) = target else {
         return Ok(vm.create_iter_result(Value::Undefined, true));
     };
-    let mut i = index;
-    let found = loop {
-        let d = data_ref(vm, t);
-        if i >= d.entries.len() {
-            break None;
-        }
-        let e = d.entries[i];
-        i += 1;
-        if let Some(e) = e {
-            break Some(e);
-        }
-    };
+    let found = data_ref(vm, t).next_entry(&mut cursor);
     match found {
         None => {
             if let Class::MapIterator(s) | Class::SetIterator(s) = &mut vm.heap.obj_mut(o).class {
@@ -759,7 +821,7 @@ fn iterator_next(vm: &mut Vm, a: &CallArgs, set: bool) -> JsResult<Value> {
         }
         Some((k, v)) => {
             if let Class::MapIterator(s) | Class::SetIterator(s) = &mut vm.heap.obj_mut(o).class {
-                s.index = i;
+                s.cursor = cursor;
             }
             let value = match kind {
                 IterKind::Keys => k,
@@ -829,20 +891,13 @@ fn set_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let this_arg = a.arg(1);
     // Series, as for Map.prototype.forEach.
     vm.callback_series(&[a.this, f, this_arg], |vm| {
-        let mut i = 0;
+        let mut c = Cursor::default();
         loop {
             vm.poll_interrupt()?;
-            let entry = {
-                let d = data_ref(vm, o);
-                if i >= d.entries.len() {
-                    break;
-                }
-                d.entries[i]
+            let Some((k, _)) = data_ref(vm, o).next_entry(&mut c) else {
+                break;
             };
-            i += 1;
-            if let Some((k, _)) = entry {
-                vm.call_value(f, this_arg, &[k, k, a.this])?;
-            }
+            vm.call_value(f, this_arg, &[k, k, a.this])?;
         }
         Ok(Value::Undefined)
     })
@@ -911,11 +966,10 @@ fn call_has(vm: &mut Vm, rec: &SetRecord, v: Value) -> JsResult<bool> {
     Ok(vm.to_boolean(r))
 }
 
-/// The raw entry at `i` of the receiver's SetData (None when `i` is past
-/// the end, Some(None) for an empty slot).
-fn raw_entry(vm: &Vm, o: ObjId, i: usize) -> Option<Option<Value>> {
-    let d = data_ref(vm, o);
-    d.entries.get(i).map(|e| e.map(|(k, _)| k))
+/// The next element of the receiver's SetData at or after `c`, moving `c`
+/// past it (None at the end).
+fn next_key(vm: &Vm, o: ObjId, c: &mut Cursor) -> Option<Value> {
+    data_ref(vm, o).next_entry(c).map(|(k, _)| k)
 }
 
 /// The result Set of a Set method, allocated before the method calls back
@@ -947,15 +1001,12 @@ fn set_intersection(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let result = new_set_from(vm, MapData::new(false));
     let this_size = data_ref(vm, o).live as f64;
     if this_size <= rec.size {
-        let mut i = 0;
-        while let Some(slot) = raw_entry(vm, o, i) {
+        let mut c = Cursor::default();
+        while let Some(e) = next_key(vm, o, &mut c) {
             vm.poll_interrupt()?;
-            i += 1;
-            if let Some(e) = slot {
-                if call_has(vm, &rec, e)? {
-                    let k = map_key(vm, e);
-                    map_insert(vm, result, k, e, Value::Undefined);
-                }
+            if call_has(vm, &rec, e)? {
+                let k = map_key(vm, e);
+                map_insert(vm, result, k, e, Value::Undefined);
             }
         }
     } else {
@@ -979,15 +1030,12 @@ fn set_difference(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let result = new_set_from(vm, copy);
     let this_size = data_ref(vm, o).live as f64;
     if this_size <= rec.size {
-        let mut i = 0;
-        while let Some(slot) = raw_entry(vm, o, i) {
+        let mut c = Cursor::default();
+        while let Some(e) = next_key(vm, o, &mut c) {
             vm.poll_interrupt()?;
-            i += 1;
-            if let Some(e) = slot {
-                if call_has(vm, &rec, e)? {
-                    let k = map_key(vm, e);
-                    data(vm, result).remove(&k);
-                }
+            if call_has(vm, &rec, e)? {
+                let k = map_key(vm, e);
+                data(vm, result).remove(&k);
             }
         }
     } else {
@@ -1026,14 +1074,11 @@ fn set_is_subset_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if (data_ref(vm, o).live as f64) > rec.size {
         return Ok(Value::Bool(false));
     }
-    let mut i = 0;
-    while let Some(slot) = raw_entry(vm, o, i) {
+    let mut c = Cursor::default();
+    while let Some(e) = next_key(vm, o, &mut c) {
         vm.poll_interrupt()?;
-        i += 1;
-        if let Some(e) = slot {
-            if !call_has(vm, &rec, e)? {
-                return Ok(Value::Bool(false));
-            }
+        if !call_has(vm, &rec, e)? {
+            return Ok(Value::Bool(false));
         }
     }
     Ok(Value::Bool(true))
@@ -1061,14 +1106,11 @@ fn set_is_disjoint_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let o = this_coll(vm, a.this, Kind::Set, "isDisjointFrom")?;
     let rec = get_set_record(vm, a.arg(0))?;
     if (data_ref(vm, o).live as f64) <= rec.size {
-        let mut i = 0;
-        while let Some(slot) = raw_entry(vm, o, i) {
+        let mut c = Cursor::default();
+        while let Some(e) = next_key(vm, o, &mut c) {
             vm.poll_interrupt()?;
-            i += 1;
-            if let Some(e) = slot {
-                if call_has(vm, &rec, e)? {
-                    return Ok(Value::Bool(false));
-                }
+            if call_has(vm, &rec, e)? {
+                return Ok(Value::Bool(false));
             }
         }
     } else {

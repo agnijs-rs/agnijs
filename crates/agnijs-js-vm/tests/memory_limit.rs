@@ -208,11 +208,12 @@ fn weak_collection_entries_count() {
 }
 
 /// docs/security-model.md quotes this size; on 64-bit targets the entry
-/// slot is 32 bytes and the index entry 40, plus a control byte.
+/// slot is 40 bytes (the key and value and the slot's sequence number,
+/// TASK-103.32) and the index entry 40, plus a control byte.
 #[test]
 #[cfg(target_pointer_width = "64")]
-fn a_collection_entry_counts_73_bytes() {
-    assert_eq!(agnijs_js_vm::builtins::collections::MAP_ENTRY_BYTES, 73);
+fn a_collection_entry_counts_81_bytes() {
+    assert_eq!(agnijs_js_vm::builtins::collections::MAP_ENTRY_BYTES, 81);
 }
 
 /// String keys are copied into the key index, so their length counts.

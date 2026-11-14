@@ -707,7 +707,7 @@ impl<'v> Writer<'v> {
                 refs.push((Value::String(r.flags), "OriginalFlags"));
             }
             Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => {
-                for (k, v) in m.entries.iter().flatten() {
+                for (k, v) in m.iter() {
                     refs.push((*k, "MapData"));
                     refs.push((*v, "MapData"));
                 }
@@ -1326,7 +1326,7 @@ fn write_object(vm: &Vm, ctx: &Ctx, cref: &dyn Fn(&Rc<CodeBlock>) -> u32, out: &
         }
         Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => {
             out.len(m.live);
-            for (k, v) in m.entries.iter().flatten() {
+            for (k, v) in m.iter() {
                 ctx.value(out, *k);
                 ctx.value(out, *v);
             }

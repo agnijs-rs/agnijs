@@ -343,7 +343,7 @@ impl<'v> Tracer<'v> {
                 let o = self.weak[i];
                 i += 1;
                 if let Class::WeakMap(m) = &vm.heap.obj(o).class {
-                    for (k, v) in m.entries.iter().flatten() {
+                    for (k, v) in m.iter() {
                         if self.is_marked(*k) && !self.is_marked(*v) {
                             self.value(*v);
                         }
