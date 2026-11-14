@@ -3,9 +3,11 @@ id: TASK-103.35
 title: >-
   JIT: a panic in Runtime::fast or Runtime::global is swallowed instead of
   resumed by enter
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:38:00Z'
+updated_date: '2026-11-14T04:46:00Z'
 labels:
   - bug
   - jit
@@ -58,7 +60,32 @@ Give the two trampolines the same three-way treatment `call_out` has: `Ok(Some(v
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A panic in Runtime::fast or Runtime::global leaves Compiled::enter as that panic, as one in Runtime::slow does
-- [ ] #2 Tests against a toy runtime cover a panic in fast and in global, beside the existing ones in the JIT crate
-- [ ] #3 The exec.rs module docs and the two trampolines agree
+- [x] #1 A panic in Runtime::fast or Runtime::global leaves Compiled::enter as that panic, as one in Runtime::slow does
+- [x] #2 Tests against a toy runtime cover a panic in fast and in global, beside the existing ones in the JIT crate
+- [x] #3 The exec.rs module docs and the two trampolines agree
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red tests against toy runtimes: a panic in Runtime::fast (tests/enter.rs, beside a sibling for slow) and in Runtime::global (tests/calls.rs, a toy that describes a frame stack so that code is compiled with global sites).
+2. exec.rs: one helper for the two trampolines with call_out's three-way treatment: a hit continues, a miss goes to the generic path, a panic is parked and answered with EXIT_PANIC for enter to resume.
+3. Check every other trampoline against the module docs' promise and make the docs say what the code does (arith has no context to park in).
+4. Review status column.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red first: `a_panic_in_fast_leaves_enter_as_a_panic` (tests/enter.rs) and `a_panic_in_global_leaves_enter_as_a_panic` (tests/calls.rs) both got `Ok(Return)`; the sibling for `slow` was green. The global test needs code compiled with global sites, so tests/calls.rs adds a toy runtime that describes a frame stack, function objects and a callee table (`CallLayout`, `HeapLayout`), which TASK-103.36 uses too.
+
+Fix: `exec::hit_or_out`, one helper for `fast_trampoline` and `global_trampoline`, with `call_out`'s three answers: a hit continues at pc + 1, a miss calls out, a panic is parked (`park_panic`) and answered with EXIT_PANIC. Every other trampoline was read against the module docs: slow, call, returned, poll, deopt and left park the payload. `arith_trampoline` does not and cannot: it takes two numbers and no context. It answers NaN for a panic, which is the same class of swallowing; `Runtime::arith` is pure and documented not to panic, so it was left as it is and the module docs now name it as the one exception. Gates: with TASK-103.34's (JIT crate tests, clippy, Miri, VM suite plain and forced).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A panic in `Runtime::fast` or `Runtime::global` now leaves `Compiled::enter` as that panic. Both trampolines go through `exec::hit_or_out`, which parks the payload and answers EXIT_PANIC as the generic path does; before, the payload was dropped and the instruction run again.
+
+Verified by toy-runtime tests, red before the fix: a panic in fast (tests/enter.rs) and in global (tests/calls.rs), each also checking the instruction is not run again. The exec.rs module docs list which trampolines park a panic and say why arith's does not (no context, pure, documented not to panic; it answers NaN). That one is still a swallowed panic by design and was not changed.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -3,9 +3,11 @@ id: TASK-103.36
 title: >-
   JIT: a directly called function that leaves with a leftover pc is read by its
   caller as its own continuation (latent)
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:38:00Z'
+updated_date: '2026-11-14T04:46:00Z'
 labels:
   - bug
   - jit
@@ -50,7 +52,33 @@ Make the word unambiguous where it crosses a frame: in the thunk's "left" path (
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A word below EXIT_BASE returned by a directly called function never reaches the calling site as a pc to continue at
-- [ ] #2 A test with a toy runtime whose callee answers a non-successor pc shows the caller leaving for the interpreter with both frames intact
-- [ ] #3 docs/design/jit-deopt-and-gc-maps.md section 9 states what a directly called function may answer
+- [x] #1 A word below EXIT_BASE returned by a directly called function never reaches the calling site as a pc to continue at
+- [x] #2 A test with a toy runtime whose callee answers a non-successor pc shows the caller leaving for the interpreter with both frames intact
+- [x] #3 docs/design/jit-deopt-and-gc-maps.md section 9 states what a directly called function may answer
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red test with a toy runtime that describes a frame stack (tests/calls.rs): a callee called directly whose call out is answered with the caller's own pc + 1; the caller must leave for the interpreter with both frames intact.
+2. exec.rs: the word a directly called function answers is translated where it crosses the frame, in the thunk's left path (left_trampoline): only the exit codes that mean the same to every frame pass; a pc of the callee's becomes EXIT_INTERP.
+3. State the contract where each side relies on it: the exit codes, compile_thunk, Lower::thunk, and section 9 of docs/design/jit-deopt-and-gc-maps.md.
+4. Check the other paths by which a word reaches a call site (returned, the runtime's call, the nested entry).
+5. Review status column.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red first, and no longer only latent in the JIT crate: the toy runtime of tests/calls.rs answers a directly called function's call out with the caller's own pc + 1, and before the fix the caller ran on to its `Return` (`Exit::Return`) with the callee's frame still on the stack. Still unreachable from JavaScript for the reasons in the description.
+
+Fix: `exec::left_code`, used by `left_trampoline`: EXIT_FRAME, EXIT_FAULT, EXIT_DONE, EXIT_INTERP and EXIT_PANIC pass, anything else (a pc, an undefined code, a return) is EXIT_INTERP. A debug assertion says the thunk never hands a return over. The other ways a word reaches a call site were checked: the thunk's own pc + 1 after a pop, `Runtime::returned` and `Runtime::call` (both called with the caller's context, so the pc they answer is the caller's), and the nested entry, which goes through `enter` and a typed `Exit`. I did not move the translation into the callee's machine code (so that compiled code never returns a pc at all): it would add code at every call out for something the frame boundary already settles.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+A word a directly called function answers no longer reaches the calling site as a pc. The thunk's 'left' path translates it (`exec::left_code`): the exit codes that mean the same to every frame pass, a pc of the callee's becomes EXIT_INTERP.
+
+Verified: `a_callee_that_leaves_at_a_pc_of_its_own_makes_the_caller_leave_for_the_interpreter` (tests/calls.rs, red before: the caller returned) shows the caller leaving for the interpreter with both frames intact; `exec::tests` checks `left_code` and runs under Miri. The contract is in docs/design/jit-deopt-and-gc-maps.md, section 9.6, and at the exit codes, `compile_thunk` and `continue_at`.
+<!-- SECTION:FINAL_SUMMARY:END -->

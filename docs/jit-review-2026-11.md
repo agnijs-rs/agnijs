@@ -30,6 +30,27 @@ console.log(f(10, null)); // interpreter: undefined:undefined; AGNIJS_JIT=force:
 
 Forcing the guard at every entry made every reproduction agree with the interpreter, which confirms the cause. That experimental binary was also used for part of the fuzzing below, so that this defect could not hide another one in the same programs.
 
+### After the fixes: what was measured, and one cost left open
+
+Added when the three findings were fixed. Same machine as the review; release builds of the starting commit (`e7df99b`) and of the fixes from one checkout path; five alternating rounds, each figure the median over the rounds of each run's median sample (5 iterations after 1 warm-up); ratios are fixed over starting.
+
+| Mode | Workloads | Geomean |
+| --- | --- | --- |
+| JIT feature off | 26 | 1.005 (no source outside the JIT changed) |
+| `AGNIJS_JIT=on` | 26 | 0.990 |
+| `AGNIJS_JIT=force` | 15 (those of ADR 0020's forced table) | 1.003 |
+
+**prop-monomorphic is 5 to 7% slower with the JIT on or forced, and the cause is not known.** It measured 1.057 (on) and 1.051 (forced) in the full runs, about 25.5 ms against 27.0 ms, and 1.069, 1.050, 1.050 and 1.074 in four later runs of mode `on`, each of a different experimental build. TASK-103.56 tracks recovering it. What is known:
+
+- The tiering is the same: in mode `on` the starting and the fixed binary compile the same blocks, guess the same registers, deoptimise once each and call out 1474 times each on this loop. Only the machine code differs, and it is about 2% larger (56,752 against 57,984 bytes).
+- It is not the tag word a speculated register now carries: with every tag forced to the constant (an experiment, not sound) the workload stayed at 1.050.
+- It is not the one shared constant the tag is defined with: with a local constant at every read as well, 1.050.
+- It is not the wider spill at a point: with the old 8-byte spill restored on top of both, 1.074.
+
+So no hot-path difference was found by elimination, and what is left is not explained: the code generator's other changes are a constant in the entry block and the points' contents. The three other loop workloads moved by 4% either way when only code on the cold call-out path was changed (loop-arith 1.024, 0.999, 1.020, 1.006, 1.010; loop-array-index 0.963, 1.040, 0.982, 0.977, 1.070; prop-polymorphic 1.044, 0.987, 1.003, 1.010, 0.989), which is the size of this machine's code-layout noise for JIT code; prop-monomorphic alone was slower in every build. Whether that is layout too was not established: nobody looked at the machine code.
+
+A differential run written for the fix (a Node generator, kept outside the repository, of loops in `try`/`catch`/`finally` with throws before, between and after assignments, locals that change type, nested handlers, and handlers that log every local) compared the JIT off, on and forced on 800 programs with the fixes, 200 of them warmed up so that mode `on` compiles and 40 under `AGNIJS_GC_STRESS=16`: no divergence. The starting binary diverged on 3 of the 210 programs it was given.
+
 ## Scope
 
 Read in full:
