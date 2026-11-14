@@ -355,8 +355,14 @@ pub(crate) fn compile(
 /// make the call without leaving compiled code when it can, and through
 /// the runtime when it cannot ([`Lower::thunk`]). It answers as a runtime
 /// entry does: the pc to continue at, the accumulator and the register
-/// window being in the context, or an exit code. (`code` is any block:
-/// the thunk is not about one.)
+/// window being in the context, or an exit code. The pc is always one of
+/// the calling frame's: the callee's own answer never reaches the call
+/// site as it is. A callee that returned is popped and the answer is the
+/// caller's `pc + 1`; one that left any other way may have answered a pc
+/// of its own block (code that keeps nothing in machine state does, for a
+/// pc it has no block for), and the thunk's "left" path makes whatever it
+/// answered an exit code first (`exec::left_code`, TASK-103.36). (`code`
+/// is any block: the thunk is not about one.)
 pub(crate) fn compile_thunk(
     code: &CodeBlock,
     off: &Offsets,
@@ -1019,8 +1025,13 @@ impl Lower<'_, '_> {
 
     /// After a call out from the instruction at `pc` returned `r`: reload
     /// the context and whatever the runtime may have written, and continue
-    /// at whichever successor `r` names; else return `r` (an exit code: the
-    /// runtime materialised the frame for any pc it had no successor for).
+    /// at whichever successor `r` names; else return `r`. That is an exit
+    /// code (the runtime materialised the frame for any pc it had no
+    /// successor for) or, from code that keeps nothing in machine state, a
+    /// pc of this block the runtime continued the frame at. `r` must be a
+    /// word about this frame for the comparison to mean anything: every
+    /// entry that answers here is called with this frame's context, and
+    /// the call thunk translates what a callee answered ([`compile_thunk`]).
     fn continue_at(&mut self, r: Ir, pc: usize, succ: &[usize]) {
         for &s in succ {
             if s >= self.blocks.len() - 1 {
@@ -2083,7 +2094,10 @@ impl Lower<'_, '_> {
         self.b.ins().brif(returned, back, &[], left, &[]);
 
         // The callee left compiled code some other way: so does the
-        // caller, its frame materialised first.
+        // caller, its frame materialised first. What the callee answered
+        // is its own word (a pc of its block, even): the helper answers
+        // with the exit code that is to this frame, and only that goes
+        // back to the call site.
         self.b.switch_to_block(left);
         self.thunk_tail(self.off.s_left, r);
 

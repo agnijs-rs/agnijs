@@ -446,6 +446,59 @@ fn machine_code_calls_a_function_in_the_callee_table_itself() {
     );
 }
 
+// TASK-103.36: machine code answers its caller with one word, an exit code
+// or a pc "the runtime continued this frame at, which compiled code has no
+// block for". A function called directly that left with such a pc handed
+// it, through the call thunk, to the caller's call site, which compared it
+// with its own successor: a callee leaving at the caller's `pc + 1` made
+// the caller go on as if the call had returned, the callee's frame still
+// on the stack.
+#[test]
+fn a_callee_that_leaves_at_a_pc_of_its_own_makes_the_caller_leave_for_the_interpreter() {
+    let mut p =
+        pair("function f(g) { var r = g(1); return r; } function g(a) { return someGlobal; }");
+    let load = p
+        .callee_code
+        .instrs
+        .iter()
+        .position(|i| matches!(i, Instr::LdaGlobal(_)))
+        .expect("the callee loads a global") as u32;
+    // The worst pc the callee could leave at: the caller's continuation.
+    let leftover = p.call_pc + 1;
+    assert_ne!(
+        leftover,
+        load + 1,
+        "not a successor of the callee's own instruction"
+    );
+    p.rt.callee_continues_at = Some(leftover);
+    let out = p.caller.enter(&mut p.rt, 0, Val::Undefined);
+    assert_eq!(
+        out.exit,
+        Exit::Interp,
+        "the caller took the callee's leftover pc for its own continuation"
+    );
+    // Both frames are as the runtime left them, for the interpreter to go
+    // on from: the callee's on top, at the pc the runtime gave it; the
+    // caller's under it, written back at the instruction after the call.
+    assert_eq!(p.rt.frames.len(), 2);
+    assert_eq!(p.rt.frames[1].pc, leftover as usize);
+    assert!(Rc::ptr_eq(&p.rt.frames[1].code, &p.callee_code));
+    assert_eq!(
+        p.rt.frames[1].base,
+        p.rt.frames[0].code.register_count as usize
+    );
+    assert_eq!(p.rt.frames[0].pc, p.call_pc as usize + 1);
+    assert_eq!(
+        p.rt.regs.len(),
+        p.rt.frames[1].base + p.callee_code.register_count as usize,
+        "the callee's registers are still there"
+    );
+    // Nothing of the caller ran after the call.
+    assert_eq!(p.rt.slow_calls, vec![(1, load)]);
+    assert_eq!(p.rt.direct, 1);
+    assert_eq!((p.rt.runtime_calls, p.rt.returns), (0, 0));
+}
+
 /// A run of a function that loads a global through a global site
 /// (`CallLayout::globals`), the site not filled: how it ended, or the
 /// panic's message.

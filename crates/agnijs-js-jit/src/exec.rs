@@ -99,7 +99,12 @@ use crate::{
 pub(crate) const NO_POINT: u32 = u32::MAX;
 
 /// Exit codes machine code returns; anything below `EXIT_BASE` is a pc the
-/// runtime reported that compiled code has no successor block for.
+/// runtime reported that compiled code has no successor block for. Such a
+/// pc is one of the returning frame's own block and says "the interpreter
+/// goes on" to whoever called the code: [`enter`] reads it so, and the
+/// call thunk's "left" path makes it [`EXIT_INTERP`] before the calling
+/// frame's machine code sees it ([`left_code`]), since that code would
+/// take a pc for one of its own.
 pub(crate) const EXIT_BASE: u32 = 0xFFFF_FF00;
 pub(crate) const EXIT_RETURN: u32 = EXIT_BASE;
 pub(crate) const EXIT_FRAME: u32 = EXIT_BASE + 1;
@@ -1350,9 +1355,32 @@ extern "C" fn ret_trampoline<V: JitValue, R: Runtime<V>>(
     call_out::<V, R>(ctx, |rt, acc| rt.returned(pc, acc, popped != 0))
 }
 
-/// A function machine code called directly left compiled code with exit
-/// `code` instead of returning: the caller leaves with the same code, its
-/// frame materialised first, as [`call_out`] does for an exit of its own.
+/// What the caller of a function machine code called directly leaves with
+/// when that function answered `code` and did not return (TASK-103.36).
+///
+/// A word machine code answers means something to the frame that answers
+/// it only: below [`EXIT_BASE`] it is a pc of that frame's own block. The
+/// caller's call site compares what it is handed with its own `pc + 1`, so
+/// a callee's pc must never reach it: a callee that left at the pc that
+/// happens to be the caller's continuation would make the caller go on as
+/// if the call had returned, the callee's frame still on the stack. So only
+/// the exit codes that say the same to every frame pass ("a frame was
+/// pushed", "a fault is pending", "the run is over", "the interpreter
+/// goes on", "a panic is parked"). Anything else, a pc of the callee's
+/// above all, is [`EXIT_INTERP`]: the callee's frame is the runtime's, at
+/// the pc the runtime gave it, the caller's was written back for the call,
+/// and the interpreter goes on from the two as they are.
+fn left_code(code: u32) -> u32 {
+    match code {
+        EXIT_FRAME | EXIT_FAULT | EXIT_DONE | EXIT_INTERP | EXIT_PANIC => code,
+        _ => EXIT_INTERP,
+    }
+}
+
+/// A function machine code called directly left compiled code with the
+/// word `code` instead of returning: the caller leaves too, with the exit
+/// code that word is to it ([`left_code`]), its frame materialised first,
+/// as [`call_out`] does for an exit of its own.
 extern "C" fn left_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, code: u32) -> u32 {
     if code == EXIT_PANIC {
         return code;
@@ -1360,6 +1388,8 @@ extern "C" fn left_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, code
     // SAFETY: as in `call_out`.
     let shared = unsafe { (*ctx).shared };
     let r = catch_unwind(AssertUnwindSafe(|| {
+        // The call thunk takes a return itself: it never hands one here.
+        debug_assert_ne!(code, EXIT_RETURN, "a return is not a way of leaving");
         // SAFETY: as in `call_out`.
         unsafe {
             let rt = &mut *((*shared).rt as *mut R);
@@ -1368,7 +1398,7 @@ extern "C" fn left_trampoline<V: JitValue, R: Runtime<V>>(ctx: *mut Ctx<V>, code
         }
     }));
     match r {
-        Ok(()) => code,
+        Ok(()) => left_code(code),
         Err(payload) => {
             // SAFETY: as in `call_out`.
             unsafe { park_panic(shared, payload) };
@@ -1591,6 +1621,23 @@ mod tests {
             continues_at(points, NO_POINT, 9),
             "no point: as the baseline"
         );
+    }
+
+    #[test]
+    fn a_callees_word_reaches_its_caller_as_an_exit_code_only() {
+        // The exits that mean the same to every frame pass.
+        for code in [EXIT_FRAME, EXIT_FAULT, EXIT_DONE, EXIT_INTERP, EXIT_PANIC] {
+            assert_eq!(left_code(code), code);
+        }
+        // A pc is the callee's own: never the caller's to continue at.
+        for pc in [0, 1, 7, 20_000, EXIT_BASE - 1] {
+            assert_eq!(left_code(pc), EXIT_INTERP, "pc {pc}");
+        }
+        // Nor does a word no exit is defined for pass, or a return (which
+        // the thunk never hands over).
+        assert_eq!(left_code(EXIT_PANIC + 1), EXIT_INTERP);
+        assert_eq!(left_code(u32::MAX), EXIT_INTERP);
+        assert_eq!(left_code(EXIT_RETURN), EXIT_INTERP);
     }
 
     /// The words compiled code relies on to push a frame (TASK-101.3.3):
