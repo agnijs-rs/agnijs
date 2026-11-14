@@ -1,6 +1,6 @@
 # Baseline JIT soundness review, November 2026
 
-A review of the baseline JIT (feature `jit`) for correctness and memory-safety defects, at commit `fea680f` (origin/main, 2026-11-13), on Windows 11 x64 with rustc 1.99.0. It found one wrong-result defect and two low-severity ones. They are filed as backlog tasks and not fixed here. (They were fixed afterwards, each under its task: the Status column says how. The rest of this document is the review as it was written.)
+A review of the baseline JIT (feature `jit`) for correctness and memory-safety defects, at commit `fea680f` (origin/main, 2026-11-13), on Windows 11 x64 with rustc 1.99.0. It found one wrong-result defect and two low-severity ones. They are filed as backlog tasks and not fixed here. (They were fixed afterwards, each under its task: the Status column says how. The generators described below as kept outside the repository are now in it, as the bounded fuzz target `tools/jit-fuzz` that CI runs (`docs/jit-fuzz.md`, TASK-103.58). The rest of this document is the review as it was written.)
 
 Finding nothing in an area is not proof that the area is sound. The section [What was not reached](#what-was-not-reached) lists what this review did not cover.
 

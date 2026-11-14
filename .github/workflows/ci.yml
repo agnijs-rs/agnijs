@@ -73,8 +73,8 @@ jobs:
     # first use, on each host it supports: the JIT crate's own tests (on
     # macOS arm64 the probe must use MAP_JIT and per-thread write
     # protection), the differential and inline-cache tests, the VM suite
-    # forced, and a test262 slice forced and tiered against the same
-    # baseline as the interpreter.
+    # forced, a test262 slice forced and tiered against the same baseline as
+    # the interpreter, and (Ubuntu) a bounded differential fuzz run.
     strategy:
       fail-fast: false
       matrix:
@@ -126,6 +126,27 @@ jobs:
               --filter test/language/expressions/property-accessors --filter test/built-ins/Array/prototype/indexOf \
               --filter test/built-ins/Array/prototype/forEach --filter test/language/arguments-object
           done
+      - uses: actions/setup-node@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          node-version: 24
+      - name: Differential JIT fuzzing, bounded (interpreter vs on vs force; docs/jit-fuzz.md)
+        # The engine crates are already built in release with these features
+        # by the test262 slice above, so only the command itself is added.
+        # A fixed seed count, not a time budget, so every run covers the
+        # same programs.
+        if: matrix.os == 'ubuntu-latest'
+        timeout-minutes: 10
+        run: |
+          cargo build --release --locked -p agnijs-cli --features agnijs-js-vm/jit
+          node tools/jit-fuzz/jit-fuzz.mjs --count 40 --minimize-time 120
+      - name: Keep the divergent programs
+        if: failure() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: jit-fuzz-divergences
+          path: target/jit-fuzz
+          if-no-files-found: ignore
 
   capi:
     # The C API (ADR 0021, TASK-103.3): the Rust tests with fault injection,
