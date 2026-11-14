@@ -246,6 +246,16 @@ fn loops_over_native_iterators_are_interrupted() {
     }
 }
 
+/// A spread collects inside its instruction whenever a collection is due,
+/// and asks the host after each one: under AGNIJS_GC_STRESS that is every
+/// element, and 4096 collections of a large live set between asks took
+/// seconds. Without stress this is the case above.
+#[test]
+fn a_spread_that_collects_asks_the_host_after_each_collection() {
+    let setup = "globalThis.keep = new Array(500000).fill(0);";
+    interrupted(RegexMatcher::Auto, setup, "[...new Array(1e8).keys()].length");
+}
+
 // ---- BigInt arithmetic (TASK-103.55) -------------------------------------------------------------
 
 /// Parsing, division, multiplication, exponentiation and conversion to a

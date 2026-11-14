@@ -759,16 +759,22 @@ impl Vm {
     /// collection threshold: what `attention_slow` does at a safe point,
     /// without the debugger hook, which belongs between instructions. The
     /// instruction must have rooted every value it holds outside the frame.
+    /// A collection that ran also asks the host about an interrupt: under
+    /// GC stress one runs per element, and 4096 of them between the
+    /// interrupt poll's asks held the thread for seconds.
     #[cold]
     #[inline(never)]
     pub(crate) fn collect_inside_instruction(&mut self) -> JsResult<()> {
-        self.maybe_collect();
+        let collected = self.maybe_collect();
         if let Some(limit) = self.heap.memory_limit {
             if self.heap.live_bytes + self.heap.allocated_since_gc > limit {
                 return Err(Fault::OutOfMemory);
             }
         }
         self.refresh_attention();
+        if collected {
+            self.ask_host_interrupt()?;
+        }
         Ok(())
     }
 
