@@ -602,29 +602,45 @@ fn builtin_exec_raw(
     let last_index = last_index as usize;
     // The matchers ask the host whether to stop every 65,536 steps, so a
     // pathological pattern cannot outlast an interrupt (TASK-103.28).
+    // The same polls stop it for a requested debugger pause (TASK-103.33):
+    // the VM pauses once the input is no longer borrowed, and since a match
+    // has no side effects it then runs again from its start.
     let host = vm.host.clone();
-    let mut poll = || host.interrupt();
-    let (attempt, found) = with_input(vm, s, |input| {
-        // In unicode mode an index inside a surrogate pair denotes the
-        // character that pair encodes, so the attempt starts at the pair.
-        let mut attempt = last_index;
-        if full_unicode
-            && attempt > 0
-            && attempt < length
-            && (0xDC00..0xE000).contains(&input[attempt])
-            && (0xD800..0xDC00).contains(&input[attempt - 1])
-        {
-            attempt -= 1;
-        }
-        let found = if sticky {
-            matcher.exec_sticky_polled(input, attempt, &mut poll)
-        } else {
-            matcher.exec_polled(input, attempt, &mut poll)
+    let (attempt, found) = loop {
+        let pause = vm.native_pause_requester();
+        let paused = std::cell::Cell::new(false);
+        let mut poll = || {
+            if host.interrupt() {
+                return true;
+            }
+            let p = pause.as_ref().is_some_and(|p| p.is_requested());
+            paused.set(p);
+            p
         };
-        (attempt, found)
-    });
-    let Ok(found) = found else {
-        return Err(crate::vm::Fault::Interrupt);
+        let (attempt, found) = with_input(vm, s, |input| {
+            // In unicode mode an index inside a surrogate pair denotes the
+            // character that pair encodes, so the attempt starts at the pair.
+            let mut attempt = last_index;
+            if full_unicode
+                && attempt > 0
+                && attempt < length
+                && (0xDC00..0xE000).contains(&input[attempt])
+                && (0xD800..0xDC00).contains(&input[attempt - 1])
+            {
+                attempt -= 1;
+            }
+            let found = if sticky {
+                matcher.exec_sticky_polled(input, attempt, &mut poll)
+            } else {
+                matcher.exec_polled(input, attempt, &mut poll)
+            };
+            (attempt, found)
+        });
+        match found {
+            Ok(found) => break (attempt, found),
+            Err(_) if paused.get() => vm.pause_in_native(),
+            Err(_) => return Err(crate::vm::Fault::Interrupt),
+        }
     };
     let Some(caps) = found else {
         if global || sticky {

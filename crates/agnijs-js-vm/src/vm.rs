@@ -1043,6 +1043,12 @@ impl Vm {
         if self.host.interrupt() {
             return Err(Fault::Interrupt);
         }
+        // A native's poll is where a requested debugger pause reaches a
+        // long native call (TASK-103.33); the interpreter's own polls leave
+        // it to `debug_check` at the next instruction.
+        if self.debug.is_some() {
+            self.pause_in_native();
+        }
         Ok(())
     }
 

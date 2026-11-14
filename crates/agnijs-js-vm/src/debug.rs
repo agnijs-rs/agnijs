@@ -350,6 +350,28 @@ impl Vm {
         }
     }
 
+    /// The pause requester a native call should watch while it runs
+    /// (TASK-103.33): present while a client is attached, no pause is in
+    /// progress, and a native frame is innermost above a script frame, the
+    /// only case `debug_check` cannot reach until the native returns.
+    pub(crate) fn native_pause_requester(&self) -> Option<PauseRequester> {
+        let d = self.debug.as_deref()?;
+        let in_native = self.native_depth > self.run_depth && !self.frames.is_empty();
+        (in_native && !d.in_pause).then(|| d.requester.clone())
+    }
+
+    /// Take a pending pause request at a native's interrupt poll and pause
+    /// there, the script frames showing the call the native runs for. The
+    /// native's values stay alive: a nested run loop under a native frame
+    /// retains everything born before it.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn pause_in_native(&mut self) {
+        if self.native_pause_requester().is_some_and(|r| r.take()) {
+            self.debug_pause(PauseReason::Requested, false);
+        }
+    }
+
     /// Pause and run the client. `top_at_pc`: the innermost frame's `pc`
     /// is the instruction about to run (otherwise the one just run).
     fn debug_pause(&mut self, reason: PauseReason, top_at_pc: bool) {
