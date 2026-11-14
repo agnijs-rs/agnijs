@@ -832,6 +832,120 @@ pub struct PrivateInExpression {
     pub span: Span,
 }
 
+// ---- dropping deep chains -----------------------------------------------
+
+// The parser builds left-associative chains (`a + b + c`, `a.b.c`,
+// `a()()`, `` a`x``y` ``, ...) in a loop, without the stack check its
+// recursive productions make, so a chain of a million links is a tree a
+// million levels deep along its left operands. The derived drop would
+// recurse once per level and overflow the native stack (TASK-103.46). The
+// chain nodes below drop their left spine in a loop instead: each node is
+// detached from the operand it grew from before it is dropped, so no drop
+// goes deeper than the other children, whose nesting the parser bounds.
+
+/// Whether `e` is a node a left-associative chain grows through.
+fn is_chain_link(e: &Expression) -> bool {
+    matches!(
+        e,
+        Expression::Binary(_)
+            | Expression::Logical(_)
+            | Expression::Member(_)
+            | Expression::Call(_)
+            | Expression::New(_)
+            | Expression::TaggedTemplate(_)
+            | Expression::OptionalChain(..)
+            | Expression::Paren(..)
+    )
+}
+
+/// Detach the operand of the chain link `e` that the chain grew from, when
+/// that operand is itself a link.
+fn take_spine(e: &mut Expression) -> Option<Expression> {
+    let slot = match e {
+        Expression::Binary(b) => &mut b.left,
+        Expression::Logical(l) => &mut l.left,
+        Expression::Member(m) => &mut m.object,
+        Expression::Call(c) => &mut c.callee,
+        Expression::New(n) => &mut n.callee,
+        Expression::TaggedTemplate(t) => &mut t.tag,
+        Expression::OptionalChain(inner, _) | Expression::Paren(inner, _) => &mut **inner,
+        _ => return None,
+    };
+    if !is_chain_link(slot) {
+        return None;
+    }
+    let span = slot.span();
+    Some(std::mem::replace(slot, Expression::Null(span)))
+}
+
+/// The operand of the chain link `e` that the chain grew from; `None` when
+/// `e` is not a link.
+fn spine(e: &Expression) -> Option<&Expression> {
+    match e {
+        Expression::Binary(b) => Some(&b.left),
+        Expression::Logical(l) => Some(&l.left),
+        Expression::Member(m) => Some(&m.object),
+        Expression::Call(c) => Some(&c.callee),
+        Expression::New(n) => Some(&n.callee),
+        Expression::TaggedTemplate(t) => Some(&t.tag),
+        Expression::OptionalChain(inner, _) | Expression::Paren(inner, _) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Drop the chain hanging off `slot` link by link.
+fn drop_spine(slot: &mut Expression) {
+    // A chain only one link deeper than `slot` drops shallowly as it is;
+    // only a longer one is taken apart, so the common short chain costs a
+    // check and no moves.
+    if !spine(slot).is_some_and(is_chain_link) {
+        return;
+    }
+    let span = slot.span();
+    let mut link = std::mem::replace(slot, Expression::Null(span));
+    while let Some(next) = take_spine(&mut link) {
+        // `link` no longer holds the rest of the chain: this drop is shallow.
+        drop(link);
+        link = next;
+    }
+}
+
+impl Drop for BinaryExpression {
+    fn drop(&mut self) {
+        drop_spine(&mut self.left);
+    }
+}
+
+impl Drop for LogicalExpression {
+    fn drop(&mut self) {
+        drop_spine(&mut self.left);
+    }
+}
+
+impl Drop for MemberExpression {
+    fn drop(&mut self) {
+        drop_spine(&mut self.object);
+    }
+}
+
+impl Drop for CallExpression {
+    fn drop(&mut self) {
+        drop_spine(&mut self.callee);
+    }
+}
+
+impl Drop for NewExpression {
+    fn drop(&mut self) {
+        drop_spine(&mut self.callee);
+    }
+}
+
+impl Drop for TaggedTemplate {
+    fn drop(&mut self) {
+        drop_spine(&mut self.tag);
+    }
+}
+
 // ---- modules ------------------------------------------------------------
 
 /// A module export or import name: an identifier or a string literal

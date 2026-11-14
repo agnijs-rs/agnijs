@@ -155,7 +155,7 @@ impl<'s> Parser<'s> {
                     let Expression::Call(call) = lhs else {
                         unreachable!()
                     };
-                    let call = *call;
+                    let mut call = *call;
                     if let Some(pos) = self.last_await {
                         if pos >= call.span.start && pos < call.span.end {
                             return self.err(
@@ -171,7 +171,7 @@ impl<'s> Parser<'s> {
                                 .err("rest parameter may not have a trailing comma", s.span);
                         }
                     }
-                    let params = self.arguments_to_params(call.arguments)?;
+                    let params = self.arguments_to_params(std::mem::take(&mut call.arguments))?;
                     self.pending_cover = saved_cover;
                     return self.parse_arrow_from_params(start, params, true, false);
                 }
