@@ -1142,7 +1142,10 @@ impl Vm {
         Ok(self.alloc(data))
     }
 
-    /// CreateListFromArrayLike.
+    /// CreateListFromArrayLike. Kept out of line: the interpreter's call
+    /// path reaches it only for an array-like that is not a dense array,
+    /// and inlining it there slowed every call.
+    #[inline(never)]
     pub fn create_list_from_array_like(&mut self, v: Value) -> JsResult<Vec<Value>> {
         let Value::Object(o) = v else {
             return Err(self.throw_type("CreateListFromArrayLike called on non-object"));
