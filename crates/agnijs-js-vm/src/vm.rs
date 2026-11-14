@@ -651,6 +651,17 @@ impl Vm {
         Ok(())
     }
 
+    /// Check and charge a native list of `n` items of `item` bytes that is
+    /// sized by something nothing counted bounds (a string's or a typed
+    /// array's length), before it is allocated (TASK-103.53). The charge
+    /// lets the polls of the loops that go on to read it see it.
+    pub fn charge_list(&mut self, n: usize, item: usize) -> JsResult<()> {
+        let bytes = n.saturating_mul(item);
+        self.check_memory(bytes)?;
+        self.heap.charge(bytes);
+        Ok(())
+    }
+
     /// The RangeError the heap's backstop left (`Heap::string_too_long`),
     /// if any, clearing it.
     #[cold]
@@ -1039,6 +1050,23 @@ impl Vm {
             return self.ask_host_interrupt();
         }
         Ok(())
+    }
+
+    /// The poll for native loops (TASK-103.53): the interrupt, as
+    /// [`Vm::poll_interrupt`], and the memory limit. A native loop runs no
+    /// safe point, so without this a loop that makes values from a bare
+    /// length or a native iterator allocates its whole result before the
+    /// limit is checked. Once the counter passes the collection threshold
+    /// it fails with `OutOfMemory` when `Heap::would_exceed` refuses nothing
+    /// more, so one call takes at most twice the limit, garbage included.
+    /// Rust-side lists such a loop builds must be charged as they grow
+    /// (`Heap::charge`) for the counter to see them.
+    #[inline]
+    pub fn poll(&mut self) -> JsResult<()> {
+        if self.heap.attention & crate::heap::ATTENTION_GC != 0 {
+            self.check_memory(0)?;
+        }
+        self.poll_interrupt()
     }
 
     #[cold]

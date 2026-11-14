@@ -92,7 +92,12 @@ fn string_list_from_iterable(vm: &mut Vm, iterable: Value) -> JsResult<Vec<Strin
             vm.iterator_close_swallow(it);
             return vm.type_error("Iterable yielded a non-string value");
         }
-        out.push(vm.to_rust_string(v)?);
+        let s = vm.to_rust_string(v)?;
+        // One string referenced many times is copied each time, so the
+        // copies count towards the limit as they are made (TASK-103.53).
+        vm.heap.charge(s.len() + std::mem::size_of::<String>());
+        vm.poll()?;
+        out.push(s);
     }
     Ok(out)
 }

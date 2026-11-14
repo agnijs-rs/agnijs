@@ -156,3 +156,64 @@ fn set_delete_churn_does_not_grow_the_process() {
     assert!(r.is_ok(), "{r:?}");
     assert!(peak < 8 * MIB as isize, "peak {} MiB", peak / MIB as isize);
 }
+
+// ---- native loops (TASK-103.53) ---------------------------------------------------------------
+//
+// Native loops that allocate from a bare length, a native iterator or one
+// value referenced many times. Nothing counted bounds what they make, so
+// they check the limit as they go (`Vm::poll`). Without that check each of
+// these passes `CAP`, and the allocator's refusal aborts the test binary:
+// run them one at a time to see which.
+
+/// A native call cannot collect, so it may count twice the limit, garbage
+/// included, before its poll refuses more (`Heap::would_exceed`); a vector
+/// that doubles as it grows can hold twice what it counts. Four times the
+/// limit is what that allows (64 MiB measured for `fill`, `Array.from` and
+/// `Promise.all`); five leaves room for rounding and none for the
+/// gigabytes these allocated before TASK-103.53.
+const NATIVE_LOOP_BOUND: usize = 80 * MIB;
+
+fn native_loop_peak(src: &str) {
+    let peak = peak_while_refused(src);
+    assert!(peak < NATIVE_LOOP_BOUND, "{src}: peak {} MiB", peak / MIB);
+}
+
+#[test]
+fn native_loop_fill() {
+    native_loop_peak("new Array(2e7).fill(0).length");
+}
+
+#[test]
+fn native_loop_array_from_a_bare_length() {
+    native_loop_peak("Array.from({ length: 2e7 }).length");
+}
+
+#[test]
+fn native_loop_to_sorted_of_a_bare_length() {
+    native_loop_peak("Array.prototype.toSorted.call({ length: 2e7 }).length");
+}
+
+#[test]
+fn native_loop_apply_of_a_bare_length() {
+    native_loop_peak("Array.apply(null, { length: 4e6 }).length");
+}
+
+#[test]
+fn native_loop_spread_of_a_native_iterator() {
+    native_loop_peak("[...new Array(5e6).keys()].length");
+}
+
+#[test]
+fn native_loop_promise_all_of_a_native_iterator() {
+    native_loop_peak("Promise.all(new Array(3e6).keys()); 0");
+}
+
+#[test]
+fn native_loop_object_entries_of_a_typed_array() {
+    native_loop_peak("Object.entries(new Uint8Array(4e6)).length");
+}
+
+#[test]
+fn native_loop_list_format_of_one_string_many_times() {
+    native_loop_peak("new Intl.ListFormat('en').format(new Array(6e5).fill('a'.repeat(1000))).length");
+}

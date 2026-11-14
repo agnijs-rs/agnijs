@@ -754,6 +754,24 @@ impl Vm {
         Ok(())
     }
 
+    /// A collection and the memory-limit check inside an instruction that
+    /// loops (`ArraySpread`, TASK-103.53), once the counter passes the
+    /// collection threshold: what `attention_slow` does at a safe point,
+    /// without the debugger hook, which belongs between instructions. The
+    /// instruction must have rooted every value it holds outside the frame.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn collect_inside_instruction(&mut self) -> JsResult<()> {
+        self.maybe_collect();
+        if let Some(limit) = self.heap.memory_limit {
+            if self.heap.live_bytes + self.heap.allocated_since_gc > limit {
+                return Err(Fault::OutOfMemory);
+            }
+        }
+        self.refresh_attention();
+        Ok(())
+    }
+
     /// Route a fault to the nearest handler, popping frames as needed.
     /// `Ok` means execution continues at a handler; `Err` means the exit
     /// frame was popped and the fault propagates to the Rust caller.

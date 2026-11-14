@@ -296,7 +296,7 @@ fn array_from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     };
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         let v = vm.get(array_like, key)?;
         let v = if mapping {
@@ -328,7 +328,7 @@ fn array_from_iterator(
     let next = vm.get_value(iter, next_key)?;
     let mut k = 0.0;
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if k >= MAX_SAFE {
             let e = vm.make_error(
                 crate::vm::ErrorType::TypeError,
@@ -378,7 +378,7 @@ fn proto_concat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     items.push(Value::Object(o));
     items.extend_from_slice(a.args);
     for e in items {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if is_concat_spreadable(vm, e)? {
             let Value::Object(eo) = e else { unreachable!() };
             let len = vm.length_of_array_like(eo)?;
@@ -387,7 +387,7 @@ fn proto_concat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             }
             let mut k = 0.0;
             while k < len {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 let key = vm.number_key(k);
                 if vm.has_property(eo, key)? {
                     let v = vm.get(eo, key)?;
@@ -422,7 +422,7 @@ fn proto_copy_within(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         (from, to, 1.0)
     };
     while count > 0.0 {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let fk = vm.number_key(from);
         let tk = vm.number_key(to);
         if vm.has_property(o, fk)? {
@@ -480,7 +480,7 @@ fn proto_every(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
         let mut k = 0.0;
         while k < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k);
             pin_key(vm, key);
             if vm.has_property(o, key)? {
@@ -504,7 +504,7 @@ fn proto_some(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
         let mut k = 0.0;
         while k < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k);
             pin_key(vm, key);
             if vm.has_property(o, key)? {
@@ -531,7 +531,7 @@ fn proto_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
         let mut k = 0.0;
         while k < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k);
             pin_key(vm, key);
             if vm.has_property(o, key)? {
@@ -552,7 +552,7 @@ fn proto_fill(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let v = a.arg(0);
     let mut k = start;
     while k < end {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         vm.set(o, key, v, true)?;
         k += 1.0;
@@ -571,7 +571,7 @@ fn proto_filter(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let mut k = 0.0;
         let mut to = 0.0;
         while k < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k);
             pin_key(vm, key);
             if vm.has_property(o, key)? {
@@ -610,7 +610,7 @@ fn find_via_predicate(
     vm.callback_series(&[Value::Object(o), f, this_arg], |vm| {
         let mut i = 0.0;
         while i < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let k = if from_end { len - 1.0 - i } else { i };
             let key = vm.number_key(k);
             pin_key(vm, key);
@@ -660,7 +660,7 @@ fn flatten_into_array(
     let mut target_index = start;
     let mut si = 0.0;
     while si < source_len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(si);
         if vm.has_property(source, key)? {
             let mut element = vm.get(source, key)?;
@@ -738,7 +738,7 @@ fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut k = if n >= 0.0 { n } else { (len + n).max(0.0) };
     let target = a.arg(0);
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         let v = vm.get(o, key)?;
         if vm.same_value_zero(v, target) {
@@ -761,7 +761,7 @@ fn proto_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut k = if n >= 0.0 { n } else { (len + n).max(0.0) };
     let target = a.arg(0);
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         if vm.has_property(o, key)? {
             let v = vm.get(o, key)?;
@@ -790,7 +790,7 @@ fn proto_last_index_of(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut k = if n >= 0.0 { n.min(len - 1.0) } else { len + n };
     let target = a.arg(0);
     while k >= 0.0 {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         if vm.has_property(o, key)? {
             let v = vm.get(o, key)?;
@@ -823,7 +823,7 @@ fn proto_join(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if k > 0.0 {
             b.push_slice(&sep);
         }
@@ -850,7 +850,7 @@ fn proto_map(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     vm.callback_series(&[Value::Object(o), f, this_arg, Value::Object(arr)], |vm| {
         let mut k = 0.0;
         while k < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k);
             pin_key(vm, key);
             if vm.has_property(o, key)? {
@@ -910,7 +910,7 @@ fn reduce_impl(vm: &mut Vm, a: &CallArgs, right: bool) -> JsResult<Value> {
     } else {
         let mut have_acc = false;
         while i < len {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let k = if right { len - 1.0 - i } else { i };
             let key = vm.number_key(k);
             i += 1.0;
@@ -925,7 +925,7 @@ fn reduce_impl(vm: &mut Vm, a: &CallArgs, right: bool) -> JsResult<Value> {
         }
     }
     while i < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let k = if right { len - 1.0 - i } else { i };
         let key = vm.number_key(k);
         if vm.has_property(o, key)? {
@@ -954,7 +954,7 @@ fn proto_reverse(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let middle = (len / 2.0).floor();
     let mut lower = 0.0;
     while lower != middle {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let upper = len - lower - 1.0;
         let lk = vm.number_key(lower);
         let uk = vm.number_key(upper);
@@ -999,7 +999,7 @@ fn proto_shift(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let first = vm.get(o, PropKey::Index(0))?;
     let mut k = 1.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let from = vm.number_key(k);
         let to = vm.number_key(k - 1.0);
         if vm.has_property(o, from)? {
@@ -1026,7 +1026,7 @@ fn proto_unshift(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         let mut k = len;
         while k > 0.0 {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let from = vm.number_key(k - 1.0);
             let to = vm.number_key(k + n - 1.0);
             if vm.has_property(o, from)? {
@@ -1055,7 +1055,7 @@ fn proto_slice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut k = k;
     let mut n = 0.0;
     while k < fin {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         if vm.has_property(o, key)? {
             let v = vm.get(o, key)?;
@@ -1107,6 +1107,8 @@ pub fn sort_values(
     if n < 2 {
         return Ok(items);
     }
+    // The scratch list is as long as the input (TASK-103.53).
+    vm.check_memory(n * std::mem::size_of::<Value>())?;
     let mut src = items;
     let mut dst = vec![Value::Undefined; n];
     let mut width = 1;
@@ -1117,7 +1119,7 @@ pub fn sort_values(
             let end = (i + 2 * width).min(n);
             let (mut l, mut r, mut k) = (i, mid, i);
             while l < mid && r < end {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 if cmp(vm, src[r], src[l])? == Ordering::Less {
                     dst[k] = src[r];
                     r += 1;
@@ -1128,13 +1130,13 @@ pub fn sort_values(
                 k += 1;
             }
             while l < mid {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 dst[k] = src[l];
                 l += 1;
                 k += 1;
             }
             while r < end {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 dst[k] = src[r];
                 r += 1;
                 k += 1;
@@ -1158,7 +1160,7 @@ fn sort_indexed_properties(
     let mut items = Vec::new();
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         if skip_holes {
             if vm.has_property(o, key)? {
@@ -1167,11 +1169,14 @@ fn sort_indexed_properties(
         } else {
             items.push(vm.get(o, key)?);
         }
+        // A bare length makes this list from nothing counted; it and its
+        // roots count as they grow (TASK-103.53).
+        vm.heap.charge(2 * std::mem::size_of::<Value>());
         k += 1.0;
     }
     let mark = vm.root_mark();
     for &v in &items {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         vm.root(v);
     }
     let r = sort_values(vm, items, |vm, x, y| sort_compare(vm, comparefn, x, y));
@@ -1188,13 +1193,13 @@ fn proto_sort(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let sorted = sort_indexed_properties(vm, o, len, comparefn, true)?;
     let item_count = sorted.len() as f64;
     for (j, v) in sorted.into_iter().enumerate() {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(j as f64);
         vm.set(o, key, v, true)?;
     }
     let mut j = item_count;
     while j < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(j);
         vm.delete_property_or_throw(o, key)?;
         j += 1.0;
@@ -1221,7 +1226,7 @@ fn proto_splice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let arr = array_species_create(vm, o, delete_count)?;
     let mut k = 0.0;
     while k < delete_count {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let from = vm.number_key(start + k);
         if vm.has_property(o, from)? {
             let v = vm.get(o, from)?;
@@ -1234,7 +1239,7 @@ fn proto_splice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     if insert_count < delete_count {
         let mut k = start;
         while k < len - delete_count {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let from = vm.number_key(k + delete_count);
             let to = vm.number_key(k + insert_count);
             if vm.has_property(o, from)? {
@@ -1247,7 +1252,7 @@ fn proto_splice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         }
         let mut k = len;
         while k > len - delete_count + insert_count {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let key = vm.number_key(k - 1.0);
             vm.delete_property_or_throw(o, key)?;
             k -= 1.0;
@@ -1255,7 +1260,7 @@ fn proto_splice(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     } else if insert_count > delete_count {
         let mut k = len - delete_count;
         while k > start {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let from = vm.number_key(k + delete_count - 1.0);
             let to = vm.number_key(k + insert_count - 1.0);
             if vm.has_property(o, from)? {
@@ -1292,7 +1297,7 @@ fn proto_to_locale_string(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut b = StrBuilder::new();
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if k > 0.0 {
             b.push(b',' as u16);
         }
@@ -1331,7 +1336,7 @@ fn proto_to_reversed(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let arr = vm.array_create(len, None)?;
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let from = vm.number_key(len - k - 1.0);
         let v = vm.get(o, from)?;
         let to = vm.number_key(k);
@@ -1353,7 +1358,7 @@ fn proto_to_sorted(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let sorted = sort_indexed_properties(vm, o, len, comparefn, false);
     vm.pop_roots(mark);
     for (j, v) in sorted?.into_iter().enumerate() {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(j as f64);
         vm.create_data_property_or_throw(arr, key, v)?;
     }
@@ -1381,7 +1386,7 @@ fn proto_to_spliced(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut i = 0.0;
     let mut r = start + skip_count;
     while i < start {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(i);
         let v = vm.get(o, key)?;
         vm.create_data_property_or_throw(arr, key, v)?;
@@ -1393,7 +1398,7 @@ fn proto_to_spliced(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         i += 1.0;
     }
     while i < new_len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let from = vm.number_key(r);
         let v = vm.get(o, from)?;
         let to = vm.number_key(i);
@@ -1414,7 +1419,7 @@ fn proto_with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let arr = vm.array_create(len, None)?;
     let mut k = 0.0;
     while k < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(k);
         let v = if k == actual {
             a.arg(1)

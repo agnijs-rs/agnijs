@@ -415,6 +415,46 @@ fn every_growable_payload_is_counted() {
     assert_eq!(reported.len(), 12);
 }
 
+// ---- native loops -----------------------------------------------------------------------------
+
+/// The probes from the review (TASK-103.53): native loops that make values
+/// from a bare length, a native iterator or one value many times check
+/// the limit as they go. `agnijs-js-bench/tests/memory_limit_peak.rs`
+/// checks what the process allocates for the same scripts.
+#[test]
+#[cfg_attr(miri, ignore = "millions of elements are too slow under Miri")]
+fn native_loops_check_the_limit_as_they_go() {
+    let mut vm = limited(16 * MIB);
+    for src in [
+        "new Array(2e7).fill(0).length",
+        "Array.from({ length: 2e7 }).length",
+        "Array.prototype.toSorted.call({ length: 2e7 }).length",
+        "[...new Array(5e6).keys()].length",
+        "Object.entries(new Uint8Array(4e6)).length",
+        "Object.keys(new Uint8Array(1 << 28)).length",
+        "Object.keys(new String('x'.repeat(1 << 26))).length",
+        "new Intl.ListFormat('en').format(new Array(6e5).fill('a'.repeat(1000))).length",
+    ] {
+        out_of_memory(&mut vm, src);
+    }
+    // The reaction jobs a combinator queued before the limit stopped it
+    // are still the program's, so this engine stays over the limit.
+    let mut vm = limited(16 * MIB);
+    let r = eval(&mut vm, "Promise.all(new Array(3e6).keys()); 0");
+    assert!(matches!(r, Err(Error::OutOfMemory)), "{r:?}");
+}
+
+/// Spreading collects as it goes, so the iterator results it drops do not
+/// count against a result that fits: 300,000 results are 48 MB of garbage,
+/// three times the limit, for an array of under 5 MB.
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
+fn a_spread_that_fits_is_not_refused_for_its_garbage() {
+    let mut vm = limited(16 * MIB);
+    let v = eval(&mut vm, "[...new Array(3e5).keys()].length").unwrap();
+    assert_eq!(v, Value::Number(3e5));
+}
+
 // ---- built-ins that allocate a large block ----------------------------------------------------
 
 #[test]

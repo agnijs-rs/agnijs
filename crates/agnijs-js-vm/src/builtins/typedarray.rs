@@ -243,6 +243,7 @@ pub fn ta_delete(vm: &mut Vm, o: ObjId, key: PropKey) -> JsResult<Option<bool>> 
 
 pub fn ta_own_keys(vm: &mut Vm, o: ObjId) -> JsResult<Vec<PropKey>> {
     let len = ta_length(vm, o).unwrap_or(0);
+    vm.charge_list(len, std::mem::size_of::<PropKey>())?;
     let mut keys: Vec<PropKey> = (0..len as u32).map(PropKey::Index).collect();
     let rest = vm.heap.own_keys(o);
     keys.extend(rest.into_iter().filter(|k| !matches!(k, PropKey::Index(_))));

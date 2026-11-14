@@ -1025,7 +1025,7 @@ fn symbol_match(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let arr = vm.array_create(0.0, None)?;
     let mut n: u32 = 0;
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let match_str = match regexp_exec_match(vm, rx, s)? {
             Exec::Null => return Ok(if n == 0 { Value::Null } else { Value::Object(arr) }),
             Exec::Raw(index, caps) => vm.heap.substring(s, index, raw_end(&caps)),
@@ -1127,7 +1127,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     }
     let mut results: Vec<Exec> = Vec::new();
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let result = regexp_exec_match(vm, rx, s)?;
         if matches!(result, Exec::Null) {
             break;
@@ -1156,7 +1156,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut accumulated = StrBuilder::with_capacity(length_s);
     let mut next_source_position = 0usize;
     for result in results {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         // The match, its position and length, and (unless the template is
         // plain) its captures and named captures, read as the spec reads
         // them from the result object.
@@ -1185,7 +1185,7 @@ fn symbol_replace(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 let position = position.max(0.0).min(length_s as f64) as usize;
                 let mut captures: Vec<Value> = Vec::with_capacity(n_captures);
                 for n in 1..=n_captures {
-                    vm.poll_interrupt()?;
+                    vm.poll()?;
                     let mut cap = vm.get(result, PropKey::Index(n as u32))?;
                     if !cap.is_undefined() {
                         cap = Value::String(vm.to_string(cap)?);
@@ -1316,7 +1316,7 @@ fn symbol_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut p = 0usize;
     let mut q = p;
     while q < size {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         set_last_index(vm, sp, q as f64)?;
         let z = regexp_exec_match(vm, sp, s)?;
         if matches!(z, Exec::Null) {
@@ -1355,7 +1355,7 @@ fn symbol_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                     // Bounded by `lim`, but a custom exec chooses the
                     // count: poll (TASK-103.49). `i` stays below
                     // `length_a`, so below 2^32, and the key cannot wrap.
-                    vm.poll_interrupt()?;
+                    vm.poll()?;
                     let next_capture = vm.get(zo, PropKey::Index(i as u32))?;
                     vm.create_data_property_or_throw(arr, PropKey::Index(length_a), next_capture)?;
                     length_a += 1;

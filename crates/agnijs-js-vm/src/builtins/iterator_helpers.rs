@@ -392,7 +392,7 @@ fn helper_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
         KIND_FILTER => {
             let mut counter = counter;
             loop {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 let Some(v) = vm.iterator_step_value(under, next)? else {
                     return Ok(None);
                 };
@@ -422,7 +422,7 @@ fn helper_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
         KIND_DROP => {
             let mut remaining = counter;
             while remaining > 0.0 {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 if remaining != f64::INFINITY {
                     remaining -= 1.0;
                     state(vm, o).counter = remaining;
@@ -440,7 +440,7 @@ fn helper_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
             let mut inner = inner;
             let mut counter = counter;
             loop {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 if let Some((iit, inext)) = inner {
                     let r = vm.iterator_step_value(iit, inext);
                     match close_on_err(vm, under, r)? {
@@ -470,7 +470,7 @@ fn helper_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
         KIND_CHUNKS => {
             let size = counter as usize;
             loop {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 match vm.iterator_step_value(under, next)? {
                     Some(v) => {
                         let s = state(vm, o);
@@ -493,7 +493,7 @@ fn helper_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
         KIND_WINDOWS | KIND_WINDOWS_PARTIAL => {
             let size = counter as usize;
             loop {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 match vm.iterator_step_value(under, next)? {
                     Some(v) => {
                         let s = state(vm, o);
@@ -588,7 +588,7 @@ fn proto_reduce(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         (a.arg(1), 0.0)
     };
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let Some(v) = vm.iterator_step_value(it, next)? else {
             return Ok(acc);
         };
@@ -603,7 +603,7 @@ fn proto_to_array(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (it, next) = get_iterator_direct(vm, this)?;
     let mut items = Vec::new();
     while let Some(v) = vm.iterator_step_value(it, next)? {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         items.push(v);
     }
     Ok(Value::Object(vm.new_array(items)))
@@ -616,7 +616,7 @@ fn proto_for_each(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (it, next) = get_iterator_direct(vm, this)?;
     let mut counter = 0.0;
     while let Some(v) = vm.iterator_step_value(it, next)? {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let r = vm.call_value(f, Value::Undefined, &[v, Value::Number(counter)]);
         close_on_err(vm, it, r)?;
         counter += 1.0;
@@ -634,7 +634,7 @@ fn search(vm: &mut Vm, a: &CallArgs, method: &str, stop_when: bool, found: fn(Va
     let (it, next) = get_iterator_direct(vm, this)?;
     let mut counter = 0.0;
     while let Some(v) = vm.iterator_step_value(it, next)? {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let r = vm.call_value(f, Value::Undefined, &[v, Value::Number(counter)]);
         let r = close_on_err(vm, it, r)?;
         if vm.to_boolean(r) == stop_when {
@@ -731,7 +731,7 @@ fn proto_includes(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let (it, next) = get_iterator_direct(vm, this)?;
     let mut skipped = 0.0;
     while let Some(v) = vm.iterator_step_value(it, next)? {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if skipped < to_skip {
             skipped += 1.0;
         } else if vm.same_value_zero(v, search) {
@@ -763,7 +763,7 @@ fn iterator_concat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 
 fn concat_step(vm: &mut Vm, o: ObjId) -> JsResult<Option<Value>> {
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let (inner, index, item, method) = {
             let s = state(vm, o);
             let i = s.counter as usize;

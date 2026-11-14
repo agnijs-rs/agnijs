@@ -109,7 +109,7 @@ fn object_assign(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let from = vm.to_object(*src)?;
         let keys = vm.own_property_keys(from)?;
         for k in keys {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             if let Some(p) = vm.own_property(from, k)? {
                 if p.attrs.enumerable() {
                     let v = vm.get(from, k)?;
@@ -140,7 +140,7 @@ pub fn define_properties(vm: &mut Vm, o: ObjId, props: Value) -> JsResult<()> {
     let keys = vm.own_property_keys(props)?;
     let mut descriptors = Vec::new();
     for k in keys {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if let Some(p) = vm.own_property(props, k)? {
             if p.attrs.enumerable() {
                 let dv = vm.get(props, k)?;
@@ -150,7 +150,7 @@ pub fn define_properties(vm: &mut Vm, o: ObjId, props: Value) -> JsResult<()> {
         }
     }
     for (k, desc) in descriptors {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         vm.define_property_or_throw(o, k, desc)?;
     }
     Ok(())
@@ -251,7 +251,7 @@ fn object_from_entries(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let obj = vm.new_object();
     let (iter, next) = vm.get_iterator(iterable, false)?;
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let Some(entry) = vm.iterator_step_value(iter, next)? else {
             break;
         };
@@ -286,7 +286,7 @@ fn object_get_own_property_descriptors(vm: &mut Vm, a: &CallArgs) -> JsResult<Va
     let keys = vm.own_property_keys(o)?;
     let result = vm.new_object();
     for k in keys {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if let Some(d) = vm.get_own_property_descriptor(o, k)? {
             let dv = vm.from_property_descriptor(&d);
             vm.create_data_property_or_throw(result, k, dv)?;
@@ -300,7 +300,7 @@ fn own_keys_of_kind(vm: &mut Vm, v: Value, symbols: bool) -> JsResult<Value> {
     let keys = vm.own_property_keys(o)?;
     let mut out = Vec::new();
     for k in keys {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let is_sym = matches!(k, PropKey::Sym(_));
         if is_sym == symbols {
             out.push(vm.key_to_value(k));
@@ -359,7 +359,7 @@ pub fn group_by(
     let (iter, next) = vm.get_iterator(items, false)?;
     let mut k = 0f64;
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if k >= 9007199254740991.0 {
             let e = vm.make_error(
                 crate::vm::ErrorType::TypeError,
@@ -405,7 +405,7 @@ fn object_group_by(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let groups = group_by(vm, a.arg(0), a.arg(1), true)?;
     let obj = vm.new_object_with_proto(None);
     for (k, list) in groups {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.to_property_key(k)?;
         let arr = vm.new_array(list);
         vm.create_data_property_or_throw(obj, key, Value::Object(arr))?;

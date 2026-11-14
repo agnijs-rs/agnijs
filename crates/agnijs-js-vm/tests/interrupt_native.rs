@@ -224,3 +224,24 @@ fn json_over_a_huge_array_is_interrupted() {
         "JSON.parse(t)",
     );
 }
+
+// ---- loops over native iterators (TASK-103.53) ---------------------------------------------------
+
+/// Spread, the Promise combinators, `Intl.ListFormat` and the key lists of
+/// a typed array run a native iterator or a bare length with no safe
+/// point; they poll as they go.
+#[test]
+fn loops_over_native_iterators_are_interrupted() {
+    let setup = "globalThis.ta = new Uint8Array(20000000);";
+    for hot in [
+        "[...new Array(1e8).keys()].length",
+        "Promise.all(new Array(1e8).keys()); 0",
+        "Promise.allSettled(new Array(1e8).keys()); 0",
+        "Promise.any(new Array(1e8).keys()); 0",
+        "Promise.race(new Array(1e8).keys()); 0",
+        "Object.entries(ta).length",
+        "new Intl.ListFormat('en').format(new Array(1e8).fill('a')).length",
+    ] {
+        interrupted(RegexMatcher::Auto, setup, hot);
+    }
+}

@@ -933,6 +933,7 @@ impl Vm {
                     unreachable!()
                 };
                 let len = self.heap.str_len(*s) as u32;
+                self.charge_list(len as usize, std::mem::size_of::<PropKey>())?;
                 let rest = self.heap.own_keys(o);
                 let mut keys: Vec<PropKey> = (0..len).map(PropKey::Index).collect();
                 let mut after_indices = Vec::new();
@@ -1157,7 +1158,7 @@ impl Vm {
         let n = self.check_list_length(len)?;
         let mut out = Vec::with_capacity(n);
         for i in 0..n {
-            self.poll_interrupt()?;
+            self.poll()?;
             out.push(self.get_prop(o, PropKey::Index(i as u32), v)?);
         }
         Ok(out)
@@ -1473,6 +1474,10 @@ impl Vm {
         let (it, next) = self.get_iterator(v, false)?;
         let mut out = Vec::new();
         while let Some(x) = self.iterator_step_value(it, next)? {
+            // A native iterator can yield without end; the list counts
+            // towards the limit as it grows (TASK-103.53).
+            self.heap.charge(std::mem::size_of::<Value>());
+            self.poll()?;
             out.push(x);
         }
         Ok(out)
@@ -1650,8 +1655,11 @@ impl Vm {
 
     pub fn enumerable_own_properties(&mut self, o: ObjId, kind: u8) -> JsResult<Vec<Value>> {
         let keys = self.own_property_keys(o)?;
+        // new_array charges the list when it takes it; check it first.
+        self.check_memory(keys.len() * std::mem::size_of::<Value>())?;
         let mut out = Vec::with_capacity(keys.len());
         for k in keys {
+            self.poll()?;
             if matches!(k, PropKey::Sym(_)) {
                 continue;
             }

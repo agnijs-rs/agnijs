@@ -1217,17 +1217,29 @@ impl Vm {
                 let a = or_invalid!(reg!(arr).as_object(), "ArraySpread on a non-array");
                 let src = acc!();
                 let (iter, next) = self.get_iterator(src, false)?;
-                loop {
+                // A native iterator runs no safe point, so the loop collects
+                // and checks the limit itself (TASK-103.53); the array is in
+                // a register and the iterator is rooted.
+                let mark = self.root_mark();
+                self.root(iter);
+                self.root(next);
+                let r = (|| loop {
                     match self.iterator_step_value(iter, next)? {
                         Some(v) => {
                             if !self.heap.array_push_dense(a, v) {
                                 let len = self.heap.obj(a).array_length().unwrap_or(0);
                                 self.create_data_property_or_throw(a, PropKey::Index(len), v)?;
                             }
+                            if self.heap.attention & crate::heap::ATTENTION_GC != 0 {
+                                self.collect_inside_instruction()?;
+                            }
+                            self.poll_interrupt()?;
                         }
-                        None => break,
+                        None => return Ok(()),
                     }
-                }
+                })();
+                self.pop_roots(mark);
+                r?;
             }
             Instr::CreateClosure(idx) => {
                 let fcode = code.functions[idx as usize].clone();

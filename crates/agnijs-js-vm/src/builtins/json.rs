@@ -526,7 +526,7 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value, rec: O
             let len = vm.length_of_array_like(o)?;
             let mut i = 0.0;
             while i < len {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 let k = vm.number_key(i);
                 let new_el = internalize(vm, o, k, reviver, elements.get(i as usize))?;
                 if new_el.is_undefined() {
@@ -543,7 +543,7 @@ fn internalize(vm: &mut Vm, holder: ObjId, name: PropKey, reviver: Value, rec: O
             };
             let keys = vm.enumerable_own_keys(o)?;
             for k in keys {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 let entry = entries.iter().find(|(ek, _)| *ek == k).map(|(_, r)| r);
                 let new_el = internalize(vm, o, k, reviver, entry)?;
                 if new_el.is_undefined() {
@@ -619,7 +619,7 @@ fn json_stringify(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
             let mut list: Vec<PropKey> = Vec::new();
             let mut i = 0.0;
             while i < len {
-                vm.poll_interrupt()?;
+                vm.poll()?;
                 let k = vm.number_key(i);
                 let v = vm.get(r, k)?;
                 let item: Option<StrId> = match v {
@@ -876,7 +876,7 @@ fn serialize_object(
     out.push(0x7B);
     let mut any = false;
     for k in keys {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         // The member is written in place and taken back if the value turns
         // out to be undefined; writing to `out` is not observable, so this
         // is the same as serializing the value first.
@@ -919,7 +919,7 @@ fn serialize_array(
     out.push(0x5B);
     let mut i = 0.0;
     while i < len {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         if i > 0.0 {
             out.push(0x2C);
         }

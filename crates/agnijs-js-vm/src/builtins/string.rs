@@ -202,7 +202,7 @@ fn string_raw(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut b = StrBuilder::new();
     let mut i = 0.0;
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let key = vm.number_key(i);
         let seg = vm.get(raw, key)?;
         let seg = vm.to_string(seg)?;
@@ -654,7 +654,7 @@ fn proto_repeat(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let u = units_of(vm, s);
     let mut out = Vec::with_capacity(len * n as usize);
     for _ in 0..n as usize {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         out.extend_from_slice(&u);
     }
     vm.str_from_units(out)
@@ -902,7 +902,7 @@ fn proto_replace_all(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut end_of_last = 0;
     let mut out = StrBuilder::with_capacity(s_len + 16);
     for p in positions {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         vm.check_string_len(out.len())?;
         out.push_units(&vm.heap.units(s).slice(end_of_last, p));
         string_replacement(vm, s, search, p, replace_value, template, &mut out)?;
@@ -977,7 +977,7 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         let mut parts = Vec::with_capacity(n);
         vm.heap.flatten(s);
         for i in 0..n {
-            vm.poll_interrupt()?;
+            vm.poll()?;
             let unit = vm.heap.units_flat(s).at(i);
             parts.push(Value::String(vm.heap.char_str(unit)));
         }
@@ -987,7 +987,7 @@ fn proto_split(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let mut i = 0;
     let mut poll = SearchPoll::new(&vm.host);
     loop {
-        vm.poll_interrupt()?;
+        vm.poll()?;
         let j = {
             let (hay, needle) = units_pair(vm, s, r);
             hay.index_of(&needle, i, &mut poll)?

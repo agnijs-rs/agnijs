@@ -1014,6 +1014,9 @@ fn combinator_loop(
             Ok(None) => break,
             Err(f) => return Err(CombAbrupt::Iterator(f)),
         };
+        // Each item makes a promise, a reaction and closures, and a
+        // native iterator runs no safe point (TASK-103.53).
+        vm.poll().map_err(CombAbrupt::Iterator)?;
         vm.create_data_property_or_throw(values, PropKey::Index(index), Value::Undefined)
             .map_err(CombAbrupt::Other)?;
         let next_promise = vm
@@ -1195,6 +1198,7 @@ fn promise_race(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 Ok(None) => return Ok(()),
                 Err(f) => return Err(CombAbrupt::Iterator(f)),
             };
+            vm.poll().map_err(CombAbrupt::Iterator)?;
             let next_promise = vm
                 .call_value(resolve_fn, c, &[item])
                 .map_err(CombAbrupt::Other)?;
