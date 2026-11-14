@@ -140,12 +140,12 @@ Tests:
 - `the_memory_limit_stops_runaway_allocation` and `the_memory_limit_counts_buffers_and_collections_and_refuses_huge_requests` (C API);
 - `the_memory_limit_stops_a_growing_heap` (CLI);
 - `crates/agnijs-js-vm/tests/memory_limit.rs`: a 16 MiB limit stops 256 MiB of ArrayBuffers, SharedArrayBuffers or typed arrays, resizable growth, a Map or Set of 2,000,000 entries, 2,000,000 WeakMap or WeakSet entries over a thousand keys, long string keys, a 1 GiB `repeat`, `padStart`, `padEnd`, `join` and doubling by `+`, templates and `concat`; dead buffers and entries leave the count and `memory_usage`; the same built-ins work under the limit;
-- `crates/agnijs-js-bench/tests/memory_limit_peak.rs`: a global allocator measures what the process allocates while a 16 MiB limit stops 256 MiB of ArrayBuffers, a 2,000,000-entry Map, a 1 GiB `repeat` and a 4 GiB ArrayBuffer. Each stays under 48 MiB, and the allocator refuses anything past 192 MiB, so a regression fails the test instead of allocating gigabytes.
+- `crates/agnijs-js-bench/tests/memory_limit_peak.rs`: a global allocator measures what the process allocates while a 16 MiB limit stops 256 MiB of ArrayBuffers, a 2,000,000-entry Map, a 1 GiB `repeat` and a 4 GiB ArrayBuffer. Each stays under 48 MiB, and the allocator refuses anything past 192 MiB, so a regression fails the test instead of allocating gigabytes. Two million rounds of `m.set(k, v); m.delete(k)` on a Map and a Set stay under 8 MiB;
+- `crates/agnijs-js-vm/tests/collections.rs`: Map and Set churn keeps `memory_usage` bounded and runs under a 16 MiB limit. A deleted entry's slot is reclaimed once empty slots outnumber live entries (and pass 16); iterators, `forEach` and the set methods find their place again by sequence number. The count includes every slot, empty or not, at 81 bytes an entry on 64-bit targets (TASK-103.32).
 
 **What it does not cover.**
 
 - **Approximate sizes.** The counter uses fixed per-value sizes, not what the allocator really holds. A vector's spare capacity, the allocator's rounding and the engine's own tables (shapes, bytecode, inline caches, the intern table) are not counted. Expect the process to use more than the limit, by a factor that depends on the workload; the peak test above measured under three times the limit.
-- **Map and Set tombstones.** A deleted Map or Set entry leaves an empty slot in insertion order so that live iterators keep their place, and the slot stays until the collection dies. The count covers live entries only, so `for (;;) { m.set(k, v); m.delete(k); }` grows the process by 32 bytes per round without reaching the limit. WeakMap and WeakSet have no iterators and drop their empty slots. Bound such a script with fuel or a deadline. TASK-103.32.
 - **Native temporaries.** A built-in's working buffers that are not the block it returns, such as the UTF-16 copy `repeat` and the pad methods build before they store a one-byte result, or a sort's scratch array, are checked (where listed above) but not counted afterwards. They are freed when the call returns.
 - **Built-ins that allocate many small values in one call.** `split`, `Object.keys`, `Array.from` over a native iterator and similar calls are bounded by the input they read, which is already counted, but can make several times its size in new values before the next safe point.
 - **The process allocator.** Rust's allocator aborts the process when the operating system refuses memory. The limit is meant to be reached well before that, but the gaps above, or a limit set close to what the process can get, can get there first.
@@ -188,7 +188,7 @@ Tests:
 **What it does not cover.**
 
 - **Bounded native work between polls.** Some native work does not poll, because it is bounded by the size of one string or buffer: copying or filling bytes (`repeat` and `padStart` builders, `TypedArray.prototype.reverse`, `slice` and `set` between buffers), case mapping, normalization, `encodeURI`, base64 and hex, and the regex matchers' scan for a first character. Each is at most linear in a string of 2^30 units or a buffer of 4 GiB.
-- **Debugger pauses.** A pause request (`PauseRequester`) is taken at the next statement. A native call cannot pause partway through, so the pause comes after it returns; the interrupt is what stops it.
+- **Debugger pauses in string searches.** A pause request (`PauseRequester`) is taken at the next instruction, and inside a native call at the native loops' and the regex matchers' host polls: a long `join` pauses partway, and a regex match pauses and runs again from its start when resumed (TASK-103.33, `tests/debugger_native_pause.rs`). The String searches (`indexOf`, `includes` and the like) poll only for the interrupt, so a pause requested during one comes after it returns.
 - **Host code.** Time spent in host functions and `Host` hooks is the host's to bound.
 - **Cadence.** The interrupt is a poll, not preemption. A call returns only at the next poll that reaches the host.
 
@@ -308,7 +308,7 @@ Every capability the host grants is attacker-reachable. Treat each host function
 - bound its work and its allocations, which the memory limit, fuel and interrupt do not see;
 - never let it return host internals.
 
-Module loading is a capability. `agnijs-js-resolve` implements Node's algorithm and does not confine paths: `../` and absolute specifiers resolve wherever they point (ADR 0023). What stays inside a package is a bare specifier's subpath and the targets of its `exports` and `imports`: a `..` or `.` segment in any separator form (`/`, `\`, percent-encoded, or with the trailing dots and spaces Windows drops), a drive or stream colon, or a NUL is refused (`InvalidSpecifier`, `InvalidPackageTarget`), and every package path is checked again after it is joined to stay at or below the package directory (TASK-103.38). The check is lexical: a symlink inside the package is followed. Confining relative and absolute specifiers to a directory is the host's job, in `Host::load_module`.
+Module loading is a capability. `agnijs-js-resolve` implements Node's algorithm and does not confine paths: `../` and absolute specifiers resolve wherever they point (ADR 0023). What stays inside a package is a bare specifier's subpath and the targets of its `exports` and `imports`: a `..` or `.` segment in any separator form (`/`, `\`, percent-encoded, or with the trailing dots and spaces Windows drops), a drive or stream colon, or a NUL is refused (`InvalidSpecifier`, `InvalidPackageTarget`), and every package path is checked again after it is joined to stay at or below the package directory (TASK-103.38). The check is lexical: a symlink inside the package is followed. Windows reserved device names (`CON`, `NUL`, `AUX`, `PRN`, `COM1`, `LPT1` and the rest, also with an extension) are not refused, and need not be. Measured on Windows 11 (10.0.26200, TASK-103.57): inside a directory path, `std::fs` finds no device for any of them except a bare `NUL`. `NUL` opens the null device, which reads as empty and never blocks, and its `metadata` fails. The resolver only resolves a path whose `metadata` says it is a file, so `plain/NUL` resolves to not-found and `load_module` is never asked to read a device. Confining relative and absolute specifiers to a directory is the host's job, in `Host::load_module`.
 
 ### Bytecode and snapshots are trusted input
 
@@ -348,7 +348,7 @@ Source maps are parsed defensively, and hostile maps are rejected without a pani
 
 ### Panics in the Rust API
 
-The engine is meant never to panic on any script. test262 runs in full in CI, and the C API's fuzzer runs mutated scripts differentially. But the Rust API has no `catch_unwind` boundary. A panic in the engine, or in your host function or `Host` hook, unwinds into your code. If you catch it, whether the engine is still consistent is undefined today (TASK-103.31). Discard the engine after a caught panic. Continuous fuzzing is tracked by TASK-103.18.
+The engine is meant never to panic on any script. test262 runs in full in CI, and the C API's fuzzer runs mutated scripts differentially. But the Rust API has no `catch_unwind` boundary. A panic in the engine, or in your host function or `Host` hook, unwinds into your code, and can leave the engine's frames, roots and counters mid-update. So the engine poisons itself: a guard on every entry that runs code (and on `create_realm`, `snapshot` and `collect_garbage`) marks the engine when a panic unwinds through it. After that, every call that runs code or touches a realm returns `Error::Poisoned`, even inside a host function that caught the panic of its own nested call, and `Engine::is_poisoned` (`Context::is_poisoned`) returns true. The calls that cannot fail return unspecified values, and `collect_garbage` does nothing. The VM forbids `unsafe` code, so none of this is undefined behaviour. Dropping the engine is safe and is the only thing left to do (TASK-103.31, `crates/agnijs-js-vm/tests/panic.rs`). Continuous fuzzing is tracked by TASK-103.18.
 
 ### What the engine cannot stop
 
@@ -374,7 +374,7 @@ For code you do not trust:
 9. **No untrusted bytecode or snapshots.** Authenticate anything that crossed a trust boundary before `eval_bytecode`, `ModuleSource::Bytecode` or `make_engine_from_snapshot`.
 10. **No debugger in production.** Never bind CDP to a non-loopback address, and do not leave it listening.
 11. **The `jit` feature off** unless you accept code-generator bugs as memory-safety bugs.
-12. **Treat a panic as fatal to the engine.** Discard it after a caught panic. A C API engine reports `AGNIJS_ERR_POISONED`.
+12. **Treat a panic as fatal to the engine.** Discard it after a caught panic. A Rust API engine reports `Error::Poisoned`, a C API engine `AGNIJS_ERR_POISONED`.
 
 ## Example: granting capabilities one by one
 
