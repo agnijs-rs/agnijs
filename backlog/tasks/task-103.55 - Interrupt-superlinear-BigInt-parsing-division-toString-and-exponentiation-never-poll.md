@@ -3,9 +3,11 @@ id: TASK-103.55
 title: >-
   Interrupt: superlinear BigInt parsing, division, toString and exponentiation
   never poll
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:49:00Z'
+updated_date: '2026-11-14T10:21:00Z'
 labels:
   - bug
   - security
@@ -43,7 +45,27 @@ Test that should catch it: interrupt_native.rs tests that start each repro with 
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An interrupt requested during each repro in the description ends the call within a bounded time, or the operand size is refused up front
-- [ ] #2 docs/security-model.md lists BigInt work in the interrupt section accurately
-- [ ] #3 interrupt_native.rs covers the repros
+- [x] #1 An interrupt requested during each repro in the description ends the call within a bounded time, or the operand size is refused up front
+- [x] #2 docs/security-model.md lists BigInt work in the interrupt section accurately
+- [x] #3 interrupt_native.rs covers the repros
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red: interrupt_native.rs repros (parse, /, %, *, **, toString, String, Intl) not interrupted within 2 s. 2. Polled block algorithms in bigint.rs reporting digit work to Vm::poll_work. 3. Refuse * and ** results past 2^30 bits up front and check the memory limit. 4. Route every BigInt-to-string and string-to-BigInt site through them. 5. Exactness tests against shift/add identities. 6. Document in security-model.md.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red first: (1n << 2000000n).toString() finished in 6.5 s with no interrupt; BigInt parsing ran past 120 s. num-bigint operations cannot be polled from inside, so large operands go through chunked algorithms in bigint.rs reporting digit work to Vm::poll_work. Not polled, documented: BigInt literals in source (bounded by source length) and the decimal conversion when eval returns a BigInt to the host. Commit c4abee5. Gates: agnijs-js-vm and agnijs-js-regex suites green; clippy: no warnings on changed lines; test262 0 regressions in default, --precompile, --snapshot, --only-intl402, vs QuickJS-NG, the GC-stress slice and the JIT force and tiered slices.
+
+Benchmarks (JIT off, 4 interleaved rounds against edbdb50, 26 workloads): geomean +0.23%. The polled algorithms inlined into the dispatch loop with op_arith cost 3 to 6% on prop-polymorphic, method-calls and regex-tokenize; b381df5 moves the BigInt arm out of line and they are back at the starting times.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+BigInt parsing, *, /, %, ** and conversion to a string run in steps of about 2^22 digit operations for large operands, each reported to Vm::poll_work, which asks the host about once per 2^20; small operands keep num-bigint's path. * and ** refuse results past 2^30 bits up front and check the memory limit. Power-of-two radix parsing is now linear. interrupt_native.rs interrupts every repro within 2 s, checks oversized results throw RangeError at once, and checks exact results against shift/add identities. Commit c4abee5.
+<!-- SECTION:FINAL_SUMMARY:END -->

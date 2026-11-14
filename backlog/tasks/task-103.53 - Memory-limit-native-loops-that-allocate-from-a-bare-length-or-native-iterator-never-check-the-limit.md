@@ -3,9 +3,11 @@ id: TASK-103.53
 title: >-
   Memory limit: native loops that allocate from a bare length or native iterator
   never check the limit
-status: To Do
-assignee: []
+status: Done
+assignee:
+  - '@claude'
 created_date: '2026-11-13T22:49:00Z'
+updated_date: '2026-11-14T10:21:00Z'
 labels:
   - bug
   - security
@@ -46,8 +48,33 @@ Test that should catch it: memory_limit.rs tests for each repro above under a 16
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The repros in the description end in OutOfMemory within the documented factor of a 16 MiB limit
-- [ ] #2 ArraySpread, iterable_to_list, the Promise combinators and Intl.ListFormat poll the interrupt and the memory limit
-- [ ] #3 docs/security-model.md describes the remaining gap accurately
-- [ ] #4 memory_limit.rs covers the repros
+- [x] #1 The repros in the description end in OutOfMemory within the documented factor of a 16 MiB limit
+- [x] #2 ArraySpread, iterable_to_list, the Promise combinators and Intl.ListFormat poll the interrupt and the memory limit
+- [x] #3 docs/security-model.md describes the remaining gap accurately
+- [x] #4 memory_limit.rs covers the repros
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Red: add each repro to agnijs-js-bench/tests/memory_limit_peak.rs (allocator refuses past 192 MiB).
+2. Vm::poll = interrupt + would_exceed once past the GC threshold; switch built-in poll sites to it.
+3. Poll in ArraySpread (with a real collection, iterator rooted), iterable_to_list, Promise combinators, ListFormat; charge Rust-side lists.
+4. memory_limit.rs and interrupt_native.rs coverage.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Red: 7 of 8 repros aborted the peak test past 192 MiB (Array.apply already bounded by TASK-103.48's 2^22 cap). After: all under 64-66 MiB; NATIVE_LOOP_BOUND 80 MiB documents the 4x (2x counted rule for natives, times a doubling vector). Extra gap found and fixed: own_property_keys of String and TypedArray objects built a key list from the length (Vm::charge_list). ArraySpread collects inside the instruction (collect_inside_instruction, no debugger hook) so [...new Array(3e5).keys()] under 16 MiB is not refused for 48 MB of iterator results. Observation: after Promise.all is stopped, its queued reaction jobs stay alive, so that engine stays over the limit (program state, not a leak). Full agnijs-js-vm test suite passes.
+
+Red first: seven of eight repros passed the 192 MiB allocator cap (fill over 2e7 at 525 MiB, Promise.all over 3e6 keys at 3.6 GiB). Vm::poll applies the built-in rule (twice the limit, garbage included) once the counter passes the collection threshold. ArraySpread collects inside the instruction so a spread that fits is not refused for its garbage. Commit 736a893. Gates: agnijs-js-vm and agnijs-js-regex suites green; clippy: no warnings on changed lines; test262 0 regressions in default, --precompile, --snapshot, --only-intl402, vs QuickJS-NG, the GC-stress slice and the JIT force and tiered slices.
+
+Benchmarks (JIT off, 4 interleaved rounds against edbdb50, 26 workloads): geomean +0.23%.
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Native loops now check the memory limit as they go: Vm::poll (interrupt plus the built-in rule of Heap::would_exceed) replaces poll_interrupt at every built-in poll site; iterable_to_list, the Promise combinators, Intl.ListFormat and sort charge the Rust lists they build; Vm::charge_list checks key lists sized by a typed array or string. Each repro now peaks at 64 MiB or less under 16 MiB and ends in OutOfMemory; interrupt_native.rs checks the same loops are interrupted. The remaining gap (up to about twice the limit per call) is documented. Commit 736a893.
+<!-- SECTION:FINAL_SUMMARY:END -->

@@ -115,19 +115,25 @@ Only the interpreter's frame caps, the native stack budget, the maximum string l
 - object headers, slots, elements and dictionaries (`ObjectData::extra_bytes` in `object.rs`);
 - ArrayBuffer and SharedArrayBuffer backing stores, from allocation on and as a resizable buffer grows (`Class::payload_bytes` in `object.rs`, `resize_bytes` in `builtins/arraybuffer.rs`);
 - the live entries of Map, Set, WeakMap and WeakSet, at `MAP_ENTRY_BYTES` each (the entry slot plus the key index, 73 bytes on 64-bit targets) plus the contents of string and BigInt keys, which the index copies (`MapData::heap_bytes` and `map_insert` in `builtins/collections.rs`);
+- the other payloads a program sizes at run time (`Class::payload_bytes`): a FinalizationRegistry's cells, a DisposableStack's resources, a bound function's arguments, a generator's saved registers, an error's captured frames, a for-in key list, a pending promise's reactions and a RegExp's compiled program (`Regex::heap_bytes`), each charged as it grows (TASK-103.51, 103.52). `every_growable_payload_is_counted` sorts every class into counted or allowed-to-be-zero, so a new class has to be sorted;
 - strings, including flattened ropes;
-- environments, symbols and BigInts.
+- environments, symbols, and BigInts at their digit size (`BigIntData::heap_bytes`, TASK-103.50).
+
+The regex compile cache holds at most 4 MiB of programs and patterns and no entry over 256 KiB, so programs the script dropped do not stay alive (TASK-103.52).
 
 `memory_usage` (`agnijs_memory_usage`) and the live size the collector computes after each sweep use the same sizes, so a buffer or a collection that dies leaves the count at the next collection.
 
-The collection threshold is capped at the distance to the limit (`rearm_threshold`), so a collection runs before the limit is declared passed. The check itself runs at the dispatch loop's safe points: `attention_slow` in `interp/mod.rs`, which also applies under native frames.
+The collection threshold is capped at the distance to the limit (`rearm_threshold`), so a collection runs before the limit is declared passed. The check itself runs at the dispatch loop's safe points: `attention_slow` in `interp/mod.rs`, which also applies under native frames. Native loops check it too: `Vm::poll`, which every built-in loop calls once per iteration, checks the interrupt and, once the counter passes the collection threshold, applies the built-in rule below, so a loop that makes values from a bare length, a native iterator or one value referenced many times stops as it goes (TASK-103.53). Lists a built-in builds in Rust (`iterable_to_list`, the Promise combinators, `sort` over a bare length, key lists sized by a typed array's or a string's length) are charged as they grow or before they are built (`Vm::charge_list`).
 
 A built-in that allocates a large block in one step checks the limit before it allocates (`Vm::check_memory` and `Heap::would_exceed` in `heap.rs`), and fails with the same `OutOfMemory` error, which JavaScript cannot catch:
 
 - every ArrayBuffer, SharedArrayBuffer and typed-array buffer allocation, including `slice` and `transfer` (`zeroed` in `builtins/arraybuffer.rs`), and `resize` and `grow`;
 - `repeat`, `padStart` and `padEnd`, for the whole result;
 - `Array.prototype.join`, `toLocaleString` and the typed-array `join`, for the separators up front, and every builder that checks the [string length](#string-length) as it grows (`Vm::check_string_len` checks the limit too), for each piece;
-- concatenation that makes a rope (`Vm::concat`), for the flat string the rope becomes when it is read, so doubling a string cannot pass the limit as unread ropes.
+- concatenation that makes a rope (`Vm::concat`), for the flat string the rope becomes when it is read, so doubling a string cannot pass the limit as unread ropes;
+- every result whose length is known from its input: `toHex`, `toBase64`, the HTML methods, BigInt to string and `Intl.ListFormat` (TASK-103.54);
+- BigInt `*` and `**`, for the size of the result (TASK-103.55);
+- a RegExp compile, for 32 bytes per pattern unit, before the parse (TASK-103.52).
 
 A built-in cannot run the collector, so it does not know how much of what was allocated since the last collection is garbage. It refuses a request when the live size of the last collection plus the request passes the limit, or when everything counted since, garbage included, plus the request passes twice the limit. The first rule refuses what cannot fit. The second bounds what one call can take, however many blocks it allocates. Neither refuses a program that drops what it allocates: a loop that makes and drops a 1 MiB buffer 200 times runs to the end under a 16 MiB limit.
 
@@ -139,15 +145,15 @@ Tests:
 - `the_memory_limit_still_applies_under_a_native_frame` (`tests/gc_native_frames.rs`);
 - `the_memory_limit_stops_runaway_allocation` and `the_memory_limit_counts_buffers_and_collections_and_refuses_huge_requests` (C API);
 - `the_memory_limit_stops_a_growing_heap` (CLI);
-- `crates/agnijs-js-vm/tests/memory_limit.rs`: a 16 MiB limit stops 256 MiB of ArrayBuffers, SharedArrayBuffers or typed arrays, resizable growth, a Map or Set of 2,000,000 entries, 2,000,000 WeakMap or WeakSet entries over a thousand keys, long string keys, a 1 GiB `repeat`, `padStart`, `padEnd`, `join` and doubling by `+`, templates and `concat`; dead buffers and entries leave the count and `memory_usage`; the same built-ins work under the limit;
-- `crates/agnijs-js-bench/tests/memory_limit_peak.rs`: a global allocator measures what the process allocates while a 16 MiB limit stops 256 MiB of ArrayBuffers, a 2,000,000-entry Map, a 1 GiB `repeat` and a 4 GiB ArrayBuffer. Each stays under 48 MiB, and the allocator refuses anything past 192 MiB, so a regression fails the test instead of allocating gigabytes. Two million rounds of `m.set(k, v); m.delete(k)` on a Map and a Set stay under 8 MiB;
+- `crates/agnijs-js-vm/tests/memory_limit.rs`: a 16 MiB limit stops 256 MiB of ArrayBuffers, SharedArrayBuffers or typed arrays, resizable growth, a Map or Set of 2,000,000 entries, 2,000,000 WeakMap or WeakSet entries over a thousand keys, long string keys, a 1 GiB `repeat`, `padStart`, `padEnd`, `join` and doubling by `+`, templates and `concat`; dead buffers and entries leave the count and `memory_usage`; the same built-ins work under the limit; live BigInts, every growable payload, compiled RegExps and the native-loop repros count (TASK-103.50 to 103.53);
+- `crates/agnijs-js-bench/tests/memory_limit_peak.rs`: a global allocator measures what the process allocates while a 16 MiB limit stops 256 MiB of ArrayBuffers, a 2,000,000-entry Map, a 1 GiB `repeat`, a 4 GiB ArrayBuffer, the native-loop repros of TASK-103.53 (`fill` over a bare length, `Promise.all`, spread and the rest), `toHex`, `toBase64`, `anchor`, a 2^26-bit BigInt's `toString(2)` and the regex cache repros of TASK-103.52. Each stays under 48 MiB, or 64 MiB for the native loops, and the allocator refuses anything past 192 MiB, so a regression fails the test instead of allocating gigabytes. Two million rounds of `m.set(k, v); m.delete(k)` on a Map and a Set stay under 8 MiB;
 - `crates/agnijs-js-vm/tests/collections.rs`: Map and Set churn keeps `memory_usage` bounded and runs under a 16 MiB limit. A deleted entry's slot is reclaimed once empty slots outnumber live entries (and pass 16); iterators, `forEach` and the set methods find their place again by sequence number. The count includes every slot, empty or not, at 81 bytes an entry on 64-bit targets (TASK-103.32).
 
 **What it does not cover.**
 
-- **Approximate sizes.** The counter uses fixed per-value sizes, not what the allocator really holds. A vector's spare capacity, the allocator's rounding and the engine's own tables (shapes, bytecode, inline caches, the intern table) are not counted. Expect the process to use more than the limit, by a factor that depends on the workload; the peak test above measured under three times the limit.
+- **Approximate sizes.** The counter uses fixed per-value sizes, not what the allocator really holds. A vector's spare capacity, the allocator's rounding and the engine's own tables (shapes, bytecode, inline caches, the intern table) are not counted. Expect the process to use more than the limit, by a factor that depends on the workload; the peak test above measured up to four times the limit. A regex compile takes transient memory past the 32 bytes per unit checked up front, freed when it ends.
 - **Native temporaries.** A built-in's working buffers that are not the block it returns, such as the UTF-16 copy `repeat` and the pad methods build before they store a one-byte result, or a sort's scratch array, are checked (where listed above) but not counted afterwards. They are freed when the call returns.
-- **Built-ins that allocate many small values in one call.** `split`, `Object.keys`, `Array.from` over a native iterator and similar calls are bounded by the input they read, which is already counted, but can make several times its size in new values before the next safe point.
+- **Built-ins that allocate many small values in one call.** Native loops check the limit through `Vm::poll` (TASK-103.53), but only by the built-in rule (twice the limit, garbage included), so a call can make up to about twice the limit in new values before it fails.
 - **The process allocator.** Rust's allocator aborts the process when the operating system refuses memory. The limit is meant to be reached well before that, but the gaps above, or a limit set close to what the process can get, can get there first.
 - **Engines and realms.** The limit is per engine, and realms in one engine share it.
 
@@ -172,7 +178,8 @@ Tests:
 **How it is enforced.** `Vm::poll_interrupt` (`vm.rs`) runs at the interpreter's function entries, loop back-edges and call returns. The JIT polls at the same points (`interp/jit.rs`), so recursion without loops is stopped as well (TASK-100.33). The host hook itself is called once every 4096 polls. Native code polls too (TASK-103.28):
 
 - **Regex matches.** Both matchers count their steps in slices of 65,536 and ask the host at the end of each (`Meter` in `agnijs-js-regex/src/backtrack.rs`, `Regex::exec_polled`). The step budget of `Auto` is spent exactly as before, so polling never changes which matcher finishes a search or what it matches.
-- **Native loops.** Built-ins that loop over their input call `Vm::poll_interrupt` once per iteration: the Array and TypedArray methods, `Array.from`, String `split`, `replaceAll` and `repeat`, the RegExp `match`, `replace` and `split` loops, JSON `parse` (once per 4096 values) and `stringify`, Map and Set iteration and set methods, `Object.assign`, `fromEntries`, `groupBy` and the key lists, and the iterator helpers.
+- **Native loops.** Built-ins that loop over their input call `Vm::poll` (the interrupt and the [memory limit](#memory-limit)) once per iteration: the Array and TypedArray methods, `Array.from`, String `split`, `replaceAll` and `repeat`, the RegExp `match`, `replace` and `split` loops, JSON `parse` (once per 4096 values) and `stringify`, Map and Set iteration and set methods, `Object.assign`, `fromEntries`, `groupBy` and the key lists, the iterator helpers, spread, the Promise combinators and `Intl.ListFormat` (TASK-103.53).
+- **BigInt arithmetic.** Parsing, `*`, `/`, `%`, `**` and conversion to a string are superlinear in the digits. Large operands run in steps of about 2^22 digit operations (`mul_polled`, `div_rem_polled`, `pow_polled`, `to_string_polled` and `parse` in `bigint.rs`), each reported to `Vm::poll_work`, which asks the host about once per 2^20 digit operations. Small operands take num-bigint's path in one call. `*` and `**` refuse a result past 2^30 bits, the cap `<<` applies, before computing it (TASK-103.55).
 - **String search.** `indexOf`, `lastIndexOf`, `includes`, `split` and `replace` with a string pattern compare up to haystack times needle units, and ask the host once per 2^20 units compared (`SearchPoll` in `string.rs`).
 
 Tests:
@@ -181,13 +188,14 @@ Tests:
 - `an_interrupt_stops_a_runaway_job_and_the_engine_carries_on` and `an_interrupt_unwinds_through_host_functions_and_skips_finally_blocks` (`tests/host_driven.rs`);
 - `an_interrupt_stops_a_compiled_loop` (`tests/jit_differential.rs`);
 - `the_interrupt_hook_stops_an_infinite_loop` and `another_thread_can_request_an_interrupt` (C API);
-- `crates/agnijs-js-vm/tests/interrupt_native.rs`: exponential lookahead under `Auto`, nested quantifiers under `BacktrackingOnly`, backreferences, global `replace`, `split` and `match` over millions of matches, `join` over a 3,000,000-element array, Array methods over huge array-likes, TypedArray methods, quadratic string searches and JSON, each stopped within 2 s in a debug build, and match results unchanged by polling;
+- `crates/agnijs-js-vm/tests/interrupt_native.rs`: exponential lookahead under `Auto`, nested quantifiers under `BacktrackingOnly`, backreferences, global `replace`, `split` and `match` over millions of matches, `join` over a 3,000,000-element array, Array methods over huge array-likes, TypedArray methods, quadratic string searches and JSON, the native loops of TASK-103.53, and BigInt parsing, division, multiplication, powers and conversion to a string, each stopped within 2 s in a debug build, match results unchanged by polling, polled BigInt results checked exactly, and BigInt results past 2^30 bits refused at once;
 - `a_poll_stops_a_runaway_search_under_every_mode` and `polling_does_not_change_what_matches` (`agnijs-js-regex`);
 - `another_thread_can_interrupt_a_runaway_regex_and_a_native_loop` (C API).
 
 **What it does not cover.**
 
-- **Bounded native work between polls.** Some native work does not poll, because it is bounded by the size of one string or buffer: copying or filling bytes (`repeat` and `padStart` builders, `TypedArray.prototype.reverse`, `slice` and `set` between buffers), case mapping, normalization, `encodeURI`, base64 and hex, and the regex matchers' scan for a first character. Each is at most linear in a string of 2^30 units or a buffer of 4 GiB.
+- **Bounded native work between polls.** Some native work does not poll, because it is bounded by the size of one string or buffer: copying or filling bytes (`repeat` and `padStart` builders, `TypedArray.prototype.reverse`, `slice` and `set` between buffers), case mapping, normalization, `encodeURI`, base64 and hex, BigInt addition, subtraction, shifts and power-of-two radix conversion, and the regex matchers' scan for a first character. Each is at most linear in a string of 2^30 units or a buffer of 4 GiB.
+- **BigInt literals and host conversion.** A BigInt literal in source is parsed without polls, bounded by the source's length. Converting a BigInt result to its decimal digits at the host boundary (`api::Value::BigInt` in `engine.rs`, when `eval` returns a BigInt) does not poll either; the host chooses to return the value.
 - **Debugger pauses in string searches.** A pause request (`PauseRequester`) is taken at the next instruction, and inside a native call at the native loops' and the regex matchers' host polls: a long `join` pauses partway, and a regex match pauses and runs again from its start when resumed (TASK-103.33, `tests/debugger_native_pause.rs`). The String searches (`indexOf`, `includes` and the like) poll only for the interrupt, so a pause requested during one comes after it returns.
 - **Host code.** Time spent in host functions and `Host` hooks is the host's to bound.
 - **Cadence.** The interrupt is a poll, not preemption. A call returns only at the next poll that reaches the host.
@@ -241,6 +249,7 @@ Doubling the budget roughly doubles each depth. A debug build uses about ten tim
 
 - **Concatenation.** `Heap::concat` returns `None` past the maximum, before it builds a rope, and `Vm::concat` throws. That covers `+`, `+=`, template literals, `String.prototype.concat` and every other concatenation, so a rope's length cannot wrap.
 - **Builders.** Built-ins that grow a string piece by piece check the length as they go (`Vm::check_string_len`): `Array.prototype.join`, `toString` and `toLocaleString`, the typed array versions, `replace`, `replaceAll` and `RegExp.prototype[Symbol.replace]` (including `$` substitutions), `String.raw`, `JSON.stringify`, `encodeURI`, `encodeURIComponent` and `escape`. A `join` whose separators alone pass the maximum (`new Array(2 ** 31).join()`) throws before it builds anything. `repeat`, `padStart` and `padEnd` check the final length up front, and strings made from code units (`fromCharCode`, `fromCodePoint`, case mappings, `normalize`) are checked before they are allocated.
+- **Results known from their input.** `toHex`, `toBase64`, the HTML methods (`anchor` and the rest, counting the `&quot;` expansion), BigInt to string in any radix (a lower bound on the digits from the bit length, `Vm::bigint_to_string`), `Symbol.prototype.toString` and `String(symbol)`, and `Intl.ListFormat` compute their length and check it before they build anything (TASK-103.54).
 - **A backstop.** Every other string allocation checks the length too (`Heap::alloc_string`); only concatenation and substrings, which are already within the maximum, skip it. A path the checks above miss gets the empty string, and the `RangeError` is raised at the next safe point of the dispatch loop, or when the call from the host returns.
 
 Tests in `crates/agnijs-js-vm/tests/string_length.rs`: doubling a string past the maximum, one unit past it by each kind of concatenation, the refused `join`, every path above with the maximum lowered to 1,000 units for the test, and the error the host sees.
@@ -262,7 +271,7 @@ Tests in `crates/agnijs-js-vm/tests/string_length.rs`: doubling a string past th
 
 Tests in `crates/agnijs-js-vm/tests/untrusted_lengths.rs` and `crates/agnijs/tests/long_arrays.rs`.
 
-**What it does not cover.** A BigInt's size is checked when `asUintN` builds it, but the collector still counts each live BigInt at a fixed size (TASK-103.50).
+**What it does not cover.** Nothing known. A live BigInt counts at its digit size (TASK-103.50), and `*` and `**` check the size of their result before computing it (TASK-103.55).
 
 ### Regular expressions (ReDoS)
 

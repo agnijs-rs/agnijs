@@ -39,12 +39,12 @@ The backlog priority is in brackets where it differs from the severity.
 | TASK-103.47 | Medium | Fixed in 771fff6 (was confirmed: CLI, 0xc00000fd (debug build)) | IsArray, IsConstructor and GetFunctionRealm recurse through proxy and bound-function chains without a stack check. |
 | TASK-103.48 | Medium | Fixed in 74a0c56, 1100ba9 (was confirmed: CLI, abort) | `apply`, `Reflect.apply` and `Reflect.construct` preallocate an argument list from an attacker-chosen `length` (16 TiB). |
 | TASK-103.49 | Medium | Fixed in 74a0c56 (was confirmed: CLI, abort) | `RegExp.prototype[Symbol.replace]` preallocates captures from a custom `exec` result's `length`. |
-| TASK-103.50 | Medium | Confirmed: CLI | The collector counts each live BigInt as 48 bytes. 1,000 BigInts of 2 MiB stay alive under `--max-memory 16M` (2,019 MiB peak, exit 0). |
-| TASK-103.51 | Medium | Confirmed: CLI | `payload_bytes` is 0 for FinalizationRegistry cells, DisposableStack resources and bound-function arguments. These reach 3.0 GiB, 2.5 GiB and 330 MiB under a 16 MiB limit with no out-of-memory error. |
-| TASK-103.53 | Medium | Confirmed: CLI | Native loops that allocate from a bare length or a native iterator never check the limit. Under 16 MiB, peaks reach 525 MiB to 3.6 GiB before exit 3. The loops are `fill`, Promise combinators, spread, `Intl.ListFormat` and typed-array `entries`. |
-| TASK-103.55 | Medium | Confirmed: CLI | BigInt parsing, division, `toString` and `**` are superlinear and never poll the interrupt. Parsing ran past 120 s, one division took 51 s, and `3n ** 100000000n` ran past 40 s. |
-| TASK-103.52 | Low-medium [low priority] | Confirmed: CLI | The regex compile cache and large compiles amplify memory: 525 MiB under 16 MiB with nothing kept. |
-| TASK-103.54 | Low-medium [low priority] | Confirmed: CLI | `toHex` and `toBase64` build the whole result (2.57 GiB) before the string-length check throws. |
+| TASK-103.50 | Medium | Fixed in 841297c (was confirmed: CLI) | The collector counts each live BigInt as 48 bytes. 1,000 BigInts of 2 MiB stay alive under `--max-memory 16M` (2,019 MiB peak, exit 0). |
+| TASK-103.51 | Medium | Fixed in 5ff369f (was confirmed: CLI) | `payload_bytes` is 0 for FinalizationRegistry cells, DisposableStack resources and bound-function arguments. These reach 3.0 GiB, 2.5 GiB and 330 MiB under a 16 MiB limit with no out-of-memory error. |
+| TASK-103.53 | Medium | Fixed in 736a893 (was confirmed: CLI) | Native loops that allocate from a bare length or a native iterator never check the limit. Under 16 MiB, peaks reach 525 MiB to 3.6 GiB before exit 3. The loops are `fill`, Promise combinators, spread, `Intl.ListFormat` and typed-array `entries`. |
+| TASK-103.55 | Medium | Fixed in c4abee5 (was confirmed: CLI) | BigInt parsing, division, `toString` and `**` are superlinear and never poll the interrupt. Parsing ran past 120 s, one division took 51 s, and `3n ** 100000000n` ran past 40 s. |
+| TASK-103.52 | Low-medium [low priority] | Fixed in 5909eec (was confirmed: CLI) | The regex compile cache and large compiles amplify memory: 525 MiB under 16 MiB with nothing kept. |
+| TASK-103.54 | Low-medium [low priority] | Fixed in b4fdc53 (was confirmed: CLI) | `toHex` and `toBase64` build the whole result (2.57 GiB) before the string-length check throws. |
 | TASK-103.45 | Low | Fixed in 977e84d (was confirmed: CLI) | `ArrayBuffer.prototype.transfer` ignores `maxByteLength`: the result has `byteLength` 100 with `maxByteLength` 8. |
 
 Two kinds of failure are worth separating:
