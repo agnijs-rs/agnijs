@@ -277,6 +277,20 @@ pub trait Engine {
     /// Number of live handles (for leak tests).
     fn live_handles(&self) -> usize;
 
+    /// Whether a panic has unwound out of this engine. Nothing in the
+    /// engine catches a panic: one raised by the engine, a host function or
+    /// a [`crate::Host`] hook unwinds through the engine to the embedder.
+    /// An embedder that catches it (`std::panic::catch_unwind`) holds an
+    /// engine whose frames, roots and counters may be mid-update, so the
+    /// engine marks itself poisoned and refuses every later call that runs
+    /// code or touches a realm with [`crate::Error::Poisoned`]. Dropping it
+    /// is safe and is the only thing left to do; the calls that cannot fail
+    /// return unspecified values. Engines that do not track this return
+    /// `false`.
+    fn is_poisoned(&self) -> bool {
+        false
+    }
+
     /// Compare two handles for JS identity. Default goes through
     /// [`Engine::strict_equals`].
     fn same_object(&mut self, a: &Handle, b: &Handle) -> bool {

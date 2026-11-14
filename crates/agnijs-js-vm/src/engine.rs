@@ -383,6 +383,9 @@ impl Vm {
             Error::Unsupported(m) => self.throw_type(m),
             Error::SnapshotUnsupported(m) => self.throw_type(&format!("cannot snapshot the realm: {m}")),
             Error::Host(m) | Error::Internal(m) => self.throw(ErrorType::Error, &m),
+            // A nested call found the engine poisoned: end the script, as an
+            // interrupt does; `enter` reports the poisoning.
+            Error::Poisoned => Fault::Interrupt,
         }
     }
 
@@ -467,11 +470,26 @@ impl Vm {
     }
 
     fn check_realm(&self, realm: RealmId) -> api::Result<()> {
+        self.check_poisoned()?;
         if (realm.0 as usize) < self.realms.len() {
             Ok(())
         } else {
             Err(Error::UnknownRealm)
         }
+    }
+
+    /// Refuse a poisoned engine (TASK-103.31).
+    fn check_poisoned(&self) -> api::Result<()> {
+        if self.poisoned.get() {
+            Err(Error::Poisoned)
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Poisons the engine if a panic unwinds before the guard drops.
+    fn poison_on_unwind(&self) -> PoisonOnUnwind {
+        PoisonOnUnwind(self.poisoned.clone())
     }
 
     /// The host's stack budget for one call into the engine
@@ -488,11 +506,15 @@ impl Vm {
         f: impl FnOnce(&mut Vm) -> JsResult<T>,
     ) -> api::Result<T> {
         self.check_realm(realm)?;
+        let _poison = self.poison_on_unwind();
         let _stack = self.stack_guard();
         self.handles.reclaim();
         let saved = self.current_realm;
         self.current_realm = realm;
         let mut r = f(self);
+        // A host function caught the panic of a call nested in this one:
+        // the frames under it may be mid-update too.
+        self.check_poisoned()?;
         if self.heap.string_too_long {
             // A string past the maximum length was refused after the last
             // safe point; the host must not see the empty one stored.
@@ -612,6 +634,8 @@ impl Engine for Vm {
     }
 
     fn create_realm(&mut self) -> api::Result<RealmId> {
+        self.check_poisoned()?;
+        let _poison = self.poison_on_unwind();
         Ok(Vm::create_realm(self))
     }
 
@@ -730,6 +754,8 @@ impl Engine for Vm {
     }
 
     fn snapshot(&mut self, realm: RealmId) -> api::Result<Vec<u8>> {
+        self.check_poisoned()?;
+        let _poison = self.poison_on_unwind();
         self.write_snapshot(realm)
     }
 
@@ -768,6 +794,12 @@ impl Engine for Vm {
     }
 
     fn collect_garbage(&mut self) {
+        // The collector runs host objects' `trace`; after a panic the roots
+        // may be mid-update, so a poisoned engine collects nothing.
+        if self.poisoned.get() {
+            return;
+        }
+        let _poison = self.poison_on_unwind();
         if self.native_depth == 0 && self.frames.is_empty() {
             self.handles.reclaim();
             self.collect();
@@ -1087,6 +1119,23 @@ impl Engine for Vm {
 
     fn live_handles(&self) -> usize {
         self.handles.live()
+    }
+
+    fn is_poisoned(&self) -> bool {
+        self.poisoned.get()
+    }
+}
+
+/// Marks the engine poisoned when a panic unwinds through the entry that
+/// holds it (TASK-103.31). Nothing in the VM catches panics, and an unwind
+/// can leave frames, the native depth, roots and counters mid-update.
+struct PoisonOnUnwind(Rc<std::cell::Cell<bool>>);
+
+impl Drop for PoisonOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.set(true);
+        }
     }
 }
 

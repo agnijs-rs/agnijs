@@ -290,6 +290,9 @@ impl Engine for Inspected {
     fn live_handles(&self) -> usize {
         self.debuggee.borrow_mut().engine().live_handles()
     }
+    fn is_poisoned(&self) -> bool {
+        self.debuggee.borrow_mut().engine().is_poisoned()
+    }
     fn same_object(&mut self, a: &Handle, b: &Handle) -> bool {
         self.e().same_object(a, b)
     }

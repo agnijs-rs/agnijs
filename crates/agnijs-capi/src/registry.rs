@@ -492,6 +492,7 @@ pub fn engine_error(e: AgnijsEngine, err: api::Error) -> Fail {
         api::Error::Unsupported(_) | api::Error::SnapshotUnsupported(_) => AGNIJS_ERR_UNSUPPORTED,
         api::Error::Host(_) => AGNIJS_ERR_HOST,
         api::Error::Internal(_) => AGNIJS_ERR_ENGINE,
+        api::Error::Poisoned => AGNIJS_ERR_POISONED,
     };
     if let api::Error::Exception(ex) = err {
         let _ = with_state(e, true, |st| {

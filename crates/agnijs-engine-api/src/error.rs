@@ -64,6 +64,11 @@ pub enum Error {
     Host(String),
     /// An engine-internal failure that is not a JS exception.
     Internal(String),
+    /// A panic unwound out of this engine earlier (from the engine, a host
+    /// function or a [`crate::Host`] hook), so its state may be
+    /// inconsistent and every later call that runs code is refused. Drop
+    /// the engine; see [`crate::Engine::is_poisoned`].
+    Poisoned,
 }
 
 impl Error {
@@ -108,6 +113,7 @@ impl fmt::Display for Error {
             Error::SnapshotUnsupported(m) => write!(f, "cannot snapshot the realm: {m}"),
             Error::Host(m) => write!(f, "host error: {m}"),
             Error::Internal(m) => write!(f, "engine internal error: {m}"),
+            Error::Poisoned => f.write_str("a panic unwound out of this engine earlier; drop it"),
         }
     }
 }

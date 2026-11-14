@@ -409,6 +409,9 @@ pub struct Vm {
     pub gc_requested: bool,
     /// Debugger state; `None` unless a client is attached.
     pub(crate) debug: Option<Box<crate::debug::DebugState>>,
+    /// Set when a panic unwound through a host entry (TASK-103.31); shared
+    /// with the unwind guards, which cannot borrow the VM.
+    pub(crate) poisoned: Rc<std::cell::Cell<bool>>,
     /// Tested on the dispatch loop's slow path: a client is attached.
     pub(crate) debug_hot: bool,
     /// Reused buffer for the argument list of an inlined
@@ -528,6 +531,7 @@ impl Vm {
             gc_count: 0,
             gc_requested: false,
             debug: None,
+            poisoned: Rc::default(),
             debug_hot: false,
             arg_scratch: Vec::new(),
             feedback_owner: next_feedback_owner(),

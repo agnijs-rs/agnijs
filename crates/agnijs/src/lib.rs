@@ -26,6 +26,12 @@
 //! recipe in it is a test in this crate.
 //!
 //! A [`Context`] is single-threaded (`!Send`), like the engine it owns.
+//!
+//! Nothing here catches a panic. One raised by the engine, a Rust function
+//! or a [`Host`] hook unwinds into your code. If you catch it, the engine is
+//! poisoned: every later call that runs code fails with
+//! `Error::Engine(api::Error::Poisoned)`, and [`Context::is_poisoned`] says
+//! so. Drop the context; that is safe (TASK-103.31).
 
 mod asynch;
 mod class;
@@ -138,6 +144,13 @@ impl Context {
     /// The realm every method here works in.
     pub fn realm(&self) -> RealmId {
         self.realm
+    }
+
+    /// Whether a panic unwound out of the engine
+    /// ([`api::Engine::is_poisoned`]): the context then refuses to run code
+    /// and should be dropped.
+    pub fn is_poisoned(&self) -> bool {
+        self.engine.is_poisoned()
     }
 
     /// [`to_value`] in this context.
