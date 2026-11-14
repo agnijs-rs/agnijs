@@ -1034,6 +1034,13 @@ impl<V: JitValue> Compiled<V> {
         &self.info
     }
 
+    /// The machine code, as it runs: position-independent bytes with no
+    /// relocations, so a copy disassembles as it is. For a dump to compare
+    /// two builds' code by (`AGNIJS_JIT_DUMP`, TASK-103.56).
+    pub fn machine_code(&self) -> &[u8] {
+        self.mem.bytes()
+    }
+
     /// The address of the machine code.
     pub(crate) fn entry_address(&self) -> usize {
         self.mem.address()

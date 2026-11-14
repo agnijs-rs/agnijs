@@ -310,6 +310,7 @@ pub(crate) fn compile(
             index,
             live_in,
             spill,
+            in_file: Vec::new(),
             points: Vec::new(),
             blocks,
             resume,
@@ -439,6 +440,7 @@ pub(crate) fn compile_thunk(
             index: Vec::new(),
             live_in: Vec::new(),
             spill: None,
+            in_file: Vec::new(),
             points: Vec::new(),
             blocks: Vec::new(),
             resume: Vec::new(),
@@ -546,6 +548,11 @@ struct Lower<'a, 'c> {
     live_in: Vec<u16>,
     /// The spill area: [`SIZE`] bytes per cache index.
     spill: Option<StackSlot>,
+    /// Per cache index, where the last point emitted left the register's
+    /// value: in the register file (it was written back for the
+    /// instruction to read, or compiled code never writes it), else in its
+    /// spill slot. What [`Lower::reload_cached`] reads after the call.
+    in_file: Vec<bool>,
     /// The points emitted so far; a point's id is its index.
     points: Vec<Point>,
     blocks: Vec<Block>,
@@ -680,6 +687,8 @@ impl Lower<'_, '_> {
     /// the register file held, which is what it still holds.
     fn point(&mut self, pc: usize, kind: PointKind, dirty: Option<&Access>) -> u32 {
         let mut regs = Vec::new();
+        self.in_file.clear();
+        self.in_file.resize(self.cached.len(), true);
         for i in 0..self.cached.len() {
             let c = self.cached[i];
             let Some(reads) = dirty else { break };
@@ -694,6 +703,7 @@ impl Lower<'_, '_> {
                 self.write_back(c);
                 continue;
             }
+            self.in_file[i] = false;
             let (base, off) = self.spill_addr(i);
             match c.repr {
                 Repr::Boxed { tag, pay } => {
@@ -761,9 +771,47 @@ impl Lower<'_, '_> {
     /// at `to`: a generic instruction may have written any register, so
     /// every cached one is reloaded (speculated ones guarded, a failure
     /// leaving at `to` with nothing dirty); a known one wrote none.
+    ///
+    /// After a known one the cached registers are read back all the same,
+    /// each from where the call's point put it ([`Lower::in_file`]): the
+    /// register file, or its spill slot, which nothing writes while the
+    /// call runs. The values are the ones machine code held before the
+    /// call. Reading them back ends every cached register's life in a
+    /// machine register at the call, which is on a cold path: without
+    /// that each one is live across every call out of the block, so the
+    /// register allocator must keep it in a register calls preserve or on
+    /// the stack, and with more such values than such registers it put
+    /// the ones a hot loop reads on the stack (TASK-103.56). Only the
+    /// context pointers stay live across a call now.
+    ///
+    /// A speculated register's tag word is not read back: it is a constant
+    /// wherever the register has been guarded or written, and reading it
+    /// would make it a value to merge after every call out
+    /// ([`Repr::Number`]).
     fn reload_cached(&mut self, pc: usize, to: usize) {
         if let Access::Any = access(&self.code.instrs[pc]) {
             self.load_cached(to, PointKind::Exit { guard: None });
+            return;
+        }
+        for i in 0..self.cached.len() {
+            let c = self.cached[i];
+            let (base, off) = if self.in_file.get(i).copied().unwrap_or(true) {
+                (self.b.use_var(self.regs), c.reg as i32 * SIZE as i32)
+            } else {
+                self.spill_addr(i)
+            };
+            let p = self
+                .b
+                .ins()
+                .load(I64, flags(), base, off + PAYLOAD_OFFSET as i32);
+            match c.repr {
+                Repr::Boxed { tag, pay } => {
+                    let t = self.b.ins().load(I64, flags(), base, off + TAG_OFFSET as i32);
+                    self.b.def_var(tag, t);
+                    self.b.def_var(pay, p);
+                }
+                Repr::Number { bits, .. } => self.b.def_var(bits, p),
+            }
         }
     }
 

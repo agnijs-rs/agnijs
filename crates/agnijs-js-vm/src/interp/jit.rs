@@ -286,6 +286,35 @@ impl Drop for JitState {
     }
 }
 
+/// `AGNIJS_JIT_DUMP=<directory>` writes the machine code of every block
+/// compiled, as `<n>-<function>.bin` (`n` counts the VM's compilations), and
+/// says so on stderr. The bytes are position-independent x86-64 or AArch64
+/// code with no header: `llvm-objcopy -I binary -O elf64-x86-64` (or
+/// `elf64-littleaarch64`) makes a file `llvm-objdump -D` reads. It is how
+/// two builds' code for one function is compared (TASK-103.56). A
+/// directory that cannot be written is ignored.
+fn dump_code(n: u32, code: &CodeBlock, bytes: &[u8]) {
+    let Some(dir) = std::env::var_os("AGNIJS_JIT_DUMP") else {
+        return;
+    };
+    let name: String = code
+        .name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(40)
+        .collect();
+    let path = std::path::Path::new(&dir).join(format!("{n:03}-{name}.bin"));
+    if std::fs::write(&path, bytes).is_ok() {
+        eprintln!(
+            "agnijs jit: {} bytes for {:?} ({} instructions) in {}",
+            bytes.len(),
+            &*code.name,
+            code.instrs.len(),
+            path.display()
+        );
+    }
+}
+
 /// What [`Vm::jit_run`] did with the top frame.
 pub(crate) enum JitRun {
     /// Nothing: the interpreter's locals are still current.
@@ -763,6 +792,7 @@ impl Vm {
                 s.speculated += u32::from(spec.numbers != 0);
                 s.code_bytes += c.code_size;
                 s.compile_time += c.compile_time;
+                dump_code(s.compiled, code, c.machine_code());
                 tier.state.set(Tier::COMPILED);
                 let c = Rc::new(c);
                 *tier.code.borrow_mut() = Some(c.clone());

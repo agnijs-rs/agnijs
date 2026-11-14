@@ -622,6 +622,16 @@ impl ExecMemory {
     pub(crate) fn address(&self) -> usize {
         self.ptr as usize
     }
+
+    /// The code as bytes, to write out ([`crate::Compiled::machine_code`]).
+    pub(crate) fn bytes(&self) -> &[u8] {
+        if self.ptr.is_null() {
+            return &[];
+        }
+        // SAFETY: `ptr` is a mapping of `len` initialised bytes that stays
+        // readable, and is never written again, until `self` is dropped.
+        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
+    }
 }
 
 impl Drop for ExecMemory {
