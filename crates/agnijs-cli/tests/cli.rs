@@ -407,6 +407,31 @@ fn a_source_map_rewrites_the_stack() {
     );
 }
 
+/// A `data:` source map URL with a multi-byte character after `%` is read
+/// (and ignored, as it is no source map) instead of panicking, in a script
+/// and in a module loaded by `import()` (TASK-103.37).
+#[test]
+fn a_source_map_url_with_a_bad_escape_does_not_crash() {
+    let d = dir("sourcemap-escape");
+    let comment = "//# sourceMappingURL=data:,%a\u{e9}1";
+    write(&d, "pct.js", &format!("console.log('ran');\n{comment}\n"));
+    let o = agnijs(&d, &["pct.js"]);
+    assert_eq!((code(&o), out(&o)), (0, "ran\n".to_string()), "{}", err(&o));
+    write(&d, "dep.mjs", &format!("export const x = 1;\n{comment}\n"));
+    write(
+        &d,
+        "main.mjs",
+        "await import('./dep.mjs').then((m) => console.log('loaded', m.x), (e) => console.log('caught', e));\n",
+    );
+    let o = agnijs(&d, &["main.mjs"]);
+    assert_eq!(
+        (code(&o), out(&o)),
+        (0, "loaded 1\n".to_string()),
+        "{}",
+        err(&o)
+    );
+}
+
 #[test]
 fn compiled_bytecode_runs_scripts_and_modules() {
     let d = dir("bytecode");

@@ -185,7 +185,10 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
-fn percent_decode(s: &str) -> String {
+/// Decode `%hh` escapes (as in a `data:` URL or a file URL). A `%` not
+/// followed by two hex digits is kept as it is, and bytes that do not form
+/// UTF-8 are replaced, so any input decodes without a panic.
+pub fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;

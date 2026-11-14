@@ -83,7 +83,13 @@ pub fn absolute(file: &str) -> String {
     let s = slash_path(&abs);
     // Drop `.` and resolve `..` the way the resolver does.
     let (root, rest) = match s.find(':') {
-        Some(1) => s.split_at(3.min(s.len())),
+        // `C:/` or, for a drive-relative path, just `C:`: never split
+        // inside a character that follows the colon (TASK-103.37).
+        Some(1) => s.split_at(if s.as_bytes().get(2) == Some(&b'/') {
+            3
+        } else {
+            2
+        }),
         _ if s.starts_with('/') => s.split_at(1),
         _ => ("", s.as_str()),
     };
@@ -144,23 +150,10 @@ pub fn source_map_for(path: &str, source: &str) -> Option<String> {
     std::fs::read_to_string(dir.join(percent_decode(&url))).ok()
 }
 
-fn percent_decode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
+// The debugger's decoder works on bytes; the copy this file had sliced the
+// string at byte offsets and panicked on a multi-byte character after `%`
+// (TASK-103.37).
+use agnijs_js_debugger::source_map::percent_decode;
 
 /// Whether `bytes` are a precompiled container (`agnijs compile`).
 pub fn is_bytecode(bytes: &[u8]) -> bool {
@@ -288,5 +281,52 @@ impl Host for CliHost {
 
     fn regex_matcher(&self) -> RegexMatcher {
         self.config.regex_matcher
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{absolute, percent_decode, source_map_for};
+
+    /// A character of more than one byte after `%` is not an escape, and
+    /// stepping over it must not panic (TASK-103.37).
+    #[test]
+    fn percent_decoding_steps_over_multi_byte_characters() {
+        for (input, want) in [
+            ("%a\u{e9}1", "%a\u{e9}1"),
+            ("%\u{e9}", "%\u{e9}"),
+            ("%\u{e9}1", "%\u{e9}1"),
+            ("x%\u{1F600}", "x%\u{1F600}"),
+            ("%", "%"),
+            ("%4", "%4"),
+            ("%41", "A"),
+            ("ab%41", "abA"),
+            ("%41%42", "AB"),
+            ("%zz%41", "%zzA"),
+            ("%C3%A9", "\u{e9}"),
+        ] {
+            let got = std::panic::catch_unwind(|| percent_decode(input));
+            assert_eq!(got.as_deref().ok(), Some(want), "{input:?}");
+        }
+    }
+
+    #[test]
+    fn a_data_url_with_a_bad_escape_is_read_without_a_panic() {
+        let src = "1\n//# sourceMappingURL=data:,%a\u{e9}1";
+        let got = std::panic::catch_unwind(|| source_map_for("x.js", src));
+        assert_eq!(got.ok(), Some(Some("%a\u{e9}1".to_string())));
+        // An escape in the last three bytes is decoded.
+        let src = "1\n//# sourceMappingURL=data:application/json,%7B%7D%41";
+        assert_eq!(source_map_for("x.js", src).as_deref(), Some("{}A"));
+    }
+
+    /// A drive letter followed by a multi-byte character (`C:é.js`, a
+    /// drive-relative path on Windows) used to be split inside the
+    /// character.
+    #[test]
+    fn absolute_paths_split_their_root_on_a_character_boundary() {
+        for p in ["C:é.js", "C:é", "C:", "C:/é.js", "/é.js"] {
+            assert!(std::panic::catch_unwind(|| absolute(p)).is_ok(), "{p:?}");
+        }
     }
 }
