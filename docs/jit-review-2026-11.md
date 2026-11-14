@@ -40,6 +40,8 @@ Added when the three findings were fixed. Same machine as the review; release bu
 | `AGNIJS_JIT=on` | 26 | 0.990 |
 | `AGNIJS_JIT=force` | 15 (those of ADR 0020's forced table) | 1.003 |
 
+(The cause was found afterwards, under TASK-103.56: the register allocation of the inner loop, where the shared-state pointer moved from a register to the stack. Cached registers are now read back after a call out instead of being held across it, and the workload is at 1.024 of the starting commit, within layout noise. `docs/js-engine-performance-findings.md`, section "Tiered JIT follow-up, 2026-11-14", has the machine-code comparison and the numbers. The rest of this section is as it was written.)
+
 **prop-monomorphic is 5 to 7% slower with the JIT on or forced, and the cause is not known.** It measured 1.057 (on) and 1.051 (forced) in the full runs, about 25.5 ms against 27.0 ms, and 1.069, 1.050, 1.050 and 1.074 in four later runs of mode `on`, each of a different experimental build. TASK-103.56 tracks recovering it. What is known:
 
 - The tiering is the same: in mode `on` the starting and the fixed binary compile the same blocks, guess the same registers, deoptimise once each and call out 1474 times each on this loop. Only the machine code differs, and it is about 2% larger (56,752 against 57,984 bytes).

@@ -2,7 +2,7 @@
 
 This is the investigation in TASK-100.14. It explains why the AgniJS engine is slower or heavier than the interim engine (QuickJS-NG) on the M9 benchmarks ([switch-over report](https://github.com/jcannon98188/gable/blob/main/docs/js-engine-switch-over.md)) and the micro-benchmarks (`crates/agnijs-js-bench`). It measures and explains only. Nothing in the engine changed. Each cause worth fixing has its own backlog ticket, listed in [the tickets](#the-tickets).
 
-The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-12](#re-measurement-2026-11-12) has the current numbers; [2026-11-11](#re-measurement-2026-11-11) has the ones before the security hardening, taken after TASK-100.16 to TASK-100.35 and the baseline JIT.
+The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-11](#re-measurement-2026-11-11) has the numbers taken after TASK-100.16 to TASK-100.35 and the baseline JIT, before the security hardening. A re-measurement on 2026-11-12 at `107fa7c` found the interpreter within noise of that and the tiered JIT slower on four workloads; its tables were not committed, and [Tiered JIT follow-up, 2026-11-14](#tiered-jit-follow-up-2026-11-14) is what became of that finding.
 
 ## Re-measurement, 2026-11-11
 
@@ -129,6 +129,101 @@ The JIT pays off only on the loop and property workloads: loop-arith is 3.1x fas
 - **The workload set grew.** The new regex, snapshot and bundle workloads are excluded from the like-for-like geomeans. regex-redos makes any geomean that includes it meaningless.
 - **The JIT figures are from two runs of a separate build**, with default thresholds. They are not tuned and not representative of Gable workloads, which were not run under the JIT.
 - **The Gable harness ran against a patched copy**, with path dependencies on this commit instead of its pinned revision `fa65c08`. The Cargo.lock entries for third-party crates may differ slightly from Gable's.
+
+## Tiered JIT follow-up, 2026-11-14
+
+TASK-100.36 and TASK-103.56. The 2026-11-12 re-measurement (at `107fa7c`, JIT build, `AGNIJS_JIT=on`, five rounds against `1d172aa`) reported prop-write-alloc at 1.11x, regex 1.08x, regex-long-input 1.13x and method-calls 1.06x, and higher peak RSS, and suspected the calls in machine code (`e9bf4e8`). The soundness fix of TASK-103.34 then left prop-monomorphic 5% slower. Both were bisected here.
+
+**Method.** `bench` built with `--features jit` at each commit from one checkout path, the binaries copied out; `bench child` for one workload at a time, the binaries taking turns within a round, 9 rounds unless said; each figure is the median over the rounds of each run's median sample (5 iterations after 1 warm-up). Same machine as above, nothing else running.
+
+### Three of the four slowdowns are not the JIT
+
+| workload | `107fa7c` over `1d172aa`, JIT off | the same, `AGNIJS_JIT=on` | compiled |
+| --- | ---: | ---: | --- |
+| prop-write-alloc | 1.066 | 1.076 | nothing, in either build |
+| regex-long-input | 1.124 | 1.120 | nothing, in either build |
+| method-calls | 1.075 | 1.089 | one block, given up after 1,884 back-edges |
+| regex | 0.959 | 1.004 | see below |
+
+The slowdown is there with the JIT switched off in the same binary, so it is not the compiled tier. It is not a commit either. With the JIT off, against `1d172aa`, across the commits in between:
+
+| commit | regex-long-input | prop-write-alloc | method-calls |
+| --- | ---: | ---: | ---: |
+| `fa02ecc` (before `e9bf4e8`) | 1.019 | 1.033 | 1.069 |
+| `e9bf4e8` | 1.059 | 0.988 | 1.018 |
+| `4cb792f` | 0.990 | 0.992 | 1.012 |
+| `8459ae4` | 0.940 | 0.996 | 1.006 |
+| `cab9f00` | 1.119 | 1.007 | 1.020 |
+| `107fa7c` | 1.124 | 1.070 | 1.068 |
+| `8af8d4a` | 1.120 | 1.009 | 1.016 |
+| `5ff369f` | 0.949 | 1.015 | 1.019 |
+| `5909eec` | 1.095 | 1.014 | 1.015 |
+| `f064ee6` (main) | 1.098 | 1.024 | 1.027 |
+
+The figures go up and come back with commits that touch none of the code these workloads run; the commit before the suspect has the slowdown and the suspect does not. This is the layout of the Rust build: regex-long-input takes 1.55 or 1.8 ms depending on the build (the feature-off builds of `1d172aa`, `e9bf4e8` and main: 1.76, 1.62, 1.56 ms), and `107fa7c` happened to be a slow build for three workloads at once. Treat a single-workload difference under about 8% between two builds as possibly this, however narrow the spread within each build.
+
+### regex: a native's polls counted as the loop's work
+
+Real, and from `8459ae4` (TASK-103.28), not `e9bf4e8`. A compiled run reads its work off the interrupt counter. Since TASK-103.28 a native polls that counter once per step over its input, so the polls of `exec` and `replace` counted as back-edges of the loop that called them: `AGNIJS_JIT_STATS=1` shows 20,201 back-edges at `4cb792f` and 1,401,892 from `8459ae4` on, for the same 1.1 M call outs. The judgement of the running code then never gave the loop up, and it ran compiled at 1.044 of the interpreter in the same binary.
+
+Fixed: what the runtime does for an instruction it is handed is not the run's work (`Vm::jit_uncounted`). The loop is given up after 20,202 back-edges again.
+
+| regex, `AGNIJS_JIT=on` | ms | over `1d172aa` |
+| --- | ---: | ---: |
+| `1d172aa` | 107.95 | |
+| main before | 108.87 | 1.009 (0.994 to 1.048) |
+| now | 105.25 | 0.975 (0.948 to 1.026) |
+
+After the fix the workload is about 1.02 of the same binary with the JIT off: it still compiles the loop once (30 ms) before giving it up, as ADR 0020's addendum on TASK-101.3.3 describes.
+
+### Every loop over objects was compiled twice
+
+The bytecode compiler reuses its temporaries: in prop-monomorphic one register holds `pts` for the element load and `s + p.x` for the second add. At the back-edge where the block is compiled it holds the sum, so it was guessed to hold only numbers, and the guess failed at the first store of the object: one side exit, and the whole block compiled again. A register the block also uses as the object of a property access or as a callee is no longer a candidate.
+
+| workload | compilations | compile time ms | code bytes |
+| --- | --- | --- | --- |
+| prop-monomorphic | 2 to 1 | 19.8 to 11.3 | 57,984 to 31,104 |
+| prop-polymorphic | 2 to 1 | 19.9 to 12.4 | 58,064 to 33,984 |
+| method-calls | 2 to 1 | 20.9 to 12.5 | 61,840 to 35,232 |
+| regex | 2 to 1 | 49.7 to 29.6 | 148,480 to 82,104 |
+| closures | 5 to 4 | 18.8 to 15.8 | 53,272 to 36,200 |
+
+### Tiered peak RSS is the code generator's working memory
+
+Not code size (0.06 to 0.3 MiB) and not a queue: compilation is synchronous. The working set read around each `Compiled::compile_calling` (a throwaway probe, not committed; taken before the change above, so each block is still compiled twice):
+
+| workload | block | before, MiB | peak inside the compilation | current after |
+| --- | --- | ---: | ---: | ---: |
+| regex, first compilation | 68.9 KB of code | 9.3 | 19.6 | 12.6 |
+| method-calls, first | 27.6 KB | 6.6 | 12.3 | 9.6 |
+| array-methods, first | one of two, 127.6 KB together | 7.4 | 17.4 | 10.6 |
+| loop-arith | 4.9 KB | 6.4 | 9.5 | 8.9 |
+
+So a compilation holds roughly 150 bytes for each byte of code it produces while it runs, on top of about 2.5 MiB the first use of the code generator costs once, and about 3 MiB stays resident afterwards. Gable's benches, with the harness of Gable built against this tree (one run each): template-mount compiles one block of 157 KB twice (144 ms, in one sample of the six) and gives it up, 44.4 against 71.6 MiB off and on; rxjs-higher-order compiles 20 blocks, 286 KB together, and gives 19 up, 29.0 against 41.7 MiB. The micro workloads' peak is unchanged by this work (regex 21.3 and 20.6 MiB, method-calls 13.2 and 13.0): the first compilation sets it. The peak of one compilation is Cranelift's; the lever is smaller blocks (the inline-cache paths are expanded four ways at every site), which is ADR 0020's open compile-time item, not this task.
+
+### prop-monomorphic after the TASK-103.34 fix
+
+The cause is the register allocation of the inner loop, found by dumping the machine code of both builds (`AGNIJS_JIT_DUMP`, new) and following the hot path: the same instructions (516 against 522), but the shared-state pointer, which the loop reads the arena base, the prototype epoch and the interrupt counter through, had been in a register and was now reloaded from the stack 12 times an iteration. No tag word is in the loop. Every cached register used to be live across every call out of the block, so up to sixteen words and two context pointers wanted the seven registers a call preserves. They are now read back after each call out, from the register file or the spill slot the call's point left them in (ADR 0020, the addendum on TASK-103.56).
+
+Against `8af8d4a`, the commit before the fix, 9 rounds:
+
+| workload | on: main before | on: now | force: main before | force: now |
+| --- | ---: | ---: | ---: | ---: |
+| prop-monomorphic | 1.051 (1.010 to 1.071) | 1.024 (0.986 to 1.031) | 1.058 | 1.032 (1.020 to 1.055) |
+| prop-polymorphic | 1.052 | 0.986 | 1.050 | 0.993 |
+| loop-array-index | 0.965 | 0.897 | 0.966 | 0.897 |
+| loop-arith | 1.006 | 1.019 | 1.010 | 1.017 |
+
+prop-monomorphic is back within the 4% this machine's layout moves JIT code by, not to 1.00: the pointer is still on the stack in its loop, because the allocator gives a range that spans the function the lowest priority. Reading the context pointers back after calls too was tried and was worse (1.085). loop-arith's loop is two instructions shorter than before with the pointer in a register, and measures 1 to 2% slower: a 60-instruction loop around a call of `fmod`, which is alignment.
+
+### Whole-set check
+
+Now over main before (`f064ee6`), 5 rounds: `AGNIJS_JIT=on`, 26 workloads, geomean **0.995**; `force`, the 15 of ADR 0020's forced table, **1.000**; the JIT off in the same binaries **1.001** (the changes are all behind the feature, so a build without it is the same code). Forced mode pays on code that is mostly call outs, which tiering does not compile: prop-write-alloc 1.03, string-concat 1.02 to 1.05.
+
+### Seen on the way, not done
+
+- Every instruction after one that can call out is an entry from the interpreter, so every instruction's block has two predecessors and nothing is known across it: the dump shows `mov eax, 3` followed two instructions later by a test of that tag. Entering only at loop heads and after calls would let those tests fold, and shrink the code.
+- The shared-state and context pointers are reloaded from the stack in hot loops (15 and 3 times an iteration in prop-monomorphic).
 
 ## Summary
 

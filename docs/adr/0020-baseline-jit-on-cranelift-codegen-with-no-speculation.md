@@ -348,3 +348,29 @@ Gable's benches (5 rounds, the harness of Gable `7cd58eb` built against this tre
 - **`typeof x === "..."`** is three call outs (`Typeof`, a string constant, a string comparison); a fused instruction in the bytecode would serve both tiers.
 - **Mode `On` on call-heavy code that is not a loop or a recursion.** Forced, rxjs-operators runs at 0.78 of the interpreter; tiered it stays at 0.99, because the functions that would call each other directly are entered from interpreted callers and are (rightly, one at a time) not compiled. Compiling a group of functions that call each other needs call-target feedback too.
 - **Compile time.** Forced, a 100 KB script still takes seconds to compile (compile-source: 8.4 s before this work, 8.9 s after), most of it in a few very large blocks.
+
+## Addendum: cached registers across call outs, and what counts as a run's work (TASK-103.56, TASK-100.36)
+
+Two follow-ups to the addenda above, measured in `docs/js-engine-performance-findings.md` (section "Tiered JIT follow-up, 2026-11-14"). Nothing in the decision changes.
+
+### Cached registers are read back after a call out
+
+"After the call, every cached register is reloaded, because the runtime may have written any of them" was true of a generic instruction only. After an instruction whose register access is known, compiled code went on with the values it held before the call, so every cached register was live across every call out of the block. A call preserves seven general registers on Windows x64 and five on other x64 systems; up to sixteen words of cached registers and the two context pointers wanted them, and the register allocator put what did not fit on the stack, whether a loop read it or not. After TASK-103.34 that was the shared-state pointer in prop-monomorphic's inner loop, 5% of the workload.
+
+Now the cached registers are read back after every call out: from the register file when the call's point wrote the register back for the instruction to read, or compiled code never writes it; from its spill slot otherwise. Nothing writes either during the call (a known instruction writes no register, and a debugger that attaches makes the frame leave compiled code). The point, what it lists and what the runtime materialises are as they were, so the rule of TASK-103.34 holds unchanged: a register is spilled, written back and copied as a value, never boxed from bits. A speculated register's tag word is not read back. It is a constant wherever the register has been guarded or written, and reading it would make it a value to merge after every call out.
+
+Call outs are on cold paths, so loops lose nothing: prop-polymorphic and loop-array-index gained 6 to 7%, prop-monomorphic is back within layout noise of the commit before TASK-103.34 (1.024). Forced code that is mostly call outs pays for the reads (prop-write-alloc 1.03, string-concat 1.02 to 1.05).
+
+The two context pointers still cross every call, and the allocator still keeps the shared-state pointer on the stack in some loops. Reading them back too made the same loops slower, so they are left.
+
+### A run's work is what compiled code did
+
+Mode `On` judges a block by the work its runs do without leaving, read off the interrupt counter (`JitStats::back_edges`). Since TASK-103.28 natives advance that counter as well, once per step over their input, and a run nested under a native advances it by its own work. Neither is the calling run's: counted, a loop that only calls `exec` and `replace` looked seventy times as busy as it was and was never given up. Whatever the counter advances by while the runtime runs an instruction for compiled code is now left out (`Vm::jit_uncounted`), as a callee's own run already was.
+
+### Which registers are guessed to be numbers
+
+A register the block also uses as the object of a property access or as a callee is not a candidate (`number_candidates`). The bytecode compiler reuses its temporaries, so such a register held a number at the back-edge where the block was compiled and an object two instructions later: the guess failed at once, and nearly every loop over objects was compiled twice.
+
+### Looking at the code
+
+`AGNIJS_JIT_DUMP=<directory>` writes the machine code of every block compiled as `<n>-<function>.bin` and names each file on stderr. The bytes carry no relocations: `llvm-objcopy -I binary -O elf64-x86-64 --rename-section .data=.text,code` and `llvm-objdump -d` read them. `AGNIJS_JIT_STATS=1` gives the counts to read beside it.
