@@ -207,6 +207,11 @@ Tests:
 
 The regex backtracker uses an explicit stack, so no pattern or input recurses on the native stack (`backtrack.rs`; `crates/agnijs-js-regex/tests/nesting.rs`).
 
+Some depth is built without recursion, so nothing on the way in checks the budget; what walks it afterwards must not recurse either:
+
+- **Left-associative chains.** The parser builds `a + b + c`, `a.b.c`, `a()()`, `new a.b` and tagged templates in a loop, so a chain of a million links is a tree a million levels deep. The compiler stops at the budget, and the syntax tree drops its left spine in a loop (`Drop` impls in `crates/agnijs-js-parser/src/ast.rs`, TASK-103.46; `crates/agnijs-js-parser/tests/deep_chains.rs`, `crates/agnijs-js-vm/tests/deep_chains.rs`).
+- **Proxy and bound-function chains.** A script can wrap a function or an array in proxies or `bind` a million times. `IsArray`, `IsConstructor` and `GetFunctionRealm` follow such a chain in a loop (`ops.rs`, `interp/calls.rs`, TASK-103.47; `crates/agnijs-js-vm/tests/deep_native_chains.rs`), and calls through it stop at the budget.
+
 With the `jit` feature, compiled functions call each other on the native stack. Their frames nest at most `JIT_STACK` (96 KB in an optimised build, `interp/jit.rs`) below where compiled code was entered and never past the budget's limit; beyond that a call is made through the runtime, on the interpreter's frame stack (`machine_frames_do_not_nest_past_the_hosts_stack_budget` and `recursion_past_the_stack_bound_unwinds_and_goes_on` in `tests/jit_calls.rs`).
 
 **Changing it.** `Engine::set_stack_budget(Some(bytes))` sets the budget, and `stack_budget()` reads it. A `Context` reaches them through `context.engine()`. A larger budget on a larger thread accepts deeper nesting. The deepest nesting the default accepts, measured on Windows x64 in November 2026:

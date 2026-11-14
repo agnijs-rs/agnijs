@@ -1216,6 +1216,10 @@ impl Vm {
         };
         if let Class::Bound(b) = &self.heap.obj(co).class {
             let t = b.target;
+            // InstanceofOperator looks up @@hasInstance on every link, so this
+            // stays a recursion; a chain of bound functions with no prototype
+            // reaches here without a call that checks the stack (TASK-103.47).
+            self.check_stack()?;
             return self.instance_of(o, Value::Object(t));
         }
         let Value::Object(mut obj) = o else {
@@ -1255,20 +1259,36 @@ impl Vm {
     }
 
     /// IsArray(argument).
+    #[inline]
     pub fn is_array(&mut self, v: Value) -> JsResult<bool> {
         let Value::Object(o) = v else {
             return Ok(false);
         };
         match &self.heap.obj(o).class {
             Class::Array(_) => Ok(true),
-            Class::Proxy(p) => {
-                match (p.target, p.handler) {
-                    (Some(t), Some(_)) => self.is_array(Value::Object(t)),
-                    _ => Err(self
-                        .throw_type("Cannot perform 'IsArray' on a proxy that has been revoked")),
-                }
-            }
+            Class::Proxy(_) => self.is_array_through_proxies(o),
             _ => Ok(false),
+        }
+    }
+
+    /// IsArray of a proxy: a loop through its targets, which can nest as
+    /// deep as memory allows (TASK-103.47). Kept out of line so the common
+    /// case above stays small.
+    #[inline(never)]
+    fn is_array_through_proxies(&mut self, mut o: ObjId) -> JsResult<bool> {
+        loop {
+            match &self.heap.obj(o).class {
+                Class::Array(_) => return Ok(true),
+                Class::Proxy(p) => match (p.target, p.handler) {
+                    (Some(t), Some(_)) => o = t,
+                    _ => {
+                        return Err(self.throw_type(
+                            "Cannot perform 'IsArray' on a proxy that has been revoked",
+                        ))
+                    }
+                },
+                _ => return Ok(false),
+            }
         }
     }
 

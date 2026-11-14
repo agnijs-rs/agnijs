@@ -23,31 +23,52 @@ impl Vm {
         }
     }
 
+    /// IsConstructor.
+    #[inline]
     pub fn is_constructor(&self, v: Value) -> bool {
-        let Value::Object(o) = v else { return false };
+        let Value::Object(o) = v else {
+            return false;
+        };
         match &self.heap.obj(o).class {
             Class::Function(f) => f.constructor_kind != ConstructorKind::None,
             Class::Native(n) => n.constructor,
-            Class::Bound(b) => self.is_constructor(Value::Object(b.target)),
+            Class::Bound(b) => self.is_constructor_through_bound(b.target),
             Class::Proxy(p) => p.constructor,
             _ => false,
         }
     }
 
-    /// GetFunctionRealm.
-    pub fn function_realm(&mut self, f: ObjId) -> JsResult<RealmId> {
-        match &self.heap.obj(f).class {
-            Class::Function(d) => Ok(d.realm),
-            Class::Native(n) => Ok(n.realm),
-            Class::Bound(b) => {
-                let t = b.target;
-                self.function_realm(t)
+    /// IsConstructor of a bound function's target: a loop, not a recursion,
+    /// since a chain of bound functions can be as long as memory allows
+    /// (TASK-103.47). Kept out of line so the common case above stays small.
+    #[inline(never)]
+    fn is_constructor_through_bound(&self, mut o: ObjId) -> bool {
+        loop {
+            match &self.heap.obj(o).class {
+                Class::Function(f) => return f.constructor_kind != ConstructorKind::None,
+                Class::Native(n) => return n.constructor,
+                Class::Bound(b) => o = b.target,
+                Class::Proxy(p) => return p.constructor,
+                _ => return false,
             }
-            Class::Proxy(p) => match p.target {
-                Some(t) if p.handler.is_some() => self.function_realm(t),
-                _ => Err(self.throw_type("Cannot perform operation on a revoked proxy")),
-            },
-            _ => Ok(self.current_realm),
+        }
+    }
+
+    /// GetFunctionRealm. A loop through bound functions and proxies, which
+    /// can nest as deep as memory allows (TASK-103.47).
+    pub fn function_realm(&mut self, f: ObjId) -> JsResult<RealmId> {
+        let mut f = f;
+        loop {
+            match &self.heap.obj(f).class {
+                Class::Function(d) => return Ok(d.realm),
+                Class::Native(n) => return Ok(n.realm),
+                Class::Bound(b) => f = b.target,
+                Class::Proxy(p) => match p.target {
+                    Some(t) if p.handler.is_some() => f = t,
+                    _ => return Err(self.throw_type("Cannot perform operation on a revoked proxy")),
+                },
+                _ => return Ok(self.current_realm),
+            }
         }
     }
 
