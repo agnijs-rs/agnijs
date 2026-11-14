@@ -184,10 +184,30 @@ pub(crate) fn choose_cache(code: &CodeBlock, spec: &Speculation) -> Vec<(u16, bo
 /// comparison reads, which compiled code would then read without a tag
 /// test. The runtime keeps those that hold a number in the frame it
 /// compiles for, less any whose speculation failed before.
+///
+/// Not a register the block also uses as the object of a property access
+/// or as a callee: the bytecode compiler reuses its temporaries, so one
+/// register is often an object at one instruction of a loop and a sum at
+/// another (`pts[i]` and `s + p.x`). At a back-edge it holds whichever came
+/// last. Guessed a number then, it failed at the first store of the
+/// object: one side exit, and the whole block compiled a second time,
+/// for nearly every loop over objects (TASK-100.36).
 pub fn number_candidates(code: &CodeBlock) -> u64 {
     let depth = loop_depth(code);
     let mut mask = 0u64;
+    let mut objects = 0u64;
     for (pc, instr) in code.instrs.iter().enumerate() {
+        let object = match *instr {
+            Instr::GetNamed { obj, .. }
+            | Instr::SetNamed { obj, .. }
+            | Instr::GetKeyed { obj, .. }
+            | Instr::SetKeyed { obj, .. } => Some(obj),
+            Instr::Call { callee, .. } => Some(callee),
+            _ => None,
+        };
+        if let Some(r) = object.filter(|&r| r < 64) {
+            objects |= 1 << r;
+        }
         if depth[pc] == 0 {
             continue;
         }
@@ -197,7 +217,7 @@ pub fn number_candidates(code: &CodeBlock) -> u64 {
             }
         }
     }
-    mask
+    mask & !objects
 }
 
 /// Whether the instruction never calls out of compiled code: its
@@ -366,6 +386,23 @@ mod tests {
         assert_eq!(c.count_ones(), 4, "{c:#b}");
         let straight = function("function g(a, b) { return a + b; }");
         assert_eq!(number_candidates(&straight), 0, "no loop: nothing to gain");
+    }
+
+    /// The benchmark loop of TASK-100.36: its temporary holds `pts` for the
+    /// element load and `s + p.x` for the second add.
+    #[test]
+    fn a_register_also_used_as_an_object_is_no_candidate() {
+        let code = function(
+            "function f(pts) { var s = 0; for (var i = 0; i < pts.length; i++) { var p = pts[i]; s = (s + p.x + p.y) | 0; } return s; }",
+        );
+        let objects = code.instrs.iter().fold(0u64, |m, i| match *i {
+            Instr::GetNamed { obj, .. } | Instr::GetKeyed { obj, .. } => m | 1 << obj,
+            _ => m,
+        });
+        let candidates = number_candidates(&code);
+        assert_eq!(candidates & objects, 0, "{:?}", code.instrs);
+        // The loop's own numbers still are: `s` and `i`.
+        assert!(candidates.count_ones() >= 2, "{:?}", code.instrs);
     }
 
     #[test]

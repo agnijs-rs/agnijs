@@ -253,6 +253,26 @@ fn a_tiered_loop_that_mostly_calls_out_goes_back_to_the_interpreter() {
 }
 
 #[test]
+fn polls_made_by_a_native_are_not_work_of_the_loop_that_called_it() {
+    // `indexOf` polls the interrupt once per element it looks at
+    // (TASK-103.28), on the counter a compiled run's work is read off.
+    // Counted as the loop's back-edges, those polls made a loop that only
+    // calls natives look sixty times as busy as it was, and mode `On` never
+    // gave it back to the interpreter (TASK-100.36: the regex workload).
+    let src = "var a = []; for (var i = 0; i < 64; i++) a.push(i);
+               function f(n) { var s = 0; for (var i = 0; i < n; i++) { s += a.indexOf(63); } return s; }
+               f(2000)";
+    let (forced, stats) = run(JitMode::Force, src);
+    assert_eq!(forced, run(JitMode::Off, src).0);
+    if std::env::var_os("AGNIJS_GC_STRESS").is_some() {
+        return;
+    }
+    // The two loops' back-edges, and nothing of the 128,000 polls.
+    assert!(stats.calls_out >= 2000, "{stats:?}");
+    assert!(stats.back_edges >= 2000 && stats.back_edges < 6000, "{stats:?}");
+}
+
+#[test]
 fn a_tiered_loop_that_calls_a_function_every_iteration_calls_it_in_machine_code() {
     // Mostly inline work and a call of a small function. Each call used to
     // leave compiled code, which cost more than the inline work saved, so

@@ -906,6 +906,32 @@ impl Vm {
         }
         self.step(instr, fi, base, code)
     }
+
+    /// Run `f`, an instruction the runtime runs for compiled code, without
+    /// counting the polls made under it as work of the compiled run that
+    /// called out ([`JitStats::back_edges`]). The run's work is read off
+    /// the interrupt counter, which compiled code advances at its
+    /// back-edges and direct calls; a native advances it too, once per
+    /// step of a loop over its input (TASK-103.28: a regular expression
+    /// match, an array method), and so does a nested run loop. None of
+    /// that is work compiled code did without leaving: counted, it made a
+    /// loop that only calls natives look worth its call outs, and the
+    /// judgement of the running code never gave it up (TASK-100.36).
+    /// The run's start is moved past whatever the counter advanced by,
+    /// as [`JitRt::enter_callee`] does for a callee's own run; a run of
+    /// compiled code nested under `f` counts its own work and leaves the
+    /// start wherever it was, which this puts right as well.
+    #[inline(always)]
+    fn jit_uncounted<T>(&mut self, f: impl FnOnce(&mut Vm) -> T) -> T {
+        let c0 = self.interrupt_counter;
+        let start = self.jit.run_start;
+        let r = f(self);
+        // Nearly every instruction polls nothing: the store is the rare case.
+        if self.interrupt_counter != c0 {
+            self.jit.run_start = start.wrapping_add(self.interrupt_counter.wrapping_sub(c0));
+        }
+        r
+    }
 }
 
 /// The runtime compiled code calls back into: the VM, for one run of
@@ -1216,7 +1242,10 @@ impl JitRt<'_> {
         let f = &mut self.vm.frames[fi];
         f.pc = pc + 1;
         f.acc = acc;
-        let flow = self.vm.jit_generic(instr, fi, base, &self.code);
+        let code = &self.code;
+        let flow = self
+            .vm
+            .jit_uncounted(|vm| vm.jit_generic(instr, fi, base, code));
         self.after(fi, flow)
     }
 }
@@ -1331,7 +1360,7 @@ impl Runtime<Value> for JitRt<'_> {
             start: base + args as usize,
             len: argc as usize,
         };
-        match vm.call_from_frame(fv, t, a) {
+        match vm.jit_uncounted(|vm| vm.call_from_frame(fv, t, a)) {
             Ok(Flow::Reload) if vm.frames.len() == fi + 2 => {
                 vm.jit_add_callee(fv);
                 self.enter_callee(fi)
