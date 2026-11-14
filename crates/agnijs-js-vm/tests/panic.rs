@@ -19,7 +19,7 @@ struct PanicHost {
 impl Host for PanicHost {
     fn interrupt(&self) -> bool {
         if self.panic_on_interrupt.get() {
-            panic!("the host's interrupt hook panicked");
+            panic!("expected: the host's interrupt hook panicked");
         }
         false
     }
@@ -38,13 +38,35 @@ fn install(e: &mut dyn Engine, realm: RealmId, name: &str, f: Rc<agnijs_engine_a
     e.set(realm, &global, &name.into(), &func).unwrap();
 }
 
-/// Run `f`, which must panic, with the panic message silenced.
-fn expect_panic(f: impl FnOnce()) {
-    let hook = std::panic::take_hook();
-    std::panic::set_hook(Box::new(|_| {}));
-    let r = catch_unwind(AssertUnwindSafe(f));
-    std::panic::set_hook(hook);
-    assert!(r.is_err(), "the call did not panic");
+/// The prefix of the panics these tests raise on purpose.
+const EXPECTED: &str = "expected:";
+
+/// Silence the panics the tests raise on purpose, once for the process
+/// (the hook is global and the tests run in parallel), and report every
+/// other panic as usual.
+fn quiet_expected_panics() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let p = info.payload();
+            let msg = p
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| p.downcast_ref::<String>().map(|s| s.as_str()));
+            if !msg.is_some_and(|m| m.starts_with(EXPECTED)) {
+                default(info);
+            }
+        }));
+    });
+}
+
+/// Run `f`, which must panic.
+fn expect_panic<R: std::fmt::Debug>(f: impl FnOnce() -> R) {
+    quiet_expected_panics();
+    if let Ok(r) = catch_unwind(AssertUnwindSafe(f)) {
+        panic!("the call did not panic: {r:?}");
+    }
 }
 
 /// Every entry that runs code or touches a realm is refused.
@@ -74,7 +96,7 @@ fn a_panic_in_a_host_function_poisons_the_engine() {
         &mut *e,
         realm,
         "boom",
-        Rc::new(|_: &mut dyn Engine, _: CallContext| panic!("a host function panicked")),
+        Rc::new(|_: &mut dyn Engine, _: CallContext| panic!("expected: a host function panicked")),
     );
     assert!(!e.is_poisoned());
     // Deep inside script frames and native calls, so the unwind leaves the
@@ -83,7 +105,7 @@ fn a_panic_in_a_host_function_poisons_the_engine() {
         let _ = e.eval_script(
             realm,
             "t.js",
-            "function f(n) { return n ? [1].map(() => f(n - 1))[0] : boom(); } f(5)",
+            "function f() { return [1].map(() => [2].forEach(() => g()))[0]; } function g() { return [3].some(() => boom()); } f()",
         );
     });
     assert_poisoned(&mut *e, realm);
@@ -108,7 +130,9 @@ fn a_panic_in_a_nested_call_back_into_the_engine_poisons_it() {
         &mut *e,
         realm,
         "boom",
-        Rc::new(|_: &mut dyn Engine, _: CallContext| panic!("a nested host function panicked")),
+        Rc::new(|_: &mut dyn Engine, _: CallContext| {
+            panic!("expected: a nested host function panicked")
+        }),
     );
     // `outer` calls back into the engine, whose script calls `boom`.
     install(
@@ -134,20 +158,16 @@ fn a_panic_caught_inside_a_host_function_still_poisons_the_engine() {
         &mut *e,
         realm,
         "boom",
-        Rc::new(|_: &mut dyn Engine, _: CallContext| panic!("a nested host function panicked")),
+        Rc::new(|_: &mut dyn Engine, _: CallContext| {
+            panic!("expected: a nested host function panicked")
+        }),
     );
     install(
         &mut *e,
         realm,
         "outer",
         Rc::new(|e: &mut dyn Engine, cx: CallContext| {
-            let hook = std::panic::take_hook();
-            std::panic::set_hook(Box::new(|_| {}));
-            let r = catch_unwind(AssertUnwindSafe(|| {
-                e.eval_script(cx.realm, "inner.js", "boom()")
-            }));
-            std::panic::set_hook(hook);
-            assert!(r.is_err());
+            expect_panic(|| e.eval_script(cx.realm, "inner.js", "boom()"));
             assert!(e.is_poisoned());
             e.eval_script(cx.realm, "again.js", "1")
         }),
