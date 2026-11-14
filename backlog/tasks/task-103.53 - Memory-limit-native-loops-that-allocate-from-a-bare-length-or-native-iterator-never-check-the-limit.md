@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13T22:49:00Z'
-updated_date: '2026-11-14T10:21:00Z'
+updated_date: '2026-11-14T12:59:00Z'
 labels:
   - bug
   - security
@@ -71,6 +71,8 @@ Red: 7 of 8 repros aborted the peak test past 192 MiB (Array.apply already bound
 Red first: seven of eight repros passed the 192 MiB allocator cap (fill over 2e7 at 525 MiB, Promise.all over 3e6 keys at 3.6 GiB). Vm::poll applies the built-in rule (twice the limit, garbage included) once the counter passes the collection threshold. ArraySpread collects inside the instruction so a spread that fits is not refused for its garbage. Commit 736a893. Gates: agnijs-js-vm and agnijs-js-regex suites green; clippy: no warnings on changed lines; test262 0 regressions in default, --precompile, --snapshot, --only-intl402, vs QuickJS-NG, the GC-stress slice and the JIT force and tiered slices.
 
 Benchmarks (JIT off, 4 interleaved rounds against edbdb50, 26 workloads): geomean +0.23%.
+
+Follow-up 619ff76: under AGNIJS_GC_STRESS the spread collected per element and asked the host only once per 4096 polls, so the gc-stress CI job (runs 43585769550, 43585856420) took 2.8-3.3 s to interrupt `[...new Array(1e8).keys()]`. Red test `a_spread_that_collects_asks_the_host_after_each_collection` (500k-element live set: 10.7 s); `collect_inside_instruction` now asks the host after a collection that ran. Stressed and normal vm suites, test262 default and gcstress (0 regressions) and CI run 43593675780 are green.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
