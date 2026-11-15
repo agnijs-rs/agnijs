@@ -6,6 +6,8 @@
 
 use crate::engine::Engine;
 use crate::error::Result;
+#[cfg(doc)]
+use crate::error::Error;
 use crate::value::{RealmId, Value};
 use std::any::Any;
 
@@ -196,35 +198,122 @@ pub trait Host {
 }
 
 /// The arguments of a host function call.
+///
+/// Every heap value here is a fresh handle, rooted for as long as the host
+/// keeps it: move or clone one out of the call to use it later.
 pub struct CallContext {
+    /// The realm the function was created in (its `[[Realm]]`), whichever
+    /// realm the caller runs in. Create new values in it.
     pub realm: RealmId,
+    /// The `this` value exactly as the caller passed it: `undefined` for a
+    /// plain call, a primitive unboxed.
     pub this: Value,
+    /// The arguments the caller passed, as many as it passed.
     pub args: Vec<Value>,
-    /// Set when invoked with `new`.
+    /// Set when invoked with `new`. Functions from
+    /// [`Engine::new_function`] are not constructors, so on AgniJS this is
+    /// always `None`; a class built on a host function forwards
+    /// `new.target` itself (as the `agnijs` crate's host classes do).
     pub new_target: Option<Value>,
 }
 
 impl CallContext {
+    /// Argument `i`, or `undefined` when the caller passed fewer.
     pub fn arg(&self, i: usize) -> Value {
         self.args.get(i).cloned().unwrap_or(Value::Undefined)
     }
 }
 
-/// A Rust function callable from JavaScript. It receives the engine so it
-/// can call back in (re-entrancy is allowed).
+/// A Rust function callable from JavaScript, made into a function object by
+/// [`Engine::new_function`].
+///
+/// # Contract
+///
+/// `crates/agnijs/tests/host_contract.rs` tests each rule on AgniJS.
+///
+/// - **Arguments** arrive as [`Value`]s in a [`CallContext`]: primitives
+///   copied, objects and symbols as fresh handles. No conversion or arity
+///   check is done; [`CallContext::arg`] reads a missing argument as
+///   `undefined`.
+/// - **The return value** becomes the call's result. A handle from another
+///   engine there throws a `TypeError`.
+/// - **Errors** returned as `Err` reach JavaScript as follows:
+///   - [`Error::Exception`]: its `value` is thrown unchanged (any value, not
+///     only an `Error` object; build one with [`Engine::new_error`]). The
+///     `name`, `message` and `stack` fields are ignored on the way in.
+///   - [`Error::Interrupted`], [`Error::OutOfMemory`] and
+///     [`Error::OutOfFuel`]: the run stops. JavaScript cannot catch them,
+///     no `catch` or `finally` runs, and the outermost engine call returns
+///     the same error.
+///   - [`Error::Host`] and [`Error::Internal`]: a catchable `Error` with the
+///     message.
+///   - [`Error::ForeignHandle`], [`Error::UnknownRealm`], the bytecode
+///     errors and [`Error::Unsupported`]: a catchable `TypeError`.
+///   - Any other: a catchable `Error` with the error's text.
+///
+///   So `?` on an engine call inside a host function rethrows what
+///   JavaScript threw, unchanged, and passes the uncatchable stops through.
+/// - **Panics** are not caught: one unwinds through the engine to the
+///   embedder, and the engine is poisoned ([`Engine::is_poisoned`]).
+/// - **Re-entrancy is allowed.** The function gets `&mut dyn Engine` and
+///   may call any method on it: call JavaScript ([`Engine::call`],
+///   [`Engine::eval_script`]), create values and host objects, run
+///   [`Engine::run_jobs`] (which drains the queue then and there), and
+///   nest host functions to any depth the stack budget allows
+///   ([`Engine::set_stack_budget`]). [`Engine::collect_garbage`] only
+///   requests a collection while JavaScript frames are live. Exceptions
+///   cross nested host frames as `Err` values, so a host function can also
+///   catch one with `match` and carry on.
+/// - **The function is `Fn`, not `FnMut`,** because a re-entrant call can
+///   run it again while it runs; keep mutable state in a `Cell` or
+///   `RefCell` and do not hold a `RefCell` borrow across a call back into
+///   the engine.
 pub type HostFunction = dyn Fn(&mut dyn Engine, CallContext) -> Result<Value>;
 
 /// Receives the JS values a host object holds, so the collector can see them.
+///
+/// Passed to [`HostObject::trace`]; call [`Tracer::trace`] once per held
+/// value. Primitives may be reported too and are ignored.
 pub trait Tracer {
     fn trace(&mut self, value: &Value);
 }
 
 /// Rust data stored inside a JS object of a registered host class.
+///
+/// # Contract
+///
+/// - **Ownership.** The engine owns the data from
+///   [`Engine::new_host_object`] until the wrapper object is collected.
+///   [`Engine::host_object_data`] borrows it in between.
+/// - **Values it holds.** A [`Value`] handle stored in the data is a root
+///   of its own: what it names stays alive as long as the data holds it,
+///   whether or not JavaScript can reach it, and is released when the data
+///   is dropped. A handle back to the wrapper itself, or to anything that
+///   reaches the wrapper, is a cycle the collector cannot see, so the
+///   wrapper is never collected while the engine lives. Store such a
+///   reference as a JavaScript property of the wrapper instead, or drop the
+///   handle when done.
+/// - **Tracing** ([`HostObject::trace`]) is advisory: an engine may use it
+///   to treat reported handles as edges instead of roots, which would let
+///   such cycles be collected. AgniJS does not call it today, so its
+///   behaviour is the root rule above; report every held value anyway, so
+///   the data is ready for an engine that does.
+/// - **Finalization.** When the collector finds the wrapper dead, it hands
+///   the data to the class's [`HostClassDef::finalize`], never during the
+///   collection itself: the call is queued and runs at the next
+///   [`Engine::run_jobs`]. The finalizer receives the data by value and no
+///   engine, so it cannot call back in; when it returns, the data (and the
+///   handles in it) are dropped. Without a finalizer the data is just
+///   dropped then. Data still alive when the engine is dropped is dropped
+///   with it, and no finalizer runs.
+///
+/// `crates/agnijs/tests/host_contract.rs` tests each rule on AgniJS.
 pub trait HostObject: Any {
     /// Report every JS value this object references. Values stored as
     /// [`Value`] handles are roots on their own; reporting them lets an
     /// engine treat them as traced edges instead, so cycles through host
-    /// objects can be collected.
+    /// objects can be collected. AgniJS does not call this today (see the
+    /// contract above).
     fn trace(&self, tracer: &mut dyn Tracer) {
         let _ = tracer;
     }
@@ -236,8 +325,9 @@ pub trait HostObject: Any {
 pub struct HostClassDef {
     /// Shown by `Object.prototype.toString` and in debugger output.
     pub name: String,
-    /// Called when the wrapper object is collected. Runs as a host task after
-    /// collection, never during it.
+    /// Called with the data when the wrapper object is collected. Runs from
+    /// the next [`Engine::run_jobs`] after the collection, never during it,
+    /// and not at all for data still alive when the engine is dropped.
     pub finalize: Option<Box<dyn Fn(Box<dyn HostObject>)>>,
 }
 

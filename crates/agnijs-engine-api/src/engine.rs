@@ -261,10 +261,21 @@ pub trait Engine {
 
     // ---- host functions and classes ---------------------------------
 
+    /// A JavaScript function, created in `realm` with the given `name`,
+    /// that runs `f`. It has `length` 0 and is not a constructor (`new`
+    /// throws a `TypeError`). The contract `f` runs under (arguments,
+    /// return value, errors, re-entrancy) is on [`HostFunction`]. The
+    /// engine keeps `f`, and everything it captures, until the function
+    /// object is collected; a handle it captures is a root for that long.
     fn new_function(&mut self, realm: RealmId, name: &str, f: Rc<HostFunction>) -> Result<Value>;
+    /// Register a class of host objects; the id names it in
+    /// [`Engine::new_host_object`] and [`Engine::host_object_class`]. Classes
+    /// are engine-wide and are never unregistered.
     fn register_host_class(&mut self, def: HostClassDef) -> HostClassId;
     /// Create an instance of a host class wrapping `data`, with `prototype`
-    /// (or `Object.prototype` when `None`).
+    /// (or `Object.prototype` when `None`). The engine owns `data` from
+    /// here on: see [`HostObject`] for what keeps the values it holds alive
+    /// and when it is finalized.
     fn new_host_object(
         &mut self,
         realm: RealmId,
@@ -272,8 +283,13 @@ pub trait Engine {
         data: Box<dyn HostObject>,
         prototype: Option<&Value>,
     ) -> Result<Value>;
-    /// Borrow the data of a host object; `None` for other values.
+    /// Borrow the data of a host object; `None` for other values, foreign
+    /// handles and host objects already finalized. The borrow holds the
+    /// engine, so copy out (or clone the handles) what you need before
+    /// calling into the engine again; downcast with
+    /// [`HostObject::as_any_mut`].
     fn host_object_data(&mut self, value: &Value) -> Option<&mut dyn HostObject>;
+    /// The class of a host object; `None` for any other value.
     fn host_object_class(&mut self, value: &Value) -> Option<HostClassId>;
 
     /// Free the slots of every handle the host has dropped since the last
