@@ -4,7 +4,7 @@ A pure-Rust, embeddable JavaScript engine: full ES2025 (test262-complete, with t
 
 AgniJS began as the engine of [Gable](https://github.com/jcannon98188/gable) Native and was extracted into this repository with its full history (TASK-100.12). Gable depends on it by pinned git revision; it is meant to be useful to any embedder.
 
-> Status: pre-release. The embedding surface is the engine interface in `agnijs-engine-api` (a handle-based, host-driven trait, ADR 0006). A generic embedding API, semver policy and embedder docs are tracked in the backlog (TASK-104). Nothing is published to crates.io yet and the crate names may change before then.
+> Status: pre-release. The embedding surface is the engine interface in `agnijs-engine-api` (a handle-based, host-driven trait, ADR 0006). A generic embedding API, semver policy and embedder docs are tracked in the backlog (TASK-104). Nothing is published to crates.io yet and the crate names may change before then. [`docs/stability.md`](docs/stability.md) says what is versioned and promised today: the C ABI, the bytecode and snapshot formats, the CLI and the DevTools protocol.
 
 ## Conformance
 
@@ -32,6 +32,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | `agnijs-js-bench` | Micro-benchmarks and the benchmark protocol |
 | `agnijs-engine-quickjs` | An adapter over QuickJS-NG, used as a comparison engine |
 | `agnijs-cli` | The `agnijs` command: run files, stdin and `eval`, a REPL, bytecode and snapshots, `--inspect` ([README](crates/agnijs-cli/README.md)) |
+| `agnijs-fuzz` | Fuzz targets and a bounded, seeded fuzzer; `fuzz/` runs the same targets under libFuzzer ([docs/fuzzing.md](docs/fuzzing.md)) |
 
 The specification is [`docs/js-engine-spec.md`](docs/js-engine-spec.md); decisions are recorded as ADRs in [`docs/adr`](docs/adr). Performance findings are in [`docs/js-engine-performance-findings.md`](docs/js-engine-performance-findings.md).
 
@@ -49,7 +50,7 @@ node scripts/check-licenses.mjs                                                 
 
 ## Running untrusted code
 
-The engine has no ambient authority: script reaches only what the host grants. Memory, fuel, interrupt, stack and regex limits are opt-in, and some have known gaps. Read [`docs/security-model.md`](docs/security-model.md) for the threat model, what each limit covers, and the embedder checklist before running code you do not trust.
+The engine has no ambient authority: script reaches only what the host grants. Memory, fuel, interrupt, stack and regex limits are opt-in, and some have known gaps. Read [`docs/security-model.md`](docs/security-model.md) for the threat model, what each limit covers, and the embedder checklist before running code you do not trust. Report vulnerabilities privately, as [`SECURITY.md`](SECURITY.md) describes. The fuzz targets and how to run them are in [`docs/fuzzing.md`](docs/fuzzing.md).
 
 ## Features and binary size
 
