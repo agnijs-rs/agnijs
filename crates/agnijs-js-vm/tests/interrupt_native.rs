@@ -11,6 +11,7 @@
 use agnijs_engine_api::{Engine, Error, Host, RealmId, RegexMatcher, Value};
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 struct StopHost {
@@ -40,12 +41,43 @@ fn engine(matcher: RegexMatcher) -> (Rc<StopHost>, Box<dyn Engine>, RealmId) {
     (host, e, realm)
 }
 
-/// How long an interrupted call may take, generous for debug builds on a
-/// busy machine: the unpolled calls below take seconds to hours.
-const BOUND: Duration = Duration::from_secs(2);
+/// How long an interrupted call may take: at least two seconds, and more
+/// on a machine that runs [`REFERENCE`] slowly. A fixed bound failed on
+/// busy debug CI runners, which run this file about four times slower
+/// than a desktop (TASK-103.55). The bound is a check on latency only:
+/// an engine that does not poll finishes the call with a result, which
+/// fails before the bound is looked at.
+fn bound() -> Duration {
+    static BOUND: OnceLock<Duration> = OnceLock::new();
+    *BOUND.get_or_init(|| {
+        let (_host, mut e, realm) = engine(RegexMatcher::Auto);
+        let reference = best_of(5, || {
+            e.eval_script(realm, "reference.js", REFERENCE).unwrap();
+        });
+        Duration::from_secs(2).max(reference * REFERENCE_FACTOR)
+    })
+}
+
+/// A fixed amount of interpreter and allocation work: about 50 ms in a
+/// debug build on a desktop while the other tests run, so [`bound`] is
+/// two seconds there and about eight on a CI runner.
+const REFERENCE: &str = "(() => { let s = 0; const a = []; for (let i = 0; i < 2e4; i++) { s += i; a.push({ i }); } return s; })()";
+const REFERENCE_FACTOR: u32 = 40;
+
+/// The shortest of `runs` timings of `f`: noise only ever adds time.
+fn best_of(runs: usize, mut f: impl FnMut()) -> Duration {
+    (0..runs)
+        .map(|_| {
+            let t = Instant::now();
+            f();
+            t.elapsed()
+        })
+        .min()
+        .unwrap()
+}
 
 /// Run `setup` normally, then `hot` with the hook saying stop: it must be
-/// interrupted within [`BOUND`], and the engine must carry on afterwards.
+/// interrupted within [`bound`], and the engine must carry on afterwards.
 fn interrupted(matcher: RegexMatcher, setup: &str, hot: &str) {
     let (host, mut e, realm) = engine(matcher);
     e.eval_script(realm, "setup.js", setup)
@@ -60,7 +92,7 @@ fn interrupted(matcher: RegexMatcher, setup: &str, hot: &str) {
         panic!("{hot}: expected an interrupt, got {got} after {took:?}");
     }
     assert!(host.asked.get() > 0, "{hot}: the hook was never asked");
-    assert!(took < BOUND, "{hot}: the interrupt took {took:?}");
+    assert!(took < bound(), "{hot}: the interrupt took {took:?}, bound {:?}", bound());
     host.stop.set(false);
     assert_eq!(
         e.eval_script(realm, "after.js", "1 + 1").unwrap(),
@@ -300,7 +332,7 @@ fn big_int_results_past_the_cap_are_refused_up_front() {
         );
         let r = e.eval_script(realm, "t.js", &caught);
         assert_eq!(r.unwrap(), Value::string("Maximum BigInt size exceeded"), "{src}");
-        assert!(t.elapsed() < BOUND, "{src}: took {:?}", t.elapsed());
+        assert!(t.elapsed() < bound(), "{src}: took {:?}, bound {:?}", t.elapsed(), bound());
     }
     // Trivial bases and the largest powers still work.
     for (src, want) in [
@@ -315,18 +347,29 @@ fn big_int_results_past_the_cap_are_refused_up_front() {
     }
 }
 
-/// Power-of-two radixes are linear: a long hex string parses at once.
+/// Power-of-two radixes parse in linear time. The test compares the time
+/// for `n` and `4n` digits rather than holding one parse to a fixed time,
+/// which a slow runner can miss (TASK-103.55): linear is a ratio near 4,
+/// quadratic near 16, and the bound of 8 leaves room for noise either way.
+/// Each size is timed at its best of several runs, since noise only adds.
 #[test]
 fn power_of_two_radix_big_int_parsing_is_linear() {
     let (_host, mut e, realm) = engine(RegexMatcher::Auto);
-    let t = Instant::now();
-    let r = e.eval_script(
-        realm,
-        "t.js",
-        "BigInt('0x' + 'f'.repeat(4e6)) === (1n << 16000000n) - 1n && BigInt('0b' + '1'.repeat(1e6)) === (1n << 1000000n) - 1n",
-    );
-    assert_eq!(r.unwrap(), Value::Bool(true));
-    assert!(t.elapsed() < BOUND, "took {:?}", t.elapsed());
+    for (prefix, digit, bits, n) in [("0x", 'f', 4, 250_000), ("0b", '1', 1, 1_000_000)] {
+        let mut time = |digits: usize| {
+            let setup = format!("globalThis.s = '{prefix}' + '{digit}'.repeat({digits}); 0");
+            e.eval_script(realm, "setup.js", &setup).unwrap();
+            let check = format!("BigInt(s) === (1n << {}n) - 1n", digits * bits);
+            assert_eq!(e.eval_script(realm, "check.js", &check).unwrap(), Value::Bool(true), "{prefix}");
+            best_of(5, || {
+                e.eval_script(realm, "parse.js", "BigInt(s); 0").unwrap();
+            })
+        };
+        let small = time(n);
+        let large = time(4 * n);
+        let ratio = large.as_secs_f64() / small.as_secs_f64().max(1e-6);
+        assert!(ratio < 8.0, "{prefix}: {n} digits {small:?}, {} digits {large:?}, ratio {ratio:.1}", 4 * n);
+    }
 }
 
 /// The polled paths give num-bigint's results: each operand is past the
