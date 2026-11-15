@@ -35,6 +35,9 @@ jobs:
     timeout-minutes: 60
     env:
       SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '300' }}
+      # cargo-fuzz defaults to the triple it was built for, and the prebuilt
+      # one is musl, where AddressSanitizer cannot run.
+      FUZZ_TARGET: x86_64-unknown-linux-gnu
       # As in the sanitizers job of ci.yml: fake stacks would move locals
       # off the thread's stack, which the stack budget reads its position
       # from (agnijs-js-regex src/stack.rs).
@@ -63,11 +66,11 @@ jobs:
         run: cargo run --release --locked -p agnijs-fuzz -- --seeds ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
       - name: Fuzz
         run: |
-          cargo fuzz run --debug-assertions ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+          cargo fuzz run --debug-assertions --target $FUZZ_TARGET ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
             -max_total_time=$SECONDS_PER_TARGET -timeout=20 -rss_limit_mb=4096
       - name: Minimise the corpus
         if: success()
-        run: cargo fuzz cmin --debug-assertions ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+        run: cargo fuzz cmin --debug-assertions --target $FUZZ_TARGET ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
       - name: Save the corpus
         if: success()
         uses: actions/cache/save@v4
