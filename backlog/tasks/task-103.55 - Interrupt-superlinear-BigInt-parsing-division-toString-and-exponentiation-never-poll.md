@@ -7,7 +7,7 @@ status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-13T22:49:00Z'
-updated_date: '2026-11-14T10:21:00Z'
+updated_date: '2026-11-15T21:54:00Z'
 labels:
   - bug
   - security
@@ -62,6 +62,8 @@ Test that should catch it: interrupt_native.rs tests that start each repro with 
 Red first: (1n << 2000000n).toString() finished in 6.5 s with no interrupt; BigInt parsing ran past 120 s. num-bigint operations cannot be polled from inside, so large operands go through chunked algorithms in bigint.rs reporting digit work to Vm::poll_work. Not polled, documented: BigInt literals in source (bounded by source length) and the decimal conversion when eval returns a BigInt to the host. Commit c4abee5. Gates: agnijs-js-vm and agnijs-js-regex suites green; clippy: no warnings on changed lines; test262 0 regressions in default, --precompile, --snapshot, --only-intl402, vs QuickJS-NG, the GC-stress slice and the JIT force and tiered slices.
 
 Benchmarks (JIT off, 4 interleaved rounds against edbdb50, 26 workloads): geomean +0.23%. The polled algorithms inlined into the dispatch loop with op_arith cost 3 to 6% on prop-polymorphic, method-calls and regex-tokenize; b381df5 moves the BigInt arm out of line and they are back at the starting times.
+
+Follow-up (2026-11-15, during TASK-103.18): power_of_two_radix_big_int_parsing_is_linear failed on a debug Ubuntu CI runner (2.18 s against the fixed 2 s bound; 0.57 s locally). It now compares the parse time for n and 4n digits (best of 5 each) and asserts a ratio below 8. Linear measures 3.5 to 4.3. Pointed at quadratic decimal parsing, the check measured 14.7 and failed, so it still catches a quadratic parser. The interrupt-latency bound in interrupt_native.rs (the interrupted helper and the BigInt-cap test) is now max(2 s, 40 x a reference script timed on the same machine) instead of a fixed 2 s. Object.entries over a large typed array took 350 ms locally, close enough to the fixed bound to fail on a slow runner. memory_limit.rs and string_length.rs have no wall-clock assertions. The commit is test-only.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary

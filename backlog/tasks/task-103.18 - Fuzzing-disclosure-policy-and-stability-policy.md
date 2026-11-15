@@ -1,11 +1,11 @@
 ---
 id: TASK-103.18
 title: Fuzzing, disclosure policy and stability policy
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T05:17:00Z'
-updated_date: '2026-11-15T20:29:00Z'
+updated_date: '2026-11-15T23:43:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -21,7 +21,7 @@ Build public trust for an engine that runs untrusted code: continuous fuzzing (O
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Fuzz targets exist for the parser, the compiler, the bytecode loader, the regex engines and the engine interface, and run continuously in CI or OSS-Fuzz
+- [x] #1 Fuzz targets exist for the parser, the compiler, the bytecode loader, the regex engines and the engine interface, and run continuously in CI or OSS-Fuzz
 - [x] #2 SECURITY.md and a stability policy are published, and any crash found is fixed with a regression test
 <!-- AC:END -->
 
@@ -54,4 +54,28 @@ Owner decisions needed:
 2. GitHub private vulnerability reporting is disabled on agnijs-rs/agnijs (API: enabled=false). SECURITY.md names it as a channel with a TODO: enable it (Settings > Code security) or drop the line.
 3. SECURITY.md response aims (ack 7 days, assessment 30 days, 90-day embargo) are proposals marked TODO(owner).
 4. Open stability questions listed at the end of docs/stability.md: Rust API semver policy and semver-checks CI (TASK-104); whether a release loads the previous release's bytecode/snapshot format; whether CLI flags and exit codes get a compatibility promise; whether CI should diff the C ABI against the last release.
+
+Update after rebasing on TASK-104 (2026-11-15): TASK-104.6 settled the Rust API semver policy and added the cargo-semver-checks job, and updated docs/stability.md, so owner decision 4's first item is resolved. The other open questions remain at the end of that page.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added fuzzing, a security disclosure policy and a stability policy.
+
+- crates/agnijs-fuzz: 13 targets covering the parser, the compiler, eval through the engine interface, JSON, Intl, regex (the matchers must agree), regex programs, the bytecode and snapshot loaders, CDP messages and WebSocket frames, source maps and import maps. It comes with a seeded, reproducible runner (stable Rust) and a smoke test. fuzz/ runs the same targets under cargo-fuzz and libFuzzer.
+- CI: the `fuzz` job in ci.yml runs every target with a fixed seed on each push (about 30 s of fuzzing, deterministic). fuzz.yml runs libFuzzer under ASan on all 13 targets nightly and on demand, with a cached corpus.
+- Docs: SECURITY.md, docs/stability.md and docs/fuzzing.md, with links from security-model.md and the README.
+
+Verification:
+- CI passed on every job (run 43766289765 on d411c1d).
+- A manual fuzz.yml run (43762098993, 60 s per target) passed after the fix for the musl default triple.
+- Local runs: the default run and a 20x run (about 6.2 M inputs). No crashes were found, so nothing needed fixing or filing.
+- A flaky wall-clock test from TASK-103.55 surfaced in CI and was made robust in d411c1d.
+
+Follow-ups for the owner (details in the notes):
+- the security contact address;
+- turning on GitHub private vulnerability reporting;
+- confirming the response times;
+- the open questions at the end of docs/stability.md. The Rust semver policy has since been settled by TASK-104.6, which updated that page.
+<!-- SECTION:FINAL_SUMMARY:END -->
