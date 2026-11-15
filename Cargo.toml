@@ -20,6 +20,8 @@ members = [
     "crates/agnijs-cli",
     "crates/agnijs-fuzz",
 ]
+# The cargo-fuzz targets are a workspace of their own (nightly, libFuzzer).
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.1.0"

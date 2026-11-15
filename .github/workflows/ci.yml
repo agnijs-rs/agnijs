@@ -179,6 +179,31 @@ jobs:
           cmake --build target/capi-c --config Release
           ctest --test-dir target/capi-c -C Release --output-on-failure
 
+  fuzz:
+    # Every fuzz target of crates/agnijs-fuzz (TASK-103.18, docs/fuzzing.md):
+    # its seeds and a fixed number of seeded mutants, so every run covers
+    # the same inputs. Release speed with debug assertions and overflow
+    # checks (the `fuzz` profile). A failing input is saved under
+    # target/fuzz-inputs and uploaded.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: fuzz
+      - name: Fuzz every target, bounded (fixed seed)
+        timeout-minutes: 15
+        run: cargo run --profile fuzz --locked -p agnijs-fuzz -- all --seed 1
+      - name: Keep the failing inputs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-failures
+          path: target/fuzz-inputs
+          if-no-files-found: ignore
+
   capi-checks:
     # The checked-in header matches the sources, clippy is clean, the C test
     # runs under AddressSanitizer and LeakSanitizer, and the raw-pointer

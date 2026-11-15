@@ -1,0 +1,83 @@
+name: Fuzz
+# Coverage-guided fuzzing with cargo-fuzz and libFuzzer (TASK-103.18,
+# docs/fuzzing.md): every target of fuzz/ for a time budget, nightly and on
+# demand. Not on push: a time-bounded, coverage-guided run is not
+# reproducible, so it reports what it finds instead of gating merges. The
+# bounded, seeded run that does gate merges is the `fuzz` job of ci.yml.
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        default: "300"
+jobs:
+  libfuzzer:
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - parse
+          - compile
+          - eval
+          - json
+          - intl
+          - regex
+          - regex-program
+          - bytecode
+          - snapshot
+          - cdp
+          - cdp-frames
+          - source-map
+          - import-map
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      SECONDS_PER_TARGET: ${{ github.event.inputs.seconds || '300' }}
+      # As in the sanitizers job of ci.yml: fake stacks would move locals
+      # off the thread's stack, which the stack budget reads its position
+      # from (agnijs-js-regex src/stack.rs).
+      ASAN_OPTIONS: detect_stack_use_after_return=0
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            fuzz
+          key: ${{ matrix.target }}
+      - name: Use the workspace's lock file
+        run: cp Cargo.lock fuzz/Cargo.lock
+      - name: Restore the corpus
+        uses: actions/cache/restore@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Add the seeds
+        run: cargo run --release --locked -p agnijs-fuzz -- --seeds ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+      - name: Fuzz
+        run: |
+          cargo fuzz run --debug-assertions ${{ matrix.target }} fuzz/corpus/${{ matrix.target }} -- \
+            -max_total_time=$SECONDS_PER_TARGET -timeout=20 -rss_limit_mb=4096
+      - name: Minimise the corpus
+        if: success()
+        run: cargo fuzz cmin --debug-assertions ${{ matrix.target }} fuzz/corpus/${{ matrix.target }}
+      - name: Save the corpus
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: fuzz/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+      - name: Keep the crashing input
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
