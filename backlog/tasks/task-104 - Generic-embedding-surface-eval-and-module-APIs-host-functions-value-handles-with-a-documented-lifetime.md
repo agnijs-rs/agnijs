@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude'
 created_date: '2026-11-09T05:07:00Z'
-updated_date: '2026-11-15T22:29:00Z'
+updated_date: '2026-11-15T22:44:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -72,4 +72,9 @@ Owner decisions (recommendation and the default taken; none is hard to reverse):
 5. HostObject::trace is advisory; AgniJS treats handles in host data as roots, so a cycle through host data leaks until the engine is dropped. Recommend keeping it (making traced handles edges needs strong-count bookkeeping and risks freeing a value a host clone still names). Documented and tested; implementing edges later is additive.
 6. agnijs-js-resolve, the debugger capability and agnijs-js-cdp: embedder-facing but outside the semver policy until reviewed. Default taken.
 7. Implementor-only items (HandleRegistry, next_engine_id, bytecode, conformance) are `#[doc(hidden)]`, outside the semver policy; implementing Engine outside the workspace is unsupported. Default taken.
+
+Further owner decisions (TASK-104.6; defaults taken, none hard to reverse):
+8. Version bumps before 1.0 happen per change: the semver CI job compares with the base of each push/PR, so the commit that breaks agnijs or agnijs-engine-api bumps the workspace minor version (this push: 0.1.0 -> 0.2.0, for the non_exhaustive Errors and the hidden implementor items). Alternative: compare with the last release tag and bump at release time; needs a first release. Recommend keeping per-change bumps until publishing.
+9. Engine is not sealed, so a new Engine method without a default is breaking to cargo-semver-checks. Default: new methods get a default body or the bump. Recommend sealing Engine (doc(hidden) supertrait implemented by the VM and the QuickJS-NG adapter) before 1.0.
+10. MSRV: raising it is not breaking but never in a patch release; before 1.0 it bumps the minor version; a new MSRV is at least six months old. No MSRV CI job yet (kept by review); recommend adding one before publishing.
 <!-- SECTION:NOTES:END -->

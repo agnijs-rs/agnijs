@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "agnijs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-derive",
  "agnijs-engine-api",
@@ -15,7 +15,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-capi"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-parser",
@@ -24,7 +24,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs",
  "agnijs-engine-api",
@@ -40,7 +40,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-derive"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -49,14 +49,14 @@ dependencies = [
 
 [[package]]
 name = "agnijs-engine-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs",
 ]
 
 [[package]]
 name = "agnijs-engine-quickjs"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "rquickjs",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-fuzz"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-cdp",
@@ -86,7 +86,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-bench"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-engine-quickjs",
@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-cdp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-debugger",
@@ -110,7 +110,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-compiler"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-js-parser",
  "foldhash",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-debugger"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "serde_json",
@@ -126,7 +126,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-intl"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fixed_decimal",
  "icu_calendar",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-jit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-js-compiler",
  "agnijs-js-parser",
@@ -173,7 +173,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-parser"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-js-regex",
  "foldhash",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-regex"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "regress",
  "unicode-id-start",
@@ -190,7 +190,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-resolve"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-vm",
@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-test262"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-engine-quickjs",
@@ -219,7 +219,7 @@ dependencies = [
 
 [[package]]
 name = "agnijs-js-vm"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "agnijs-engine-api",
  "agnijs-js-compiler",

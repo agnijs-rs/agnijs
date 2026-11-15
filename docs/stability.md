@@ -2,12 +2,12 @@
 
 This page says which AgniJS interfaces you can build on, how each one is versioned, and how it may change. It only states what the code and CI enforce today. Where a policy is not decided yet, it says so and names the task that decides it.
 
-AgniJS is pre-release (workspace version `0.1.0`). Nothing is published to crates.io, there are no tagged releases, and the crate names may still change. Until the first release, "a change" below means a commit to `main`.
+AgniJS is pre-release (workspace version `0.2.0`). Nothing is published to crates.io, there are no tagged releases, and the crate names may still change. Until the first release, "a change" below means a commit to `main`.
 
 | Interface | Versioned by | Compatibility today |
 | --- | --- | --- |
 | [C API (ABI)](#the-c-api) | `AGNIJS_ABI_VERSION_MAJOR`/`MINOR`, `agnijs_abi_version()` | Append-only within major 1; enforced by the generated header and `struct_size` checks |
-| [Rust API](#the-rust-api) | Cargo version `0.1.0` | None promised yet: any change may break (TASK-104) |
+| [Rust API](#the-rust-api) | Cargo version, now `0.2.0` | Semver for `agnijs` and `agnijs-engine-api`: a breaking change bumps the minor version before 1.0; checked by `cargo-semver-checks` in CI |
 | [Bytecode](#bytecode-and-snapshots) | Format tag `agnijs-bc-N` | Loads only in the build that wrote it; anything else is refused, never misread |
 | [Snapshots](#bytecode-and-snapshots) | Tag `agnijs-snap-N+agnijs-bc-M` and native-registry fingerprint | Same build only; anything else is refused |
 | [CLI](#the-agnijs-cli) | `agnijs --version` | Documented flags and exit codes; no compatibility promise yet |
@@ -28,9 +28,30 @@ The C API also promises behaviour across all versions: it never unwinds a Rust p
 
 ## The Rust API
 
-The Rust crates are at `0.1.0`, unpublished, and have **no stability promise yet**. Any item may change or be removed in any commit, and nothing is deprecated before removal. The README says the same.
+The Rust API follows Cargo's semver rules, and CI checks every change against them ([ADR 0026](adr/0026-the-agnijs-crate-is-the-public-embedding-surface-over-the-engine-interface.md), TASK-104).
 
-The public embedding surface, the semver policy for the crates that make it up, and a `cargo-semver-checks` (or equivalent) gate in CI are the subject of TASK-104 (acceptance criterion 5). Until that lands, a Rust embedder should pin a git revision, as Gable does, and expect to adapt when moving it. When the crates are published they will follow Cargo's semver rules for `0.x` versions: a breaking change bumps the minor version.
+**What is public.** Two crates:
+
+- `agnijs`: `Context` and its helpers, `new_engine`, `new_engine_from_snapshot`, and `agnijs::api`, which re-exports the next crate;
+- `agnijs-engine-api`: the engine interface (`Engine`, `Host`, `Value`, `Handle`, `Error`, the host function and host object types), with the contracts in its rustdoc: [handle lifetimes](../crates/agnijs-engine-api/src/value.rs), the host function and host object rules, and the error mapping.
+
+The `#[derive(HostClass)]` and `#[host_methods]` macros are public through `agnijs`; `agnijs-derive`, which implements them, is not public on its own. Items marked `#[doc(hidden)]` (the handle registry, the bytecode container helpers, the conformance kit) are for engine implementors in this workspace and are outside the policy. Every other crate is internal and may change in any commit: the VM, compiler, parser, regex and Intl crates, the JIT, the QuickJS-NG adapter, the CLI, the fuzz, bench and test262 crates, and the Rust side of the C API (whose C ABI has its own rules above). `agnijs-js-resolve`, the debugger capability and `agnijs-js-cdp` are meant for embedders but stay outside the policy until their interfaces are reviewed.
+
+**What is breaking.** Anything Cargo's [semver reference](https://doc.rust-lang.org/cargo/reference/semver.html) calls a major change to a public item, which `cargo-semver-checks` reports, and any change to a documented contract that a correct embedder could observe, such as when a dropped handle is released, which errors a host function's result maps to, or when finalizers run. Not breaking:
+
+- a new variant of `Error` or `agnijs::Error`, which are `#[non_exhaustive]`;
+- new items, and new trait methods with a default body. A new `Engine` method gets a default (most return `Error::Unsupported`) unless the version allows a break, since `Engine` is not sealed;
+- changes to internal crates and hidden items, and bytecode or snapshot format changes, which are versioned by their own tags ([below](#bytecode-and-snapshots));
+- raising the MSRV, under the rule [below](#minimum-supported-rust-version).
+
+Every other public enum is exhaustive (`Value`, `PropertyKey`, `TypeOf`, `HeapKind`, `PromiseState`, and the hook enums `ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher` and `ErrorKind`), so a new variant in one of them is breaking.
+
+**How versions move.** All crates share the workspace version, now `0.2.0`.
+
+- **Before 1.0** (now, and after a first `0.x` publish): a breaking change bumps the minor version (`0.2.0` to `0.3.0`) in the same commit or pull request. Other changes do not need a bump, except a patch bump when `cargo-semver-checks` asks for one (for example, when an item is newly deprecated). Nothing is published yet, so the version is how a git-pinned embedder such as Gable tells whether moving its pin can break it.
+- **From 1.0**: a breaking change bumps the major version, and is preceded by at least one minor release in which the replaced item is `#[deprecated]` with a pointer to its replacement. New features bump the minor version, fixes the patch version.
+
+**What enforces it.** The `semver` job in `ci.yml` runs `cargo-semver-checks` on `agnijs` and `agnijs-engine-api`, comparing the change with its base: the pull request's base, or the commit before the push. It fails when the change needs a bigger version bump than it makes. Contract changes the tool cannot see are reviewed by hand, and the contract tests (`crates/agnijs/tests/lifetimes.rs`, `host_contract.rs`) catch the ones they cover. To check locally: `cargo semver-checks -p agnijs -p agnijs-engine-api --baseline-rev origin/main`.
 
 Behaviour you can rely on regardless: the engine poisons itself rather than continuing after a panic ([security-model.md](security-model.md#panics-in-the-rust-api)), and the limits in the security model hold.
 
@@ -39,7 +60,7 @@ Behaviour you can rely on regardless: the engine poisons itself rather than cont
 Bytecode and snapshots are caches tied to one engine build, not an interchange format (ADR 0010, ADR 0022):
 
 - **Bytecode** is an `AGJS` container whose format tag pins the compiler: now `agnijs-bc-8`. Any change to the instruction set, the constant pool or the payload layout changes the tag. A container with another tag fails to load with `BytecodeMismatch`, and a damaged one with `BytecodeCorrupt`, before any payload byte is interpreted. Bytecode written by an older or newer build is never migrated or reinterpreted: the host keeps the source and recompiles. Every tag change so far is recorded in ADR 0010's addenda.
-- **Snapshots** carry the tag `agnijs-snap-N+agnijs-bc-M` (now `agnijs-snap-2+agnijs-bc-8`) and a fingerprint of the native-function registry, so a snapshot taken by a build with a different set of built-ins is a `BytecodeMismatch` too.
+- **Snapshots** carry the tag `agnijs-snap-N+agnijs-bc-M` (now `agnijs-snap-2+agnijs-bc-8`) and a fingerprint of the native-function registry and the crate version, so a snapshot taken by a build with a different set of built-ins, or another version, is a `BytecodeMismatch` too.
 - **Same version, other build.** The tag pins the format, not the binary. A snapshot from a build with different cargo features (for example `intl`) differs in its registry fingerprint and is refused. Bytecode from a build without the `linear-regex` feature loads, but marks every pattern ineligible for the linear matcher ([security-model.md](security-model.md#regular-expressions-redos)).
 
 What is promised is that a mismatch is always an error, never a crash or a misreading; this is tested and fuzzed (`docs/fuzzing.md`, the `bytecode` and `snapshot` targets). Bytecode and snapshots are trusted input: the checksum catches accidents, not attackers ([security-model.md](security-model.md#bytecode-and-snapshots-are-trusted-input)).
@@ -56,13 +77,14 @@ The command-line tool's commands (`run`, `eval`, `repl`, `compile`, `snapshot`),
 
 ## Minimum supported Rust version
 
-The workspace sets `rust-version = "1.85"`, and the JIT crate (the `jit` feature) 1.97. Raising either is a change like any other while the crates are pre-release. Whether a future release may raise it in a minor version is part of the TASK-104 policy.
+The workspace sets `rust-version = "1.85"`, and the JIT crate (the `jit` feature, opt-in) 1.97. Raising the workspace MSRV is not a breaking change, but it is never done in a patch release: before 1.0 it bumps the minor version, from 1.0 at least the minor version, and the new MSRV is at least six months old (four stable releases) when it is raised. The JIT crate's MSRV follows the toolchain its code generator needs and may be raised with the minor version too. Nothing in CI builds with the MSRV toolchain yet, so it is kept by review.
 
 ## Decisions still open
 
-These need the owner's decision and are recorded in TASK-103.18's notes:
+These need the owner's decision and are recorded in TASK-103.18's and TASK-104's notes:
 
-- The Rust API semver policy and the CI check (TASK-104).
+- Whether the hook enums (`ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher`, `ErrorKind`) become `#[non_exhaustive]` before the first release, so that new variants stop being breaking (TASK-104 notes).
+- Whether `Engine` is sealed, so that new methods without a default stop being breaking, and whether `RealmId` is tagged with its engine like `Handle` (TASK-104 notes).
 - Whether a release loads the previous release's bytecode and snapshot formats, or bytecode stays a same-build cache.
 - Whether the CLI's flags and exit codes get a compatibility promise at the first release.
 - Whether CI should compare the C ABI against the last release (for example with `abi-dumper` or a symbol and struct-layout diff) instead of relying on review.

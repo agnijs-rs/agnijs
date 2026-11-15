@@ -4,7 +4,7 @@ A pure-Rust, embeddable JavaScript engine: full ES2025 (test262-complete, with t
 
 AgniJS began as the engine of [Gable](https://github.com/jcannon98188/gable) Native and was extracted into this repository with its full history (TASK-100.12). Gable depends on it by pinned git revision; it is meant to be useful to any embedder.
 
-> Status: pre-release. The embedding surface is the engine interface in `agnijs-engine-api` (a handle-based, host-driven trait, ADR 0006). A generic embedding API, semver policy and embedder docs are tracked in the backlog (TASK-104). Nothing is published to crates.io yet and the crate names may change before then. [`docs/stability.md`](docs/stability.md) says what is versioned and promised today: the C ABI, the bytecode and snapshot formats, the CLI and the DevTools protocol.
+> Status: pre-release. The embedding surface is the `agnijs` crate: `Context` for the common cases and `agnijs::api`, the engine interface (a handle-based, host-driven trait, ADR 0006, ADR 0026). Start with the [embedding guide](docs/embedding-guide.md) and the [cookbook](docs/embedding-cookbook.md); [`examples/embed-minimal`](examples/embed-minimal) is a complete program. Nothing is published to crates.io yet and the crate names may change before then. [`docs/stability.md`](docs/stability.md) says what is versioned and promised today: the Rust API (semver, checked in CI), the C ABI, the bytecode and snapshot formats, the CLI and the DevTools protocol.
 
 ## Conformance
 

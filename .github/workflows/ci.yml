@@ -239,6 +239,34 @@ jobs:
       - run: cargo miri setup
       - run: cargo miri test --locked -p agnijs-capi --lib miri_
 
+  semver:
+    # The public Rust crates against the base of the push or pull request: a
+    # breaking change fails unless the workspace version allows it
+    # (docs/stability.md#the-rust-api). A push that creates a branch, or whose
+    # base is gone after a force push, is compared with its parent commit.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: semver
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks@0.51.0
+      - name: agnijs and agnijs-engine-api against the base (cargo-semver-checks)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            BASE=$(git rev-parse HEAD^)
+          fi
+          echo "Baseline: $BASE"
+          cargo semver-checks -p agnijs -p agnijs-engine-api --baseline-rev "$BASE"
+
   cli:
     # The agnijs command (TASK-103.16): its tests spawn the binary (files,
     # stdin, eval, the REPL over a pipe, bytecode, snapshots, source maps and
