@@ -877,6 +877,7 @@ impl Vm {
             }
         }
 
+        self.heap.arena_gc_pending = false;
         self.heap.live_bytes = live_bytes;
         self.heap.allocated_since_gc = 0;
         self.heap.rearm_threshold();

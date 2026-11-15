@@ -178,6 +178,16 @@ impl<T> Arena<T> {
         self.live
     }
 
+    /// Whether the next allocation that finds no free slot is close to
+    /// making the slot vector grow: no free slot, and at least seven
+    /// eighths of a large vector's capacity in use.
+    #[inline]
+    pub(crate) fn nearly_full(&self) -> bool {
+        self.free.is_empty()
+            && self.slots.len() >= ARENA_EARLY_GC_SLOTS
+            && self.slots.len() * 8 >= self.slots.capacity() * 7
+    }
+
     pub fn capacity(&self) -> usize {
         self.slots.len()
     }
@@ -287,6 +297,10 @@ const DEFAULT_GC_THRESHOLD: usize = 2 * 1024 * 1024;
 /// The next threshold as a percentage of the live bytes after a collection
 /// (the growth factor). Overridable through `AGNIJS_GC_GROWTH` (percent).
 const DEFAULT_GC_GROWTH_PERCENT: usize = 200;
+
+/// Arenas smaller than this many slots grow without asking for an early
+/// collection (`Arena::nearly_full`): 65,536 object slots are about 11 MB.
+const ARENA_EARLY_GC_SLOTS: usize = 1 << 16;
 
 fn pacing() -> (usize, usize) {
     static PACING: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
@@ -444,6 +458,9 @@ pub struct Heap {
     /// the next safe point, or the return to the host, throws the
     /// RangeError. [`ATTENTION_STRING`] is set while it is.
     pub(crate) string_too_long: bool,
+    /// The object arena asked for an early collection that has not run
+    /// yet (`Heap::object_arena_nearly_full`).
+    pub(crate) arena_gc_pending: bool,
 }
 
 impl Default for Heap {
@@ -494,6 +511,7 @@ impl Heap {
             retained_bytes: 0,
             max_string_len: MAX_STRING_LENGTH,
             string_too_long: false,
+            arena_gc_pending: false,
         }
     }
 
@@ -644,7 +662,33 @@ impl Heap {
         self.charge(OBJECT_BYTES + data.extra_bytes());
         self.objects_allocated += 1;
         let s = self.next_serial();
-        ObjId(self.objects.alloc(data, s))
+        let id = ObjId(self.objects.alloc(data, s));
+        if self.objects.nearly_full() {
+            self.object_arena_nearly_full();
+        }
+        id
+    }
+
+    /// The object arena is about to grow: its slot vector would double, and
+    /// the copy holds the old and the new vector at once, so the process
+    /// peaks at about three times the arena's size, and the vector never
+    /// shrinks. When a fair amount has been allocated since the last
+    /// collection (a quarter of the threshold), the objects among it are
+    /// likely garbage whose slots a collection hands back, so collect at
+    /// the next safe point instead of waiting for the threshold. The
+    /// quarter keeps a heap that is all live from collecting more than a
+    /// few extra times per doubling: after an early collection the next
+    /// one needs another quarter of the threshold (TASK-100.35).
+    #[cold]
+    fn object_arena_nearly_full(&mut self) {
+        if self.arena_gc_pending || self.allocated_since_gc * 4 < self.gc_threshold_base {
+            return;
+        }
+        self.arena_gc_pending = true;
+        // Both, so a put-off collection (`Vm::run`) restores the lowered one.
+        self.gc_threshold = self.gc_threshold.min(self.allocated_since_gc);
+        self.gc_threshold_base = self.gc_threshold_base.min(self.allocated_since_gc);
+        self.attention |= ATTENTION_GC;
     }
 
     #[inline]

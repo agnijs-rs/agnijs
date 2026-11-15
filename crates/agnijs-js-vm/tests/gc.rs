@@ -216,6 +216,52 @@ fn a_garbage_only_loop_collects_every_few_megabytes() {
     );
 }
 
+/// The object arena's slot vector doubles when it runs out of free slots,
+/// never shrinks, and the copy briefly holds both vectors. A steady live
+/// set of 150k objects with churn beside it would fill 262,144 slots
+/// before the threshold collection comes; the collector runs early
+/// instead, as the arena nears its capacity, and the arena stays within
+/// that size (TASK-100.35).
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
+fn churn_beside_a_large_live_set_does_not_grow_the_object_arena() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var live = []; for (var i = 0; i < 75000; i++) live.push({ a: i, b: [i] });",
+    );
+    run(
+        &mut vm,
+        "for (var r = 0; r < 1000000; r++) { var o = { r: r }; } live.length",
+    );
+    // Without the early collection: 485,768 slots.
+    assert!(
+        vm.heap.objects.capacity() <= 1 << 18,
+        "the object arena grew to {} slots for 150k live objects",
+        vm.heap.objects.capacity()
+    );
+}
+
+/// When everything is live an early collection frees nothing. It needs a
+/// quarter of the threshold allocated since the last collection, so a
+/// growing live heap pays only a few extra collections: 600k live objects
+/// take the arena through four doublings with 4 collections without the
+/// early ones and 6 with them.
+#[test]
+#[cfg_attr(miri, ignore = "too slow under Miri")]
+fn a_growing_live_heap_runs_few_extra_collections() {
+    let mut vm = engine(false);
+    run(
+        &mut vm,
+        "var live = []; for (var i = 0; i < 600000; i++) live.push({ a: i });",
+    );
+    assert!(
+        vm.gc_count <= 8,
+        "600k live objects ran {} collections",
+        vm.gc_count
+    );
+}
+
 /// The memory limit is checked against the same counter, so a loop that
 /// only grows arrays must hit it instead of growing past it.
 #[test]
