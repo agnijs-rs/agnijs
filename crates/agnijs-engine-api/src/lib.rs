@@ -14,6 +14,10 @@
 // ADR 0019 J10 (TASK-100.32): engine crates stay free of `unsafe`.
 #![forbid(unsafe_code)]
 
+// Implementor-only items are `#[doc(hidden)]`: engines in this workspace
+// use them, embedders do not, and they are outside the semver policy
+// (ADR 0026, docs/stability.md).
+#[doc(hidden)]
 pub mod conformance;
 pub mod engine;
 pub mod error;
@@ -27,13 +31,17 @@ pub use host::{
     ImportAttribute, ModuleSource, RegexMatcher, RejectionEvent, Tracer,
 };
 pub use value::{
-    next_engine_id, EngineId, Handle, HandleRegistry, HeapKind, JsBigInt, JsString, PromiseState,
-    PropertyKey, RealmId, TypeOf, Value,
+    EngineId, Handle, HeapKind, JsBigInt, JsString, PromiseState, PropertyKey, RealmId, TypeOf,
+    Value,
 };
+#[doc(hidden)]
+pub use value::{next_engine_id, HandleRegistry};
 
 /// Bytecode container header shared by every engine: 4-byte magic, then a
 /// NUL-terminated format tag (engine name and format version), then the
 /// engine's payload. Engines reject a mismatch before touching the payload.
+/// Implementor-only (ADR 0026).
+#[doc(hidden)]
 pub mod bytecode {
     use crate::error::{Error, Result};
 

@@ -493,6 +493,8 @@ pub fn engine_error(e: AgnijsEngine, err: api::Error) -> Fail {
         api::Error::Host(_) => AGNIJS_ERR_HOST,
         api::Error::Internal(_) => AGNIJS_ERR_ENGINE,
         api::Error::Poisoned => AGNIJS_ERR_POISONED,
+        // A failure kind added after this table (ADR 0026).
+        _ => AGNIJS_ERR_ENGINE,
     };
     if let api::Error::Exception(ex) = err {
         let _ = with_state(e, true, |st| {

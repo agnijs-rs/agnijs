@@ -49,8 +49,10 @@ pub struct JsException {
     pub value: api::Value,
 }
 
-/// What an embedding call can fail with.
+/// What an embedding call can fail with. New kinds may be added without a
+/// breaking change (ADR 0026), so a `match` needs a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// JavaScript threw (or a promise rejected).
     Js(JsException),

@@ -255,6 +255,7 @@ pub enum TypeOf {
     Function,
 }
 
+#[doc(hidden)]
 /// Slot storage for persistent handles. Engines embed one of these and call
 /// [`HandleRegistry::reclaim`] at every entry point to free slots whose
 /// handles were dropped.
@@ -348,6 +349,7 @@ impl<T> HandleRegistry<T> {
 }
 
 /// Monotonic source of engine ids; one per engine instance.
+#[doc(hidden)]
 pub fn next_engine_id() -> EngineId {
     use std::sync::atomic::{AtomicU64, Ordering};
     static NEXT: AtomicU64 = AtomicU64::new(1);

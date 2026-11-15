@@ -3,9 +3,11 @@ id: TASK-104
 title: >-
   Generic embedding surface: eval and module APIs, host functions, value handles
   with a documented lifetime
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude'
 created_date: '2026-11-09T05:07:00Z'
+updated_date: '2026-11-15T22:29:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -34,3 +36,40 @@ The engine is an embeddable library, but its only embedding surface today is the
 - [ ] #5 A semver and stability policy for the public crates is written down (which crates and items are public, what counts as breaking, how bytecode format changes are versioned) and a cargo-semver-checks or equivalent check runs in CI
 - [ ] #6 An embedding guide and a minimal example crate (embed, run a script and a module, expose a host function, run the job loop) build and run in CI; a fuzzing corpus and a security disclosure policy (SECURITY.md) exist before the first external dependent
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. TASK-104.1 ADR 0026 and the surface changes it records. 2. TASK-104.2 handle and realm lifetime docs and tests. 3. TASK-104.3 host function and host class contract. 4. TASK-104.4 runnable rustdoc examples (eval, modules, bytecode, jobs, errors, interrupt). 5. TASK-104.5 embedding guide and example crate in CI. 6. TASK-104.6 semver policy and cargo-semver-checks in CI. One commit per subtask; gates before push per the brief.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Assessment against what exists at d411c1d (2026-11-15):
+
+- AC1 (ADR): nothing. agnijs-engine-api is the full interface (Engine, Host, Value/Handle, errors) and `agnijs` (TASK-103.4) is an ergonomic Context over it that re-exports it as `agnijs::api`. Embedders also reach `agnijs_js_vm::make_engine` directly; the VM crate has a large incidental pub surface. Implementor-only items (HandleRegistry, next_engine_id, bytecode::wrap/unwrap, conformance) sit beside embedder items with no marking. Needs an ADR.
+- AC2 (lifetimes): partly documented (value.rs module docs, reclaim_handles doc, ADR 0006). Not documented: what collect_garbage guarantees (it reclaims dropped handles first, and only defers when called from inside the engine), handles after the engine is dropped (drop is harmless, use on another engine is ForeignHandle), realms (no realm drop exists; RealmId is an untagged index). Tests exist only for release (conformance handles_are_released_when_dropped). Needs docs and a test file.
+- AC3 (rustdoc examples): only the crate-level 3-line example in agnijs and the cookbook (Context-level, no modules, bytecode, interrupt). Needs runnable examples on the Engine/Host items.
+- AC4 (host function/class contract): partly in doc comments. Gap found: HostObject::trace is never called by the AgniJS collector (gc.rs: host objects reference JS values only through handles, which are roots), so a cycle through a host object is never collected. Contract must say so; tests needed for conversion, thrown errors, uncatchable errors, tracing/rooting, re-entrancy.
+- AC5 (semver policy + CI check): stability.md defers it here. No semver tooling in CI.
+- AC6 (guide + example crate, fuzz corpus, SECURITY.md): SECURITY.md and the fuzz targets with seeds (crates/agnijs-fuzz, fuzz/) exist from TASK-103.18. The cookbook covers Context only. No example crate.
+
+Plan: split into six subtasks, one commit each, test-first where there is behaviour:
+1. TASK-104.1 ADR 0026 (public surface, two layers: `agnijs` front door + `agnijs::api`; implementor items hidden from the semver surface) and the code changes it records.
+2. TASK-104.2 Handle/Value/realm lifetime docs and tests.
+3. TASK-104.3 Host function and host class contract docs and tests.
+4. TASK-104.4 Runnable rustdoc examples for eval, modules and loader hooks, bytecode, job loop, errors, interrupt.
+5. TASK-104.5 Embedding guide and a minimal example crate run in CI.
+6. TASK-104.6 Semver policy in docs/stability.md and a cargo-semver-checks CI job.
+
+Owner decisions (recommendation and the default taken; none is hard to reverse):
+
+1. Public surface = the `agnijs` crate (Context + `agnijs::api`), ADR 0026. Default taken. Reversible: the interface crate stays usable directly.
+2. `#[non_exhaustive]` on `api::Error` and `agnijs::Error`. Recommended and taken: Error gained OutOfFuel and Poisoned this month. Costs a wildcard arm in the VM, C API and CLI matches. Removing it later is not breaking.
+3. `#[non_exhaustive]` on the hook enums (ModuleSource, ConsoleLevel, RejectionEvent, RegexMatcher, ErrorKind). Recommend doing it before the first release; NOT done (matched in 8 workspace crates; adding later is breaking only after a release).
+4. Tag RealmId with its engine, like Handle, so another engine's realm id is UnknownRealm instead of naming a realm with the same index. Recommend before 1.0; NOT done (changes a type every call takes). Documented as the contract for now.
+5. HostObject::trace is advisory; AgniJS treats handles in host data as roots, so a cycle through host data leaks until the engine is dropped. Recommend keeping it (making traced handles edges needs strong-count bookkeeping and risks freeing a value a host clone still names). Documented and tested; implementing edges later is additive.
+6. agnijs-js-resolve, the debugger capability and agnijs-js-cdp: embedder-facing but outside the semver policy until reviewed. Default taken.
+7. Implementor-only items (HandleRegistry, next_engine_id, bytecode, conformance) are `#[doc(hidden)]`, outside the semver policy; implementing Engine outside the workspace is unsupported. Default taken.
+<!-- SECTION:NOTES:END -->

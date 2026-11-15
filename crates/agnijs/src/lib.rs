@@ -21,6 +21,15 @@
 //!   promise from Rust.
 //! - **Typed errors**: [`Error`] for what reaches Rust, [`JsError`] for what
 //!   Rust throws into JavaScript.
+//! - **The full interface**: [`api`] is the engine interface itself, for
+//!   modules, bytecode, realms, raw values and handles, and host functions
+//!   that take or return them. [`new_engine`] and
+//!   [`new_engine_from_snapshot`] build an engine behind it;
+//!   [`Context::engine`] reaches it from a context.
+//!
+//! This crate is the public embedding surface (ADR 0026): an embedder
+//! depends on it alone. What is covered by the compatibility policy is in
+//! `docs/stability.md`.
 //!
 //! The cookbook (`docs/embedding-cookbook.md`) walks through each; every
 //! recipe in it is a test in this crate.
@@ -86,6 +95,56 @@ pub(crate) fn throw(engine: &mut dyn Engine, realm: RealmId, e: &JsError) -> api
     }
 }
 
+/// A fresh AgniJS engine behind the full engine interface, with its main
+/// realm created and `host` supplying every hook. This is the way to build
+/// an engine without depending on the engine crates (ADR 0026); put
+/// [`Context::from_engine`] over it for the short path.
+///
+/// ```
+/// use agnijs::api::{Engine, Host, Value};
+/// use std::rc::Rc;
+///
+/// struct MyHost;
+/// impl Host for MyHost {}
+///
+/// let mut engine = agnijs::new_engine(Rc::new(MyHost));
+/// let realm = engine.main_realm();
+/// let v = engine.eval_script(realm, "answer.js", "6 * 7").unwrap();
+/// assert_eq!(v, Value::Number(42.0));
+/// ```
+pub fn new_engine(host: Rc<dyn Host>) -> Box<dyn Engine> {
+    agnijs_js_vm::make_engine(host)
+}
+
+/// An AgniJS engine restored from a realm snapshot taken with
+/// [`api::Engine::snapshot`] (ADR 0022): one realm, the main one, holding
+/// the snapshot's realm. The bytes are untrusted: a snapshot from another
+/// engine build is [`api::Error::BytecodeMismatch`] and damaged bytes are
+/// [`api::Error::BytecodeCorrupt`], never a panic.
+///
+/// ```
+/// use agnijs::api::{Engine, Host, Value};
+/// use std::rc::Rc;
+///
+/// struct MyHost;
+/// impl Host for MyHost {}
+///
+/// let mut engine = agnijs::new_engine(Rc::new(MyHost));
+/// let realm = engine.main_realm();
+/// engine.eval_script(realm, "boot.js", "globalThis.ready = true").unwrap();
+/// let snapshot = engine.snapshot(realm).unwrap();
+///
+/// let mut restored = agnijs::new_engine_from_snapshot(Rc::new(MyHost), &snapshot).unwrap();
+/// let realm = restored.main_realm();
+/// assert_eq!(restored.eval_script(realm, "check.js", "ready").unwrap(), Value::Bool(true));
+/// ```
+pub fn new_engine_from_snapshot(
+    host: Rc<dyn Host>,
+    snapshot: &[u8],
+) -> api::Result<Box<dyn Engine>> {
+    agnijs_js_vm::make_engine_from_snapshot(host, snapshot)
+}
+
 /// An AgniJS engine with one realm, plus the executor that runs async host
 /// functions.
 pub struct Context {
@@ -110,7 +169,7 @@ impl Context {
     /// A fresh engine with your own [`Host`]: module loading, console
     /// sink, clock, interrupt polling and so on.
     pub fn with_host(host: Rc<dyn Host>) -> Context {
-        Self::from_engine(agnijs_js_vm::make_engine(host))
+        Self::from_engine(new_engine(host))
     }
 
     /// A context over an engine you constructed: one restored from a
@@ -131,9 +190,7 @@ impl Context {
     /// from another engine build or damaged bytes fail with
     /// [`Error::Engine`].
     pub fn from_snapshot(host: Rc<dyn Host>, snapshot: &[u8]) -> Result<Context> {
-        Ok(Self::from_engine(agnijs_js_vm::make_engine_from_snapshot(
-            host, snapshot,
-        )?))
+        Ok(Self::from_engine(new_engine_from_snapshot(host, snapshot)?))
     }
 
     /// The engine interface, for anything this crate does not wrap.

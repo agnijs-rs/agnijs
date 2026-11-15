@@ -35,7 +35,11 @@ impl Exception {
 }
 
 /// Every failure an engine call can report.
+///
+/// New kinds of failure are added as new variants without a breaking
+/// change (ADR 0026), so a `match` outside this crate needs a wildcard arm.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// JavaScript code threw.
     Exception(Exception),

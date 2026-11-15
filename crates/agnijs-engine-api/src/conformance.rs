@@ -1100,6 +1100,7 @@ pub const ALL: &[(&str, fn(&mut Factory))] = &[
 
 /// Instantiate the conformance kit as `#[test]` functions in the calling
 /// crate. The argument is a closure `|host: Rc<TestHost>| -> Box<dyn Engine>`.
+#[doc(hidden)]
 #[macro_export]
 macro_rules! conformance_tests {
     ($factory:expr) => {

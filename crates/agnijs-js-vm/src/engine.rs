@@ -386,6 +386,8 @@ impl Vm {
             // A nested call found the engine poisoned: end the script, as an
             // interrupt does; `enter` reports the poisoning.
             Error::Poisoned => Fault::Interrupt,
+            // A failure kind added after this table (ADR 0026).
+            other => self.throw(ErrorType::Error, &other.to_string()),
         }
     }
 
