@@ -1,0 +1,15 @@
+[package]
+name = "agnijs-example-embed"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+description = "The smallest program that embeds AgniJS: a script, a module, a host function and the job loop"
+
+[[bin]]
+name = "embed-minimal"
+path = "src/main.rs"
+
+[dependencies]
+agnijs.workspace = true

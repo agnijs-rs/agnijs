@@ -1,6 +1,6 @@
 # Embedding AgniJS in Rust: a cookbook
 
-Every code block on this page is compiled and run as a doctest of the `agnijs` crate (`cargo test -p agnijs --doc`), so the recipes cannot rot. The design behind them is in [rust-embedding-api.md](design/rust-embedding-api.md).
+Every code block on this page is compiled and run as a doctest of the `agnijs` crate (`cargo test -p agnijs --doc`), so the recipes cannot rot. The design behind them is in [rust-embedding-api.md](design/rust-embedding-api.md). For the engine interface underneath (your own module loader, host objects, bytecode, the job loop, limits), see the [embedding guide](embedding-guide.md).
 
 ## From `cargo add` to JavaScript in ten lines
 

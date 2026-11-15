@@ -19,6 +19,7 @@ members = [
     "crates/agnijs-derive",
     "crates/agnijs-cli",
     "crates/agnijs-fuzz",
+    "examples/embed-minimal",
 ]
 # The cargo-fuzz targets are a workspace of their own (nightly, libFuzzer).
 exclude = ["fuzz"]

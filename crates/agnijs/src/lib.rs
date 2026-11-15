@@ -353,3 +353,8 @@ impl Context {
 #[cfg(doctest)]
 #[doc = include_str!("../../../docs/embedding-cookbook.md")]
 struct Cookbook;
+
+/// The embedding guide's code blocks, compiled and run as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../../../docs/embedding-guide.md")]
+struct EmbeddingGuide;
