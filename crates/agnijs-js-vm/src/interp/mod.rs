@@ -165,7 +165,11 @@ impl Vm {
         let saved = self.retain_from;
         let saved_depth = self.run_depth;
         self.run_depth = self.native_depth;
-        if self.native_depth > 0 {
+        if std::mem::take(&mut self.free_entry) {
+            // Entered from a free safe point (`Vm::call_free`).
+            debug_assert_eq!(self.native_depth, 1);
+            self.retain_from = 0;
+        } else if self.native_depth > 0 {
             self.retain_from = match self.series {
                 // Called directly by the native running the series.
                 Some((depth, from)) if depth + 1 == self.native_depth => from,

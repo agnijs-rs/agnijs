@@ -537,6 +537,138 @@ fn garbage_left_before_a_job_is_not_retained_by_the_job() {
     );
 }
 
+// ---- memory: a free call frees what was born before it ------------------
+
+/// `makeBig(n)`: `n` live records, the same shape as one `work` iteration.
+const MAKE_BIG: &str = "var big = null;
+    function makeBig(n) { var a = []; for (var i = 0; i < n; i++) a.push({ a: i, b: [i, i + 1] }); return a; }";
+
+/// Set up a structure of half a threshold, born before the call that drops
+/// it, and return the call's size: enough allocation to collect inside it.
+fn big_then_inside(vm: &mut Vm) -> (usize, usize) {
+    run(vm, &format!("{SIZED_WORK}\n{MAKE_BIG}"));
+    let n = vm.heap.gc_threshold / 2 / WORK_BYTES;
+    run(vm, &format!("big = makeBig({n}); big.length"));
+    let threshold = vm.heap.gc_threshold;
+    (threshold, threshold * 5 / 2 / WORK_BYTES)
+}
+
+fn assert_big_not_retained(vm: &mut Vm, threshold: usize, count: f64, what: &str) {
+    assert!(count >= 0.0 && vm.gc_count as f64 > count, "no collection inside the {what}");
+    assert_eq!(run(vm, "big"), Value::Null, "the {what} did not run");
+    let retained = num(run(vm, "retained")) as usize;
+    assert!(
+        retained < threshold / 8,
+        "the {what} retained {retained} bytes of a structure it dropped (threshold {threshold})"
+    );
+}
+
+/// A job that replaces a large structure born before it (a list re-render)
+/// frees the old one while it runs, instead of keeping it until the job
+/// ends: the job runs from the host's drain, a free safe point, so its run
+/// loop retains nothing for the Rust frames under it (TASK-100.35).
+#[test]
+fn a_job_frees_a_structure_born_before_it_that_it_drops() {
+    let mut vm = engine(0);
+    let (threshold, inside) = big_then_inside(&mut vm);
+    run(
+        &mut vm,
+        &format!("var count = -1; Promise.resolve().then(() => {{ count = gcCount(); big = null; work({inside}); }});"),
+    );
+    let count = num(run(&mut vm, "count"));
+    assert_big_not_retained(&mut vm, threshold, count, "job");
+}
+
+/// The same when the job's work runs in a callback series under it (the
+/// `forEach` of a re-render): the series retains from the job's bound.
+#[test]
+fn a_callback_series_inside_a_job_frees_a_structure_born_before_the_job() {
+    let mut vm = engine(0);
+    let (threshold, inside) = big_then_inside(&mut vm);
+    run(
+        &mut vm,
+        &format!("var count = -1; Promise.resolve().then(() => {{ count = gcCount(); big = null;
+            [0, 1].forEach(() => work({inside} >> 1)); }});"),
+    );
+    let count = num(run(&mut vm, "count"));
+    assert_big_not_retained(&mut vm, threshold, count, "forEach in a job");
+}
+
+/// And from a host call (`Engine::call`).
+#[test]
+fn a_host_call_frees_a_structure_born_before_it_that_it_drops() {
+    let mut vm = engine(0);
+    let (threshold, inside) = big_then_inside(&mut vm);
+    run(&mut vm, "function drop(n) { big = null; return work(n); }");
+    let realm = vm.main_realm();
+    let global = vm.global_object(realm).unwrap();
+    let drop = Engine::get(&mut vm, realm, &global, &PropertyKey::from("drop")).unwrap();
+    let count = vm.gc_count as f64;
+    Engine::call(&mut vm, realm, &drop, &Value::Undefined, &[Value::Number(inside as f64)]).unwrap();
+    assert_big_not_retained(&mut vm, threshold, count, "host call");
+}
+
+// ---- rooting: a free call keeps what only Rust holds --------------------
+
+/// A reaction's derived promise and its resolving functions are held only
+/// by the job record while the handler runs; nothing in JavaScript refers
+/// to the intermediate promises of a chain.
+#[test]
+fn a_promise_chain_settles_through_handlers_that_allocate() {
+    for stress in [0, 1, 16] {
+        let mut vm = engine(stress);
+        run(
+            &mut vm,
+            &format!("{GARBAGE}\nvar out = '';
+             Promise.resolve(1)
+               .then((v) => {{ garbage(); return {{ s: 'a' + v }}; }})
+               .then((o) => {{ garbage(); return {{ then(r) {{ garbage(); r(o.s + 't'); }} }}; }})
+               .then(async (s) => {{ garbage(); await null; garbage(); return s + 'x'; }})
+               .then((s) => {{ garbage(); throw {{ s: s + 'e' }}; }})
+               .catch((e) => {{ garbage(); return e.s; }})
+               .finally(() => garbage())
+               .then((s) => {{ out = s; }});"),
+        );
+        assert_eq!(run(&mut vm, "out"), Value::string("a1txe"), "stress={stress}");
+    }
+}
+
+/// A host call's callee, receiver and arguments are held only as host
+/// handles; async functions and generators keep them past the first
+/// suspension.
+#[test]
+fn host_calls_into_async_functions_and_generators_keep_their_arguments() {
+    for stress in [0, 1, 16] {
+        let mut vm = engine(stress);
+        run(
+            &mut vm,
+            &format!("{GARBAGE}\nvar out = '';
+             async function af(s, o) {{ garbage(); await null; garbage(); out += s + o.t + this.u; }}
+             function* gf(s) {{ garbage(); yield s + '1'; garbage(); yield s + '2'; }}
+             function mk() {{ return {{ t: 'T', u: 'U' }}; }}"),
+        );
+        let realm = vm.main_realm();
+        let global = vm.global_object(realm).unwrap();
+        let get = |vm: &mut Vm, name: &str| Engine::get(vm, realm, &global, &PropertyKey::from(name)).unwrap();
+        let (af, gf, mk) = (get(&mut vm, "af"), get(&mut vm, "gf"), get(&mut vm, "mk"));
+        let o = Engine::call(&mut vm, realm, &mk, &Value::Undefined, &[]).unwrap();
+        let s = Value::string(&format!("s{stress}"));
+        Engine::call(&mut vm, realm, &af, &o, &[s.clone(), o.clone()]).unwrap();
+        let it = Engine::call(&mut vm, realm, &gf, &Value::Undefined, &[s]).unwrap();
+        vm.run_jobs(realm).unwrap();
+        drop((o, mk, af));
+        let next = Engine::get(&mut vm, realm, &it, &PropertyKey::from("next")).unwrap();
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            let r = Engine::call(&mut vm, realm, &next, &it, &[]).unwrap();
+            parts.push(Engine::get(&mut vm, realm, &r, &PropertyKey::from("value")).unwrap());
+        }
+        assert_eq!(run(&mut vm, "out"), Value::string(&format!("s{stress}TU")), "stress={stress}");
+        let want = [format!("s{stress}1"), format!("s{stress}2")];
+        assert_eq!(parts, want.map(|w| Value::string(&w)), "stress={stress}");
+    }
+}
+
 #[test]
 fn the_memory_limit_still_applies_under_a_native_frame() {
     let mut vm = engine(0);

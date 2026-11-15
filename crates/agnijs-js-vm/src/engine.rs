@@ -959,7 +959,7 @@ impl Engine for Vm {
             if !vm.is_callable(f) {
                 return vm.type_error("value is not a function");
             }
-            vm.call_value(f, t, &vals)
+            vm.call_free(f, t, &vals, &[])
         })?;
         Ok(self.to_api_value(v))
     }

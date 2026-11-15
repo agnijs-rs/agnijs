@@ -630,7 +630,17 @@ impl Vm {
                 ReactionKind::Fulfill => Ok(argument),
                 ReactionKind::Reject => Err(argument),
             },
-            Handler::Call(f) => match self.call_value(f, Value::Undefined, &[argument]) {
+            // From the host's drain, nothing but this job's record is held
+            // in Rust: a free call (`Vm::call_free`) with the capability on
+            // the root stack.
+            Handler::Call(f) => match self.call_free(
+                f,
+                Value::Undefined,
+                &[argument],
+                &reaction.capability.as_ref().map_or([Value::Undefined; 3], |c| {
+                    [Value::Object(c.promise), c.resolve, c.reject]
+                }),
+            ) {
                 Ok(v) => Ok(v),
                 Err(Fault::Throw(e)) => Err(e),
                 Err(f) => return Err(f),

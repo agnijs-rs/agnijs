@@ -342,6 +342,9 @@ pub struct Vm {
     /// its native depth and the bound the run loops it calls into retain
     /// from (the enclosing loop's), instead of their own entry.
     pub(crate) series: Option<(u32, u64)>,
+    /// Set by [`Vm::call_free`] for the one run loop it enters, which then
+    /// retains nothing (`Vm::run` takes it): see there.
+    pub(crate) free_entry: bool,
     /// `native_depth` when the current run loop was entered: a native at
     /// `run_depth + 1` was called by that loop's instruction directly, with
     /// no other Rust frame holding values in between.
@@ -501,6 +504,7 @@ impl Vm {
             retain_at_gc: 0,
             put_off_at: 0,
             series: None,
+            free_entry: false,
             run_depth: 0,
             uncatchable: false,
             fuel: 0,
@@ -1200,6 +1204,47 @@ impl Vm {
         let saved = self.series.replace((self.native_depth, bound));
         let r = f(self);
         self.series = saved;
+        self.roots.truncate(base);
+        r
+    }
+
+    /// Call `f` from a free safe point: no frame and no native frame on the
+    /// stack (a host call, or a job the host's drain runs). The run loop
+    /// the call enters retains nothing for the Rust frames under it,
+    /// because those hold only the host's handles and `roots`, which go on
+    /// the root stack until the call returns. So a collection inside the
+    /// call frees everything the program dropped, including what was born
+    /// before the call: a job that replaces a large structure frees the old
+    /// one as it goes, where a retaining loop kept all of it until the job
+    /// ended (TASK-100.35).
+    ///
+    /// Only a bytecode function's call is free: `call_object` reaches its
+    /// run loop with no other Rust frame between (`run_function`, or
+    /// `call_async_function`, whose generator object the frame holds and
+    /// whose promise that object holds). Any other callee, or a call made
+    /// under a frame, is an ordinary `call_value`.
+    pub(crate) fn call_free(
+        &mut self,
+        f: Value,
+        this: Value,
+        args: &[Value],
+        roots: &[Value],
+    ) -> JsResult<Value> {
+        let free = self.native_depth == 0
+            && self.frames.is_empty()
+            && matches!(f, Value::Object(o) if matches!(&self.heap.obj(o).class, Class::Function(fd) if !fd.is_class_constructor));
+        if !free {
+            return self.call_value(f, this, args);
+        }
+        let base = self.roots.len();
+        self.roots.extend_from_slice(roots);
+        self.roots.push(f);
+        self.roots.push(this);
+        self.roots.extend_from_slice(args);
+        self.free_entry = true;
+        let r = self.call_value(f, this, args);
+        // Not taken when the call failed before its loop started.
+        self.free_entry = false;
         self.roots.truncate(base);
         r
     }
