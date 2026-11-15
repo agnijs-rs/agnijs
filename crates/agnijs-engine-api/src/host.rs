@@ -129,6 +129,43 @@ pub trait Host {
     /// match, and in native built-ins that loop over their input. Return
     /// true to interrupt; the running call then fails with
     /// [`crate::Error::Interrupted`].
+    ///
+    /// The interrupt is uncatchable: no `catch` or `finally` in the script
+    /// runs. The engine stays usable afterwards; keep the hook cheap, since
+    /// it is called often.
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, Value};
+    /// use std::cell::Cell;
+    /// use std::rc::Rc;
+    ///
+    /// /// Stops a run after a fixed number of polls. A real host would check
+    /// /// a deadline or a flag set from another thread.
+    /// struct Budget(Cell<u32>);
+    /// impl Host for Budget {
+    ///     fn interrupt(&self) -> bool {
+    ///         let left = self.0.get();
+    ///         self.0.set(left.saturating_sub(1));
+    ///         left == 0
+    ///     }
+    /// }
+    ///
+    /// let host = Rc::new(Budget(Cell::new(10_000)));
+    /// let mut engine = agnijs::new_engine(host.clone());
+    /// let realm = engine.main_realm();
+    ///
+    /// let run = engine.eval_script(
+    ///     realm,
+    ///     "spin.js",
+    ///     "try { for (;;) {} } catch (e) { globalThis.caught = true } finally { globalThis.cleaned = true }",
+    /// );
+    /// assert!(matches!(run, Err(Error::Interrupted)));
+    ///
+    /// host.0.set(10_000);
+    /// let seen = engine.eval_script(realm, "after.js", "typeof caught + ',' + typeof cleaned")?;
+    /// assert_eq!(seen, Value::string("undefined,undefined"));
+    /// # Ok::<(), Error>(())
+    /// ```
     fn interrupt(&self) -> bool {
         false
     }

@@ -8,3 +8,9 @@ repository.workspace = true
 description = "agnijs-engine-api"
 
 [dependencies]
+
+[dev-dependencies]
+# The rustdoc examples run on AgniJS through the agnijs crate. They name
+# items only through `agnijs::api`, since this crate's own build under test
+# is a different copy from the one agnijs links.
+agnijs = { path = "../agnijs" }

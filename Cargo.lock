@@ -50,6 +50,9 @@ dependencies = [
 [[package]]
 name = "agnijs-engine-api"
 version = "0.1.0"
+dependencies = [
+ "agnijs",
+]
 
 [[package]]
 name = "agnijs-engine-quickjs"

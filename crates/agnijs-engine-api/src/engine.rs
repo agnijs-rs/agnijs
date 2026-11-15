@@ -71,11 +71,104 @@ pub trait Engine {
     /// surrogate; write one as an escape (`"\uD800"`). Source that script
     /// builds at run time (`eval`, `Function`) is a JavaScript string and
     /// keeps its lone surrogates.
+    ///
+    /// Returns the completion value. A thrown exception, and a syntax
+    /// error (thrown before anything runs), come back as
+    /// [`Error::Exception`](crate::Error::Exception), with the thrown value
+    /// and its name, message and stack read out.
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, Value};
+    /// use std::rc::Rc;
+    ///
+    /// struct App;
+    /// impl Host for App {}
+    ///
+    /// let mut engine = agnijs::new_engine(Rc::new(App));
+    /// let realm = engine.main_realm();
+    /// assert_eq!(engine.eval_script(realm, "sum.js", "1 + 2")?, Value::Number(3.0));
+    ///
+    /// let source = "function check(n) {\n  if (n < 0) throw new RangeError('negative');\n}\ncheck(-1);";
+    /// match engine.eval_script(realm, "check.js", source) {
+    ///     Err(Error::Exception(e)) => {
+    ///         assert_eq!(e.name, "RangeError");
+    ///         assert_eq!(e.message, "negative");
+    ///         // Innermost frame first.
+    ///         let top = &e.stack[0];
+    ///         assert_eq!((top.function.as_str(), top.script.as_str(), top.line), ("check", "check.js", 2));
+    ///         assert_eq!(e.stack[1].line, 4);
+    ///     }
+    ///     other => panic!("{other:?}"),
+    /// }
+    ///
+    /// match engine.eval_script(realm, "broken.js", "let = ;") {
+    ///     Err(Error::Exception(e)) => assert!(e.is("SyntaxError")),
+    ///     other => panic!("{other:?}"),
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
     fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Value>;
 
     /// Load and evaluate a module by specifier through the host's module
     /// hooks. Returns a promise for the module namespace, which settles once
     /// the host has run the pending jobs.
+    ///
+    /// The engine asks [`Host::resolve_module`](crate::Host::resolve_module)
+    /// for each specifier's canonical name and
+    /// [`Host::load_module`](crate::Host::load_module) for its source, once
+    /// per canonical name. A failure anywhere in the graph (a module the host
+    /// cannot load, a syntax error, an exception thrown while evaluating)
+    /// rejects the promise; the call itself fails only for misuse, such as an
+    /// unknown realm.
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, ImportAttribute, ModuleSource, PromiseState, Value};
+    /// use std::rc::Rc;
+    ///
+    /// struct App;
+    /// impl Host for App {
+    ///     fn resolve_module(
+    ///         &self,
+    ///         _referrer: Option<&str>,
+    ///         specifier: &str,
+    ///         _attributes: &[ImportAttribute],
+    ///     ) -> Result<String, String> {
+    ///         Ok(format!("app/{}", specifier.trim_start_matches("./")))
+    ///     }
+    ///     fn load_module(&self, resolved: &str) -> Result<ModuleSource, String> {
+    ///         let source = match resolved {
+    ///             "app/main.js" => "import { greet } from './greet.js'; export const text = greet('world');",
+    ///             "app/greet.js" => "export const greet = (who) => `hello, ${who}`;",
+    ///             _ => return Err(format!("no module {resolved}")),
+    ///         };
+    ///         Ok(ModuleSource::Source(source.into()))
+    ///     }
+    /// }
+    ///
+    /// let mut engine = agnijs::new_engine(Rc::new(App));
+    /// let realm = engine.main_realm();
+    ///
+    /// let promise = engine.load_module(realm, "main.js")?;
+    /// engine.run_jobs(realm)?;
+    /// let PromiseState::Fulfilled(namespace) = engine.promise_state(realm, &promise)? else {
+    ///     panic!("main.js did not load");
+    /// };
+    /// let text = engine.get(realm, &namespace, &"text".into())?;
+    /// assert_eq!(text, Value::string("hello, world"));
+    ///
+    /// // A module the host cannot load rejects the promise with a TypeError
+    /// // carrying the host's message.
+    /// let promise = engine.load_module(realm, "missing.js")?;
+    /// engine.run_jobs(realm)?;
+    /// match engine.promise_state(realm, &promise)? {
+    ///     PromiseState::Rejected(reason) => assert_eq!(
+    ///         engine.to_string(realm, &reason)?,
+    ///         "TypeError: no module app/missing.js"
+    ///     ),
+    ///     other => panic!("{other:?}"),
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
     fn load_module(&mut self, realm: RealmId, specifier: &str) -> Result<Value>;
 
     /// Forget the module record registered under `specifier` (the resolved
@@ -92,7 +185,31 @@ pub trait Engine {
     /// Run every pending job (promise reactions and anything else the engine
     /// enqueued). The engine never runs jobs on its own. Returns the number
     /// of jobs run; an exception escaping a job stops the drain and is
-    /// returned (remaining jobs stay queued).
+    /// returned (remaining jobs stay queued). Finalizers of collected host
+    /// objects run here too, before the jobs.
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, Value};
+    /// use std::rc::Rc;
+    ///
+    /// struct App;
+    /// impl Host for App {}
+    ///
+    /// let mut engine = agnijs::new_engine(Rc::new(App));
+    /// let realm = engine.main_realm();
+    /// engine.eval_script(
+    ///     realm,
+    ///     "jobs.js",
+    ///     "globalThis.log = []; Promise.resolve().then(() => log.push('job')); log.push('script');",
+    /// )?;
+    /// // The engine never runs jobs on its own: the reaction is still queued.
+    /// assert_eq!(engine.eval_script(realm, "a.js", "log.join()")?, Value::string("script"));
+    /// assert_eq!(engine.run_jobs(realm)?, 1);
+    /// assert_eq!(engine.eval_script(realm, "b.js", "log.join()")?, Value::string("script,job"));
+    /// // An event loop calls it after every task until it returns 0.
+    /// assert_eq!(engine.run_jobs(realm)?, 0);
+    /// # Ok::<(), Error>(())
+    /// ```
     fn run_jobs(&mut self, realm: RealmId) -> Result<usize>;
     fn has_pending_jobs(&self) -> bool;
 
@@ -116,9 +233,97 @@ pub trait Engine {
 
     // ---- bytecode -----------------------------------------------------
 
+    /// Compile a classic script to bytecode without running it, for
+    /// [`Engine::eval_bytecode`]. The bytes run on any engine of the same
+    /// build ([`EngineInfo::bytecode_format`](crate::EngineInfo)), in any
+    /// realm. A syntax error is [`Error::Exception`](crate::Error::Exception)
+    /// as from [`Engine::eval_script`].
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, Value};
+    /// use std::rc::Rc;
+    ///
+    /// struct App;
+    /// impl Host for App {}
+    ///
+    /// // Compile once, for example at build time...
+    /// let mut compiler = agnijs::new_engine(Rc::new(App));
+    /// let realm = compiler.main_realm();
+    /// let bytes = compiler.compile_script(realm, "answer.js", "6 * 7")?;
+    ///
+    /// // ...and run in another engine of the same build.
+    /// let mut engine = agnijs::new_engine(Rc::new(App));
+    /// let realm = engine.main_realm();
+    /// assert_eq!(engine.eval_bytecode(realm, &bytes)?, Value::Number(42.0));
+    /// # Ok::<(), Error>(())
+    /// ```
     fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Vec<u8>>;
+    /// Compile a module to bytecode under its canonical `specifier`. The
+    /// host hands the bytes back from
+    /// [`Host::load_module`](crate::Host::load_module) as
+    /// [`ModuleSource::Bytecode`](crate::ModuleSource::Bytecode).
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host, ModuleSource, PromiseState, Value};
+    /// use std::rc::Rc;
+    ///
+    /// struct Precompiled(Vec<u8>);
+    /// impl Host for Precompiled {
+    ///     fn load_module(&self, resolved: &str) -> Result<ModuleSource, String> {
+    ///         match resolved {
+    ///             "lib.js" => Ok(ModuleSource::Bytecode(self.0.clone())),
+    ///             _ => Err(format!("no module {resolved}")),
+    ///         }
+    ///     }
+    /// }
+    ///
+    /// let mut compiler = agnijs::new_engine(Rc::new(Precompiled(Vec::new())));
+    /// let realm = compiler.main_realm();
+    /// let bytes = compiler.compile_module(realm, "lib.js", "export const answer = 6 * 7;")?;
+    ///
+    /// let mut engine = agnijs::new_engine(Rc::new(Precompiled(bytes)));
+    /// let realm = engine.main_realm();
+    /// let promise = engine.load_module(realm, "lib.js")?;
+    /// engine.run_jobs(realm)?;
+    /// let PromiseState::Fulfilled(namespace) = engine.promise_state(realm, &promise)? else {
+    ///     panic!("lib.js did not load");
+    /// };
+    /// assert_eq!(engine.get(realm, &namespace, &"answer".into())?, Value::Number(42.0));
+    /// # Ok::<(), Error>(())
+    /// ```
     fn compile_module(&mut self, realm: RealmId, specifier: &str, source: &str) -> Result<Vec<u8>>;
     /// Evaluate bytecode from [`Engine::compile_script`].
+    ///
+    /// The container header names the engine and bytecode format; bytes
+    /// from another engine or another build fail with
+    /// [`Error::BytecodeMismatch`](crate::Error::BytecodeMismatch) before
+    /// anything runs, and damaged bytes with
+    /// [`Error::BytecodeCorrupt`](crate::Error::BytecodeCorrupt). Never
+    /// evaluate bytecode you would not evaluate as source.
+    ///
+    /// ```
+    /// use agnijs::api::{Engine, Error, Host};
+    /// use std::rc::Rc;
+    ///
+    /// struct App;
+    /// impl Host for App {}
+    ///
+    /// let mut engine = agnijs::new_engine(Rc::new(App));
+    /// let realm = engine.main_realm();
+    /// let mut bytes = engine.compile_script(realm, "answer.js", "6 * 7")?;
+    ///
+    /// // Bytes written by another build carry another format tag (it follows
+    /// // the 4-byte magic).
+    /// bytes[4] ^= 1;
+    /// match engine.eval_bytecode(realm, &bytes) {
+    ///     Err(Error::BytecodeMismatch { expected, found }) => {
+    ///         assert_eq!(expected, engine.info().bytecode_format);
+    ///         assert_ne!(found, expected);
+    ///     }
+    ///     other => panic!("{other:?}"),
+    /// }
+    /// # Ok::<(), Error>(())
+    /// ```
     fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> Result<Value>;
 
     // ---- snapshots ----------------------------------------------------
