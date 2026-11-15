@@ -60,6 +60,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "agnijs-fuzz"
+version = "0.1.0"
+dependencies = [
+ "agnijs-engine-api",
+ "agnijs-js-cdp",
+ "agnijs-js-compiler",
+ "agnijs-js-debugger",
+ "agnijs-js-parser",
+ "agnijs-js-regex",
+ "agnijs-js-resolve",
+ "agnijs-js-vm",
+ "serde_json",
+]
+
+[[package]]
 name = "agnijs-js-bench"
 version = "0.1.0"
 dependencies = [

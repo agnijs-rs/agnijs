@@ -18,6 +18,7 @@ members = [
     "crates/agnijs",
     "crates/agnijs-derive",
     "crates/agnijs-cli",
+    "crates/agnijs-fuzz",
 ]
 
 [workspace.package]
@@ -65,6 +66,13 @@ foldhash = "0.2"
 
 [profile.release]
 debug = 1
+
+# The bounded fuzz run (docs/fuzzing.md): release speed, with debug
+# assertions and overflow checks so a broken invariant panics there too.
+[profile.fuzz]
+inherits = "release"
+debug-assertions = true
+overflow-checks = true
 
 # What docs/binary-size.md measures and what a size-conscious embedder
 # ships: the release build stripped, with whole-program LTO. Unwinding
