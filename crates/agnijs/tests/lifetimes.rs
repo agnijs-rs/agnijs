@@ -117,7 +117,11 @@ fn dropped_handles_are_reclaimed_at_the_next_call_into_the_engine() {
 
     drop(b);
     engine.collect_garbage();
-    assert_eq!(engine.live_handles(), base, "collect_garbage reclaims first");
+    assert_eq!(
+        engine.live_handles(),
+        base,
+        "collect_garbage reclaims first"
+    );
 }
 
 #[test]
@@ -252,7 +256,10 @@ fn an_unknown_realm_is_an_error() {
         engine.global_object(nowhere),
         Err(Error::UnknownRealm)
     ));
-    assert!(matches!(engine.new_object(nowhere), Err(Error::UnknownRealm)));
+    assert!(matches!(
+        engine.new_object(nowhere),
+        Err(Error::UnknownRealm)
+    ));
     assert!(matches!(engine.run_jobs(nowhere), Err(Error::UnknownRealm)));
 }
 

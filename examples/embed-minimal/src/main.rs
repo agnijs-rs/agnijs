@@ -76,7 +76,10 @@ fn main() -> Result<(), Error> {
     let global = engine.global_object(realm)?;
     engine.set(realm, &global, &"add".into(), &add)?;
     let sum = engine.eval_script(realm, "add.js", "add(2, 40)")?;
-    println!("host function: add(2, 40) = {}", engine.to_string(realm, &sum)?);
+    println!(
+        "host function: add(2, 40) = {}",
+        engine.to_string(realm, &sum)?
+    );
 
     // A module graph: load_module returns a promise for the namespace,
     // which settles as the job loop runs.
@@ -103,10 +106,14 @@ fn main() -> Result<(), Error> {
     )?;
     let ran = run_job_loop(&mut *engine, realm)?;
     let order = engine.eval_script(realm, "order.js", "order.join(', ')")?;
-    println!("jobs: ran {ran}, order {}", engine.to_string(realm, &order)?);
+    println!(
+        "jobs: ran {ran}, order {}",
+        engine.to_string(realm, &order)?
+    );
 
     // A thrown exception comes back as Error::Exception, read out.
-    let source = "function check(n) {\n  if (n < 0) throw new RangeError('negative');\n}\ncheck(-1);\n";
+    let source =
+        "function check(n) {\n  if (n < 0) throw new RangeError('negative');\n}\ncheck(-1);\n";
     match engine.eval_script(realm, "check.js", source) {
         Err(Error::Exception(e)) => {
             let top = &e.stack[0];

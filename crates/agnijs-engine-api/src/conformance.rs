@@ -28,6 +28,7 @@ pub struct TestHost {
     pub console: RefCell<Vec<(ConsoleLevel, Vec<String>)>>,
     pub rejections: RefCell<Vec<RejectionEvent>>,
     pub import_meta_calls: RefCell<Vec<String>>,
+    #[allow(clippy::type_complexity)]
     pub resolve_calls: RefCell<Vec<(Option<String>, String, Vec<ImportAttribute>)>>,
     pub allow_compile_strings: Cell<bool>,
     /// Interrupt after this many polls (None: never).
@@ -1035,6 +1036,7 @@ pub fn promise_state_is_inspectable(factory: &mut Factory) {
 }
 
 /// Every kit test, by name, for runners that want to drive them manually.
+#[allow(clippy::type_complexity)]
 pub const ALL: &[(&str, fn(&mut Factory))] = &[
     ("eval_script_returns_values", eval_script_returns_values),
     (

@@ -5,9 +5,9 @@
 //! given to the engine at construction and lives as long as the engine.
 
 use crate::engine::Engine;
-use crate::error::Result;
 #[cfg(doc)]
 use crate::error::Error;
+use crate::error::Result;
 use crate::value::{RealmId, Value};
 use std::any::Any;
 
@@ -365,8 +365,12 @@ pub struct HostClassDef {
     /// Called with the data when the wrapper object is collected. Runs from
     /// the next [`Engine::run_jobs`] after the collection, never during it,
     /// and not at all for data still alive when the engine is dropped.
-    pub finalize: Option<Box<dyn Fn(Box<dyn HostObject>)>>,
+    pub finalize: Option<Box<Finalizer>>,
 }
+
+/// A host class finalizer ([`HostClassDef::finalize`]): receives the data of
+/// a collected host object, and no engine.
+pub type Finalizer = dyn Fn(Box<dyn HostObject>);
 
 /// Identifies a registered host class.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]

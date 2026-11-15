@@ -27,8 +27,8 @@ pub mod value;
 pub use engine::{Engine, EngineInfo, ErrorKind, MemoryUsage};
 pub use error::{Error, Exception, Result, StackFrame};
 pub use host::{
-    CallContext, ConsoleLevel, Host, HostClassDef, HostClassId, HostFunction, HostObject,
-    ImportAttribute, ModuleSource, RegexMatcher, RejectionEvent, Tracer,
+    CallContext, ConsoleLevel, Finalizer, Host, HostClassDef, HostClassId, HostFunction,
+    HostObject, ImportAttribute, ModuleSource, RegexMatcher, RejectionEvent, Tracer,
 };
 pub use value::{
     EngineId, Handle, HeapKind, JsBigInt, JsString, PromiseState, PropertyKey, RealmId, TypeOf,

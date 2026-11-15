@@ -61,10 +61,7 @@ fn arguments_arrive_as_values_and_missing_ones_read_as_undefined() {
         Ok(Value::Undefined)
     });
     eval(&mut *engine, realm, "probe(1, 'two')");
-    assert_eq!(
-        *seen.borrow(),
-        ["argc=2", "Number", "String", "Undefined"]
-    );
+    assert_eq!(*seen.borrow(), ["argc=2", "Number", "String", "Undefined"]);
 }
 
 #[test]
@@ -76,7 +73,11 @@ fn this_is_passed_as_is_and_host_functions_are_not_constructors() {
     });
     assert_eq!(eval(&mut *engine, realm, "who()"), Value::Undefined);
     assert_eq!(
-        eval_str(&mut *engine, realm, "const o = { who, tag: 'o' }; o.who().tag"),
+        eval_str(
+            &mut *engine,
+            realm,
+            "const o = { who, tag: 'o' }; o.who().tag"
+        ),
         "o"
     );
     assert_eq!(
@@ -345,7 +346,11 @@ fn an_exception_crosses_nested_host_frames() {
         }
     });
     assert_eq!(
-        eval_str(&mut *engine, realm, "swallow(() => { throw new Error('caught in Rust') })"),
+        eval_str(
+            &mut *engine,
+            realm,
+            "swallow(() => { throw new Error('caught in Rust') })"
+        ),
         "caught in Rust"
     );
 }
@@ -447,7 +452,11 @@ fn host_data_is_reachable_by_class_and_type() {
 fn a_value_held_by_a_host_object_lives_until_the_host_object_is_finalized() {
     let (mut engine, realm) = engine();
     let c = holder_class(&mut *engine);
-    let weak = eval(&mut *engine, realm, "globalThis.w = new WeakRef(globalThis.t = {})");
+    let weak = eval(
+        &mut *engine,
+        realm,
+        "globalThis.w = new WeakRef(globalThis.t = {})",
+    );
     drop(weak);
     let held = eval(&mut *engine, realm, "t");
     let holder = engine
@@ -470,10 +479,17 @@ fn a_value_held_by_a_host_object_lives_until_the_host_object_is_finalized() {
     drop(holder);
     collect(&mut *engine, realm);
     assert_eq!(c.finalized.get(), 1, "the holder was finalized");
-    assert_eq!(c.dropped.get(), 1, "its data was dropped after the finalizer");
+    assert_eq!(
+        c.dropped.get(),
+        1,
+        "its data was dropped after the finalizer"
+    );
     // The held handle went with the data, so the next collection frees it.
     collect(&mut *engine, realm);
-    assert_eq!(eval_str(&mut *engine, realm, "typeof w.deref()"), "undefined");
+    assert_eq!(
+        eval_str(&mut *engine, realm, "typeof w.deref()"),
+        "undefined"
+    );
 }
 
 #[test]
