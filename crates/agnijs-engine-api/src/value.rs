@@ -5,7 +5,55 @@
 //! engine's handle table that stays valid until every clone of it is dropped.
 //! Handles carry no lifetime, so hosts can store them in their own structures.
 //! Dropping the last clone queues the slot for release; the engine reclaims it
-//! the next time the host calls into it (see [`HandleRegistry`]).
+//! the next time the host calls into it.
+//!
+//! # Lifetimes
+//!
+//! This is the contract every engine behind the interface keeps (ADR 0006,
+//! ADR 0026); `crates/agnijs/tests/lifetimes.rs` tests it on AgniJS.
+//!
+//! - **Primitives are copies.** A [`Value::String`] or [`Value::BigInt`]
+//!   owns its data and has no tie to the engine at all.
+//! - **A handle keeps its value alive.** While any clone of a [`Handle`]
+//!   exists, the object or symbol it names is a root: no collection frees
+//!   it, whether or not JavaScript can still reach it. Every value the
+//!   engine hands out (a result, an argument, a property read) is a new
+//!   handle, even for an object the host already holds one to; `==` on
+//!   handles compares those slots, [`crate::Engine::same_object`] compares
+//!   JavaScript identity.
+//! - **Dropping the last clone releases the root, lazily.** The slot is
+//!   queued and freed at the next call into the engine, or by
+//!   [`crate::Engine::reclaim_handles`]. The value is then collected like
+//!   any other once JavaScript cannot reach it either.
+//!   [`crate::Engine::collect_garbage`] reclaims queued slots before it
+//!   collects, so dropping a handle and then collecting frees the value in
+//!   that collection.
+//! - **Handles outlive their engine safely.** After the engine is dropped,
+//!   its handles are inert: they can be cloned, compared, printed and
+//!   dropped, and nothing they named is reachable. Given to another engine,
+//!   any handle that engine did not issue is [`crate::Error::ForeignHandle`].
+//! - **A handle is engine-wide.** It works in every realm of the engine that
+//!   issued it (all realms share one heap), whichever realm created the
+//!   value.
+//! - **A [`RealmId`] is an index, valid on the engine that issued it.**
+//!   Realms live as long as their engine; nothing drops a realm on its own.
+//!   An id the engine never issued is [`crate::Error::UnknownRealm`]. A
+//!   realm id is not tagged with its engine the way a handle is, so an id
+//!   from another engine names whichever realm has that index here, if any.
+//! - **Handles are single-threaded.** `Handle` is neither `Send` nor `Sync`,
+//!   like the engine.
+//! - **Misuse is an error, never undefined behaviour.** The engine crates
+//!   forbid `unsafe` code; a foreign or stale handle or an unknown realm is
+//!   an `Err` from every fallible call, and the infallible queries
+//!   ([`crate::Engine::type_of`], [`crate::Engine::is_array`],
+//!   [`crate::Engine::strict_equals`] and the like) answer as they would for
+//!   `undefined`.
+//!
+//! A handle is a strong root, so a cycle that runs through the host (a
+//! handle stored in a host object or captured by a host function that the
+//! object or function itself reaches) is never collected while the engine
+//! lives; break it by dropping the handle. See [`crate::HostObject`] for
+//! what tracing does about this.
 
 use std::cell::RefCell;
 use std::fmt;
@@ -68,7 +116,9 @@ impl PartialEq<str> for JsString {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct JsBigInt(pub String);
 
-/// Identifies a realm created by [`crate::Engine::create_realm`].
+/// Identifies a realm created by [`crate::Engine::create_realm`]: an index
+/// valid on the engine that issued it, for that engine's lifetime (see the
+/// [module docs](crate::value#lifetimes)).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct RealmId(pub u32);
 
@@ -98,6 +148,18 @@ impl Drop for HandleInner {
 }
 
 /// A persistent, reference-counted root to a heap value.
+///
+/// While any clone exists the value stays alive; dropping the last clone
+/// releases the root at the next call into the engine. A handle outlives
+/// its engine safely and is an error, not a crash, anywhere else. The full
+/// contract is in the [module docs](crate::value#lifetimes).
+///
+/// Handles are tied to their engine's thread:
+///
+/// ```compile_fail
+/// fn needs_send<T: Send>() {}
+/// needs_send::<agnijs_engine_api::Handle>();
+/// ```
 #[derive(Clone)]
 pub struct Handle(Rc<HandleInner>);
 

@@ -2,7 +2,7 @@
 //!
 //! Every engine behind the interface (the AgniJS engine and the interim
 //! QuickJS-NG adapter) must pass these tests. An adapter crate instantiates
-//! them with [`conformance_tests!`], giving a factory that builds an engine
+//! them with `conformance_tests!`, giving a factory that builds an engine
 //! around a [`TestHost`]:
 //!
 //! ```ignore

@@ -204,7 +204,14 @@ pub trait Engine {
     fn stack_budget(&self) -> Option<usize> {
         None
     }
-    /// Run a full collection now.
+    /// Run a full collection now. It first reclaims the slots of dropped
+    /// handles ([`Engine::reclaim_handles`]), so every value that neither a
+    /// live handle nor JavaScript can reach is freed, and host objects among
+    /// them are queued for their class's finalizer, which runs at the next
+    /// [`Engine::run_jobs`]. Called from inside the engine (from a host
+    /// function or a hook, while JavaScript frames are live), it only
+    /// requests a collection, which runs at the engine's next safe point;
+    /// it never frees a value a running frame still uses.
     fn collect_garbage(&mut self);
 
     // ---- values -------------------------------------------------------
@@ -269,12 +276,16 @@ pub trait Engine {
     fn host_object_data(&mut self, value: &Value) -> Option<&mut dyn HostObject>;
     fn host_object_class(&mut self, value: &Value) -> Option<HostClassId>;
 
-    /// Release handles the host has dropped. Engines also do this at every
-    /// entry point; calling it explicitly is only needed before a
-    /// collection the host wants to be complete.
+    /// Free the slots of every handle the host has dropped since the last
+    /// reclaim, so the values they named are no longer rooted by them.
+    /// Engines also do this at every entry point that runs code and in
+    /// [`Engine::collect_garbage`]; calling it explicitly is only needed to
+    /// make [`Engine::live_handles`] exact. It never frees a slot a live
+    /// handle still names. See the [lifetime contract](crate::value#lifetimes).
     fn reclaim_handles(&mut self);
 
-    /// Number of live handles (for leak tests).
+    /// Number of handle slots not yet reclaimed (for leak tests). A dropped
+    /// handle counts until the next reclaim.
     fn live_handles(&self) -> usize;
 
     /// Whether a panic has unwound out of this engine. Nothing in the
