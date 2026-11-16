@@ -305,6 +305,11 @@ pub fn temporal(data: &[u8]) {
             attempt(() => Temporal.PlainDate.from(rel).add(d, { overflow: mode }).until(rel, { largestUnit: unit, roundingMode: mode, roundingIncrement: n }).toString());
             attempt(() => Temporal.PlainDate.from(rel).since({ year: n, month: n, day: n }, { smallestUnit: unit }).toString());
             attempt(() => Temporal.Duration.from(d).total({ unit, relativeTo: Temporal.PlainDate.from(rel) }));
+            attempt(() => Temporal.PlainTime.from(rel, { overflow: mode }).toString({ smallestUnit: unit, fractionalSecondDigits: n, roundingMode: mode }));
+            attempt(() => new Temporal.PlainTime(n, n, n, n, n, n).toJSON());
+            attempt(() => Temporal.PlainTime.from({ [unit]: n, second: n }, { overflow: mode }).with({ [d]: n }).toString());
+            attempt(() => Temporal.PlainTime.from(rel).add(d).until(rel, { largestUnit: unit, smallestUnit: mode, roundingIncrement: n }).toString());
+            attempt(() => Temporal.PlainTime.from(rel).round({ smallestUnit: unit, roundingMode: mode, roundingIncrement: n }).toString());
             return "ok";
         })()"#,
     );

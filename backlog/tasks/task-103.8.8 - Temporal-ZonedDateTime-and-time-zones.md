@@ -5,7 +5,7 @@ status: To Do
 assignee:
   - '@claude'
 created_date: '2026-11-16T01:48:00Z'
-updated_date: '2026-11-16T03:35:00Z'
+updated_date: '2026-11-16T04:05:00Z'
 labels:
   - temporal
 dependencies: []
@@ -30,4 +30,6 @@ Exact time in an IANA or offset time zone, with disambiguation and offset option
 
 <!-- SECTION:NOTES:BEGIN -->
 Includes Temporal.PlainDate.prototype.toZonedDateTime, ToTemporalDate accepting a ZonedDateTime, Duration relativeTo property bags, and ZonedDateTime.prototype.toPlainDate (left out of 103.8.4).
+
+Includes ToTemporalTime accepting a ZonedDateTime (left out of 103.8.5).
 <!-- SECTION:NOTES:END -->

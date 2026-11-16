@@ -14,6 +14,7 @@ pub mod instant;
 pub mod now;
 pub mod options;
 pub mod plain_date;
+pub mod plain_time;
 
 use agnijs_engine_api::RealmId;
 use agnijs_js_temporal as seam;
@@ -28,6 +29,7 @@ pub enum TemporalData {
     Duration(seam::Duration),
     Instant(seam::Instant),
     PlainDate(seam::PlainDate),
+    PlainTime(seam::PlainTime),
 }
 
 /// The `TemporalData` of `v` when it is a Temporal object.
@@ -96,4 +98,5 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     duration::install(vm, temporal);
     instant::install(vm, temporal);
     plain_date::install(vm, temporal);
+    plain_time::install(vm, temporal);
 }

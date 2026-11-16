@@ -163,7 +163,7 @@ fn subtract(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 /// A unit that must be a time unit (ValidateTemporalUnitValue with the
 /// time group): a `RangeError` for a calendar unit, and for `auto` unless
 /// it is allowed.
-fn require_time_unit(vm: &mut Vm, unit: Option<Unit>, name: &str, auto_allowed: bool) -> JsResult<()> {
+pub(super) fn require_time_unit(vm: &mut Vm, unit: Option<Unit>, name: &str, auto_allowed: bool) -> JsResult<()> {
     match unit {
         Some(Unit::Auto) if !auto_allowed => vm.range_error(&format!("{name} cannot be auto")),
         Some(u) if u != Unit::Auto && !u.is_time() => vm.range_error(&format!("{name} must be a time unit")),
@@ -171,9 +171,9 @@ fn require_time_unit(vm: &mut Vm, unit: Option<Unit>, name: &str, auto_allowed: 
     }
 }
 
-/// GetDifferenceSettings for an instant: the options in alphabetical
-/// order, then each validated against the time units.
-fn difference_settings(vm: &mut Vm, options: Value) -> JsResult<RoundingOptions> {
+/// GetDifferenceSettings for the time units (an instant or a plain
+/// time): the options in alphabetical order, then each validated.
+pub(super) fn time_difference_settings(vm: &mut Vm, options: Value) -> JsResult<RoundingOptions> {
     let bag = get_options_object(vm, options)?;
     let settings = RoundingOptions {
         largest_unit: get_unit(vm, bag, "largestUnit")?,
@@ -189,7 +189,7 @@ fn difference_settings(vm: &mut Vm, options: Value) -> JsResult<RoundingOptions>
 fn until(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let i = this_instant(vm, a.this, "until")?;
     let other = to_temporal_instant(vm, a.arg(0))?;
-    let settings = difference_settings(vm, a.arg(1))?;
+    let settings = time_difference_settings(vm, a.arg(1))?;
     let d = i.until(&other, settings).or_throw(vm)?;
     wrap_duration(vm, d)
 }
@@ -197,17 +197,18 @@ fn until(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
 fn since(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let i = this_instant(vm, a.this, "since")?;
     let other = to_temporal_instant(vm, a.arg(0))?;
-    let settings = difference_settings(vm, a.arg(1))?;
+    let settings = time_difference_settings(vm, a.arg(1))?;
     let d = i.since(&other, settings).or_throw(vm)?;
     wrap_duration(vm, d)
 }
 
-fn round(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
-    let i = this_instant(vm, a.this, "round")?;
-    let round_to = a.arg(0);
+/// The `roundTo` argument of an instant's or a plain time's `round`: a
+/// smallest unit, or a bag read in alphabetical order; the smallest unit
+/// is required and must be a time unit.
+pub(super) fn read_round_to(vm: &mut Vm, round_to: Value, method: &str) -> JsResult<RoundingOptions> {
     let mut options = RoundingOptions::default();
     match round_to {
-        Value::Undefined => return vm.type_error("Temporal.Instant.prototype.round requires options"),
+        Value::Undefined => return vm.type_error(&format!("{method} requires options")),
         Value::String(_) => options.smallest_unit = Some(unit_from_string(vm, round_to, "smallestUnit")?),
         _ => {
             let bag = get_options_object(vm, round_to)?;
@@ -220,6 +221,12 @@ fn round(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.range_error("smallestUnit is required");
     }
     require_time_unit(vm, options.smallest_unit, "smallestUnit", false)?;
+    Ok(options)
+}
+
+fn round(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
+    let i = this_instant(vm, a.this, "round")?;
+    let options = read_round_to(vm, a.arg(0), "Temporal.Instant.prototype.round")?;
     let r = i.round(options).or_throw(vm)?;
     wrap_instant(vm, r)
 }

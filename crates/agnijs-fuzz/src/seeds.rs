@@ -70,6 +70,7 @@ pub const TEMPORAL: &[&str] = &[
     "-12:59\nminutes\nhalfTrunc\n+275760-09-13T00:00Z\n-8.64e15",
     "M02L\nmonths\nconstrain\n2024-02-29[u-ca=chinese]\n30",
     "hebrew\neraYear\nreject\n2024-01-31[u-ca=japanese]\n5784",
+    "nanosecond\nhour\nreject\nT23:59:59.999999999\n24",
     "\n\n\n\n",
 ];
 

@@ -28,12 +28,14 @@ mod duration;
 mod instant;
 mod options;
 mod plain_date;
+mod plain_time;
 
 pub use calendar::{Calendar, DateFields, MonthCode};
 pub use duration::{Duration, DurationFields, RelativeTo};
 pub use instant::{Instant, TimeZone};
 pub use options::{Overflow, Precision, RoundingMode, RoundingOptions, ShowCalendar, ToStringOptions, Unit};
 pub use plain_date::PlainDate;
+pub use plain_time::{PlainTime, TimeFields};
 
 /// What kind of JavaScript error a failed operation throws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

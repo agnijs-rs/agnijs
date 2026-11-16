@@ -342,3 +342,63 @@ fn plain_date_errors_have_the_specified_types() {
         "calendar,day,month,monthCode,year",
     );
 }
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_times_construct_read_round_and_print() {
+    check("new Temporal.PlainTime(13, 5, 9, 1, 2, 3).toString()", "13:05:09.001002003");
+    check("new Temporal.PlainTime().toString()", "00:00:00");
+    check("Temporal.PlainTime.from({ hour: 25, minute: -1 }).toString()", "23:00:00");
+    check("Temporal.PlainTime.from('2024-01-31T10:20:30.5[u-ca=gregory]').toString()", "10:20:30.5");
+    check(
+        "var t = Temporal.PlainTime.from('12:34:56.789012345'); [t.hour, t.minute, t.second, t.millisecond, t.microsecond, t.nanosecond].join()",
+        "12,34,56,789,12,345",
+    );
+    check("Temporal.PlainTime.from('12:34:56.789').toString({ smallestUnit: 'minute' })", "12:34");
+    check("Temporal.PlainTime.from('12:34:56.789').toString({ fractionalSecondDigits: 1 })", "12:34:56.7");
+    check("Temporal.PlainTime.from('12:34:56.789').round('second').toString()", "12:34:57");
+    check("Temporal.PlainTime.from('12:34').round({ smallestUnit: 'minute', roundingIncrement: 15 }).toString()", "12:30:00");
+    check("JSON.stringify(Temporal.PlainTime.from('09:00'))", "\"09:00:00\"");
+    check("Object.prototype.toString.call(new Temporal.PlainTime())", "[object Temporal.PlainTime]");
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_time_arithmetic_differences_and_with() {
+    check("Temporal.PlainTime.from('23:30').add({ minutes: 45 }).toString()", "00:15:00");
+    check("Temporal.PlainTime.from('00:15').subtract('PT45M').toString()", "23:30:00");
+    check("Temporal.PlainTime.from('10:00').until('23:30').toString()", "PT13H30M");
+    check("Temporal.PlainTime.from('23:30').since('10:00', { largestUnit: 'minutes' }).toString()", "PT810M");
+    check("Temporal.PlainTime.from('10:00').with({ minute: 61 }).toString()", "10:59:00");
+    check("Temporal.PlainTime.compare('10:00', { hour: 9 }) + ''", "1");
+    check("Temporal.PlainTime.from('10:00').equals('10:00:00.000') + ''", "true");
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_time_errors_have_the_specified_types() {
+    let kind = |src: &str| format!("try {{ {src}; 'no error' }} catch (e) {{ e.constructor.name }}");
+    check(&kind("Temporal.PlainTime()"), "TypeError");
+    check(&kind("new Temporal.PlainTime(24)"), "RangeError");
+    check(&kind("new Temporal.PlainTime(-1)"), "RangeError");
+    check(&kind("new Temporal.PlainTime(Infinity)"), "RangeError");
+    check(&kind("Temporal.PlainTime.from({})"), "TypeError");
+    check(&kind("Temporal.PlainTime.from({ hour: 24 }, { overflow: 'reject' })"), "RangeError");
+    check(&kind("Temporal.PlainTime.from('12:00Z')"), "RangeError");
+    check(&kind("Temporal.PlainTime.from(1200)"), "TypeError");
+    check(&kind("Temporal.PlainTime.from('12:00').with({ hour: 1, timeZone: 'UTC' })"), "TypeError");
+    check(&kind("Temporal.PlainTime.from('12:00').until('13:00', { largestUnit: 'days' })"), "RangeError");
+    check(&kind("Temporal.PlainTime.from('12:00').round()"), "TypeError");
+    check(&kind("Temporal.PlainTime.from('12:00').round({ smallestUnit: 'hour', roundingIncrement: 5 })"), "RangeError");
+    check(&kind("Temporal.PlainTime.from('12:00').toString({ smallestUnit: 'hour' })"), "RangeError");
+    check(&kind("Temporal.PlainTime.from('12:00').valueOf()"), "TypeError");
+    // An empty bag is a TypeError before the options are read.
+    check(
+        "var log = []; try { Temporal.PlainTime.from({}, { get overflow() { log.push('overflow'); } }) } catch (e) { log.push(e.constructor.name) } log.join()",
+        "TypeError",
+    );
+    check(
+        "var log = []; var bag = new Proxy({ hour: 1 }, { get(t, k) { log.push(String(k)); return t[k]; } }); Temporal.PlainTime.from(bag); log.join()",
+        "hour,microsecond,millisecond,minute,nanosecond,second",
+    );
+}
