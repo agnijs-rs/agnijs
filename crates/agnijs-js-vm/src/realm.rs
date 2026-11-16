@@ -165,6 +165,25 @@ intrinsics! {
     DisposableStackPrototype,
     AsyncDisposableStack,
     AsyncDisposableStackPrototype,
+    // Temporal (the `temporal` feature; left at %Object.prototype% without it).
+    Temporal,
+    TemporalNow,
+    TemporalDuration,
+    TemporalDurationPrototype,
+    TemporalInstant,
+    TemporalInstantPrototype,
+    TemporalPlainDate,
+    TemporalPlainDatePrototype,
+    TemporalPlainTime,
+    TemporalPlainTimePrototype,
+    TemporalPlainDateTime,
+    TemporalPlainDateTimePrototype,
+    TemporalPlainYearMonth,
+    TemporalPlainYearMonthPrototype,
+    TemporalPlainMonthDay,
+    TemporalPlainMonthDayPrototype,
+    TemporalZonedDateTime,
+    TemporalZonedDateTimePrototype,
 }
 
 /// A global lexical binding (`let`, `const`, `class` at script top level).

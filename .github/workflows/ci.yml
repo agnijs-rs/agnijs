@@ -69,6 +69,8 @@ jobs:
           AGNIJS_TEST_SNAPSHOT: "1"
       - name: test262 intl402 against the AgniJS intl402 baseline (reported separately)
         run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-intl402
+      - name: test262 Temporal against the AgniJS Temporal baseline (reported separately, TASK-103.8)
+        run: cargo run --release -p agnijs-js-test262 --bin test262 -- run --engine agnijs --only-temporal
 
   jit:
     # The baseline JIT (ADR 0020, TASK-101.3.2) with every block compiled on

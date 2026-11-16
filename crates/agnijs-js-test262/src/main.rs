@@ -10,7 +10,7 @@ use agnijs_engine_api::{
 use agnijs_js_test262::exclusions::Exclusions;
 use agnijs_js_test262::features::{parse_name_list, FeatureCut, FeatureList};
 use agnijs_js_test262::runner::Mode;
-use agnijs_js_test262::suite::{self, Baseline, RunOptions, Selection};
+use agnijs_js_test262::suite::{self, Baseline, FeatureScope, RunOptions, Selection};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::rc::Rc;
@@ -73,6 +73,12 @@ enum Cmd {
         /// `<crate>/baselines/<engine>-intl402.json`.
         #[arg(long)]
         only_intl402: bool,
+        /// Run only the Temporal tests (`test/built-ins/Temporal`,
+        /// `test/intl402/Temporal` and every test tagged `Temporal` or
+        /// `canonical-tz`), those features admitted, compared with (or written
+        /// to) `<crate>/baselines/<engine>-temporal.json` (TASK-103.8).
+        #[arg(long)]
+        only_temporal: bool,
         /// Print every failure message.
         #[arg(long)]
         verbose: bool,
@@ -196,6 +202,7 @@ fn main() -> Result<()> {
             output,
             include_intl402,
             only_intl402,
+            only_temporal,
             verbose,
             precompile,
             snapshot,
@@ -214,6 +221,7 @@ fn main() -> Result<()> {
             output,
             include_intl402,
             only_intl402,
+            only_temporal,
             verbose,
             precompile,
             snapshot,
@@ -276,6 +284,7 @@ struct RunArgs {
     output: Option<PathBuf>,
     include_intl402: bool,
     only_intl402: bool,
+    only_temporal: bool,
     verbose: bool,
     precompile: bool,
     snapshot: bool,
@@ -349,6 +358,15 @@ fn run(args: RunArgs) -> Result<()> {
         crate_dir().join("post-es2025-features.txt"),
     )?);
     let mut cut = FeatureCut::new(&features, &post);
+    if args.only_intl402 && args.only_temporal {
+        bail!("--only-intl402 and --only-temporal select different suites; pick one");
+    }
+    let temporal = FeatureScope::temporal();
+    if args.only_temporal {
+        for f in &temporal.features {
+            cut.allow(f);
+        }
+    }
     for f in &args.allow_features {
         cut.allow(f);
     }
@@ -381,7 +399,8 @@ fn run(args: RunArgs) -> Result<()> {
         cut: &cut,
         exclusions: &exclusions,
         filters,
-        include_intl402: args.include_intl402 || args.only_intl402,
+        include_intl402: args.include_intl402 || args.only_intl402 || args.only_temporal,
+        only: args.only_temporal.then_some(&temporal),
     };
     let (cases, skipped) = suite::discover(root, &sel)?;
     let harness = suite::load_harness(root)?;
@@ -451,7 +470,13 @@ fn run(args: RunArgs) -> Result<()> {
     let baseline_path = args
         .baseline
         .unwrap_or_else(|| {
-            let suffix = if args.only_intl402 { "-intl402" } else { "" };
+            let suffix = if args.only_intl402 {
+                "-intl402"
+            } else if args.only_temporal {
+                "-temporal"
+            } else {
+                ""
+            };
             crate_dir().join(format!("baselines/{}{}.json", args.engine, suffix))
         });
     if args.update_baseline {
@@ -560,6 +585,9 @@ impl Host for MatcherHost {
     }
     fn now_ms(&self) -> f64 {
         self.inner.now_ms()
+    }
+    fn now_ns(&self) -> i128 {
+        self.inner.now_ns()
     }
     fn time_zone_offset_ms(&self, epoch_ms: f64, is_utc: bool) -> f64 {
         self.inner.time_zone_offset_ms(epoch_ms, is_utc)

@@ -8,6 +8,7 @@ members = [
     "crates/agnijs-js-vm",
     "crates/agnijs-js-regex",
     "crates/agnijs-js-intl",
+    "crates/agnijs-js-temporal",
     "crates/agnijs-js-debugger",
     "crates/agnijs-js-cdp",
     "crates/agnijs-js-test262",
@@ -43,6 +44,8 @@ agnijs-js-vm = { path = "crates/agnijs-js-vm", default-features = false }
 # linear-time matcher is compiled in.
 agnijs-js-regex = { path = "crates/agnijs-js-regex", default-features = false }
 agnijs-js-intl = { path = "crates/agnijs-js-intl" }
+# Temporal on temporal_rs: optional, behind agnijs-js-vm's `temporal` feature (ADR 0027).
+agnijs-js-temporal = { path = "crates/agnijs-js-temporal" }
 agnijs-js-debugger = { path = "crates/agnijs-js-debugger" }
 agnijs-js-cdp = { path = "crates/agnijs-js-cdp" }
 agnijs = { path = "crates/agnijs" }

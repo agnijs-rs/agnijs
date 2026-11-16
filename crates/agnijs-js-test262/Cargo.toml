@@ -8,12 +8,15 @@ repository.workspace = true
 description = "agnijs-js-test262"
 
 [features]
-default = ["intl", "linear-regex"]
+default = ["intl", "linear-regex", "temporal"]
 # The engine's ECMA-402. Without it (`--no-default-features --features
 # linear-regex`) the main suite runs against the same baseline; intl402
 # needs it (docs/binary-size.md).
 intl = ["agnijs-js-vm/intl"]
 linear-regex = ["agnijs-js-vm/linear-regex"]
+# Temporal (ADR 0027), measured by `run --only-temporal`. Its tests stay
+# outside the main suite until TASK-103.8 folds them in.
+temporal = ["agnijs-js-vm/temporal"]
 # Build the engine with the baseline JIT; AGNIJS_JIT picks when it runs.
 jit = ["agnijs-js-vm/jit"]
 

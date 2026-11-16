@@ -29,6 +29,8 @@ pub mod reflect;
 pub mod regexp;
 pub mod string;
 pub mod symbol;
+#[cfg(feature = "temporal")]
+pub mod temporal;
 pub mod typedarray;
 pub mod typedarray_ctor;
 
@@ -69,6 +71,8 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     disposable::install(vm, realm);
     #[cfg(feature = "intl")]
     intl::install(vm, realm);
+    #[cfg(feature = "temporal")]
+    temporal::install(vm, realm);
     global::install(vm, realm);
 }
 

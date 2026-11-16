@@ -145,6 +145,30 @@ pub struct Selection<'a> {
     /// the default set: built-ins, language, annexB, harness.
     pub filters: Vec<String>,
     pub include_intl402: bool,
+    /// When set, only tests in this feature's territory run (`--only-temporal`).
+    pub only: Option<&'a FeatureScope>,
+}
+
+/// The tests of one feature wherever they live: those under its own
+/// directories and those that list one of its feature tags.
+pub struct FeatureScope {
+    pub features: Vec<String>,
+    pub dirs: Vec<String>,
+}
+
+impl FeatureScope {
+    /// Temporal: `test/built-ins/Temporal`, `test/intl402/Temporal` and every
+    /// test tagged `Temporal` or `canonical-tz` (TASK-103.8).
+    pub fn temporal() -> FeatureScope {
+        FeatureScope {
+            features: vec!["Temporal".to_string(), "canonical-tz".to_string()],
+            dirs: vec!["test/built-ins/Temporal/".to_string(), "test/intl402/Temporal/".to_string()],
+        }
+    }
+
+    pub fn contains(&self, rel: &str, features: &[String]) -> bool {
+        self.dirs.iter().any(|d| rel.starts_with(d.as_str())) || features.iter().any(|f| self.features.contains(f))
+    }
 }
 
 pub fn default_dirs(include_intl402: bool) -> Vec<&'static str> {
@@ -214,6 +238,9 @@ pub fn discover(root: &Path, sel: &Selection) -> Result<(Vec<TestCase>, BTreeMap
         let source =
             std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         let meta = metadata::parse(&source).map_err(|e| anyhow::anyhow!("{rel}: {e}"))?;
+        if sel.only.is_some_and(|only| !only.contains(&rel, &meta.features)) {
+            continue;
+        }
         if let Some(reason) = sel.exclusions.reason_for(&rel, &meta) {
             skipped.insert(rel, Skip::Excluded(reason.to_string()));
             continue;
@@ -347,6 +374,19 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    #[test]
+    fn the_temporal_scope_takes_its_directories_and_tagged_tests_elsewhere() {
+        let t = FeatureScope::temporal();
+        let none: Vec<String> = Vec::new();
+        let tagged = vec!["BigInt".to_string(), "Temporal".to_string()];
+        assert!(t.contains("test/built-ins/Temporal/Duration/from/argument-string.js", &none));
+        assert!(t.contains("test/intl402/Temporal/PlainDate/prototype/era/basic.js", &none));
+        assert!(t.contains("test/built-ins/Date/prototype/toTemporalInstant/basic.js", &tagged));
+        assert!(t.contains("test/intl402/DateTimeFormat/x.js", &["canonical-tz".to_string()]));
+        assert!(!t.contains("test/built-ins/Date/prototype/getDay/name.js", &none));
+        assert!(!t.contains("test/built-ins/TemporalX/a.js", &none));
     }
 
     #[test]

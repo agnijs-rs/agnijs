@@ -10,6 +10,7 @@ From Rust, implement these `Host` methods with fixed values:
 | --- | --- | --- |
 | `Math.random` | `random_seed` (read once, at the first draw; `Engine::set_random_seed` reseeds) | the clock |
 | `Date.now()`, `new Date()` | `now_ms` | the system clock |
+| `Temporal.Now` (the `temporal` feature) | `now_ns`, `default_time_zone` | `now_ms` scaled, so pinning `now_ms` pins it too; `UTC` |
 | The local time zone (`Date` local time, `toString`) | `time_zone_offset_ms`, `time_zone_name` | UTC |
 | The `Intl` default locale and time zone | `default_locale`, `default_time_zone` | `en-US`, `UTC` |
 | Time limits | use fuel (`Engine::set_fuel`), not `interrupt` | no limit |

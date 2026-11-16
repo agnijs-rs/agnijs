@@ -19,7 +19,7 @@ path = "src/main.rs"
 agnijs-engine-api.workspace = true
 agnijs-js-parser.workspace = true
 agnijs-js-compiler.workspace = true
-agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl"] }
+agnijs-js-vm = { workspace = true, features = ["linear-regex", "intl", "temporal"] }
 agnijs-js-regex = { workspace = true, features = ["linear"] }
 agnijs-js-debugger.workspace = true
 agnijs-js-cdp.workspace = true

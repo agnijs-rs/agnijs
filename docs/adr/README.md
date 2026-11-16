@@ -24,3 +24,4 @@ Crate names in these records use the current `agnijs-*` names; where a record sa
 - [24. Error stacks capture code and instruction index at creation, format on first read in the V8 format, and map through host-supplied source maps](0024-error-stacks-capture-code-and-pc-at-creation-and-format-lazily.md)
 - [25. JSON is the engine's only module type, import maps live beside the Node resolver, and decorators and ShadowRealm wait at Stage 2.7](0025-json-is-the-only-module-type-import-maps-live-beside-the-node-resolver-and-stage-2-7-proposals-wait.md)
 - [26. The `agnijs` crate is the public embedding surface; the engine interface is its full layer and implementor items stay outside it](0026-the-agnijs-crate-is-the-public-embedding-surface-over-the-engine-interface.md)
+- [27. Temporal adopts temporal_rs behind the agnijs-js-temporal seam, with the IANA data Intl already links](0027-temporal-adopts-temporal-rs-behind-the-agnijs-js-temporal-seam.md)

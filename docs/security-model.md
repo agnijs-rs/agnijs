@@ -42,6 +42,7 @@ The engine has no event loop, clock, module file system or time zone of its own.
 | --- | --- | --- |
 | `console.*` output | `Host::console` | discarded |
 | `Date.now()`, `new Date()` | `Host::now_ms` | the system clock, whole milliseconds |
+| `Temporal.Now` (the `temporal` feature) | `Host::now_ns`, `default_time_zone` | `now_ms` scaled to nanoseconds, so whole milliseconds; UTC |
 | `Math.random` | `Host::random_seed` | the clock mixed with a per-process counter |
 | Local time zone, default locale and zone | `Host::time_zone_offset_ms`, `time_zone_name`, `default_locale`, `default_time_zone` | UTC, `en-US` |
 | `import`, `import()` | `Host::resolve_module`, `Host::load_module` | every load fails: `module not found` |

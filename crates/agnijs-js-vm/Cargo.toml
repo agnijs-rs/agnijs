@@ -15,6 +15,10 @@ default = ["linear-regex", "intl"]
 # toLocale{Upper,Lower}Case) take their plain ECMA-262 behaviour. See
 # docs/binary-size.md for what it saves.
 intl = ["dep:agnijs-js-intl"]
+# Temporal on temporal_rs (agnijs-js-temporal, ADR 0027). Off by default
+# while the built-ins are completed (TASK-103.8); with it the realm has a
+# `Temporal` global. Needs Rust 1.86.
+temporal = ["dep:agnijs-js-temporal"]
 # The linear-time regular-expression matcher (ADR 0013 addendum). Without
 # it every pattern backtracks, whatever Host::regex_matcher says.
 linear-regex = ["agnijs-js-regex/linear"]
@@ -36,6 +40,7 @@ agnijs-js-parser.workspace = true
 agnijs-js-compiler.workspace = true
 agnijs-js-regex.workspace = true
 agnijs-js-intl = { workspace = true, optional = true }
+agnijs-js-temporal = { workspace = true, optional = true }
 agnijs-js-debugger.workspace = true
 agnijs-js-jit = { workspace = true, optional = true }
 hashbrown = "0.14"

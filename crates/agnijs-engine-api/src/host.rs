@@ -180,6 +180,16 @@ pub trait Host {
         }
     }
 
+    /// The clock behind `Temporal.Now`: nanoseconds since the Unix epoch.
+    /// The default is `now_ms` scaled, so a host that pins `now_ms` pins
+    /// Temporal too; a host with a finer clock may return it here. A
+    /// value outside Temporal's range (about ±2.7 × 10^5 years) makes
+    /// `Temporal.Now` throw a `RangeError`.
+    fn now_ns(&self) -> i128 {
+        // `as` saturates and maps NaN to 0, so no clock value can panic.
+        (self.now_ms() as i128).saturating_mul(1_000_000)
+    }
+
     /// The seed behind `Math.random`, read once per engine, at its first
     /// draw. The default mixes in the system clock, so sequences differ
     /// between runs; a host that needs reproducible runs (tests, replay,

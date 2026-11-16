@@ -1,0 +1,18 @@
+[package]
+name = "agnijs-js-temporal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# temporal_rs 0.2 needs Rust 1.86; the workspace stays at 1.85 and only
+# builds with the engine's `temporal` feature need this crate (ADR 0027).
+rust-version = "1.86"
+repository.workspace = true
+description = "The temporal_rs seam for the AgniJS JavaScript engine: Temporal date, time, calendar and time zone arithmetic behind an engine-independent API"
+
+[dependencies]
+# No default features: `sys` would read the system clock and time zone,
+# which the engine takes only from its host (ADR 0014, ADR 0027).
+# `compiled_data` is the ICU4X calendar data and the IANA tz database
+# compiled in through jiff-tzdb, the data agnijs-js-intl already links.
+temporal_rs = { version = "0.2.6", default-features = false, features = ["compiled_data"] }
+timezone_provider = { version = "0.2.6", default-features = false, features = ["tzif"] }

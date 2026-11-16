@@ -119,6 +119,7 @@ fn build_registry() -> Registry {
     fp.str(crate::engine::FORMAT);
     fp.str(env!("CARGO_PKG_VERSION"));
     fp.u64(cfg!(feature = "intl") as u64);
+    fp.u64(cfg!(feature = "temporal") as u64);
     let mut entries: Vec<NativeEntry> = Vec::new();
     let ids: Vec<u32> = vm.heap.objects.iter().map(|(i, _)| i).collect();
     for i in ids {
