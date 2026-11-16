@@ -3,11 +3,11 @@ id: TASK-111
 title: >-
   Embedding surface owner decisions: non_exhaustive hook enums, sealed Engine,
   tagged RealmId, MSRV CI, stability and security docs
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-16T14:39:00Z'
-updated_date: '2026-11-16T16:09:00Z'
+updated_date: '2026-11-16T18:09:00Z'
 labels:
   - api
   - docs
@@ -26,8 +26,8 @@ Apply the owner's decisions on the open items from TASK-104 and TASK-103.18 (doc
 - [x] #1 Hook enums are #[non_exhaustive] and every in-repo match compiles; the C API maps every variant without panicking
 - [x] #2 Engine is sealed; VM, QuickJS-NG adapter and CLI wrapper implement the seal
 - [x] #3 A RealmId from another engine is Error::UnknownRealm on every engine (tested)
-- [ ] #4 CI has an MSRV job building the workspace default features with the declared rust-version (1.88: the declared 1.85 no longer built, see notes); docs/stability.md states the MSRV rule
-- [ ] #5 Workspace version is 0.3.0 with CHANGELOG, README and stability docs updated; semver CI passes
+- [x] #4 CI has an MSRV job building the workspace default features with the declared rust-version (1.88: the declared 1.85 no longer built, see notes); docs/stability.md states the MSRV rule
+- [x] #5 Workspace version is 0.3.0 with CHANGELOG, README and stability docs updated; semver CI passes
 - [x] #6 docs/stability.md records decisions 5-7 and has no answered open items; SECURITY.md has no email and no response-time numbers
 <!-- AC:END -->
 
@@ -51,4 +51,12 @@ Gable: native/engine-harness/src/host.rs:91 matches RejectionEvent exhaustively 
 SECURITY.md: the 90-day embargo was dropped along with the response times, because it reads like a fix-time promise. It is replaced by 'keep it private until the fix is public or a date is agreed'. The owner must enable private vulnerability reporting in the GitHub repository settings.
 
 Verified locally before the push. cargo test --workspace passes. test262 shows 0 regressions in default, --precompile, --snapshot, --only-intl402 and QuickJS-NG. The capi fault-injection and release fuzz tests pass. The cbindgen header is unchanged. Clippy -D warnings on capi with fault-injection is clean, and on the touched crates the lint set equals origin/main's. agnijs-fuzz all --seed 1 passes. The jit feature checks. cargo +1.88 check of the msrv job's set is clean, and 1.87 is refused. cargo semver-checks against origin/main passes at 0.3.0. Benchmark (JIT off, 4 interleaved rounds against origin/main f1722ee, median per workload): geomean new/base 1.0093. The as_chunks rewrites first gave 1.0136 (regex-long-input +15%); with them reverted, regex-long-input matches base. snapshot-startup and bundle-snapshot looked 6% slower but match base at 40 iterations (noise).
+
+CI run 43904391949 on 2389e86: all 27 jobs green, including the new msrv job (Linux build at 1.88) and semver.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Applied the owner's decisions from TASK-104/TASK-103.18. Commit 524c7f2 (breaking, 0.3.0) made the five hook enums non_exhaustive, sealed Engine with a hidden supertrait, and tagged RealmId with its EngineId, so another engine's realm id is UnknownRealm on the VM and on QuickJS-NG (tested in the conformance kit and lifetimes.rs). The C API maps every variant and its ABI is unchanged. The MSRV is 1.88, the real minimum: the declared 1.85 no longer built because of ICU4X. The CLI declares 1.95 and the JIT 1.97. A new msrv CI job covers it. Also added CHANGELOG.md, an ADR 0026 addendum and updates to the stability docs and embedding guide. Commit 2389e86 (docs): bytecode stays a same-build cache, with no cross-release snapshot promise before 1.0; from the first release the CLI promises its exit codes and core flags; a C ABI comparison job comes once a release exists; SECURITY.md uses GitHub private vulnerability reporting only, with an as-is statement in place of response times. Verified locally: tests, test262 (5 modes, 0 regressions), C API checks, clippy, fuzz, semver-checks, benchmark geomean +0.93%. CI 43904391949 is green. Follow-ups: the owner enables private vulnerability reporting on GitHub; Gable's harness needs a RejectionEvent wildcard arm when it moves its pin.
+<!-- SECTION:FINAL_SUMMARY:END -->
