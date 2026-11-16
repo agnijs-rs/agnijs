@@ -201,9 +201,9 @@ fn main() -> Result<(), Error> {
 
 ### TypeScript modules
 
-The engine runs JavaScript only. To load TypeScript, transpile it in `load_module` with the optional `agnijs-js-typescript` crate and return the JavaScript with its source map; the engine then reports TypeScript positions in `Error.stack`, `Exception::stack`, CallSite objects and the debugger. [`examples/embed-typescript`](../examples/embed-typescript/src/main.rs) is the complete program:
+The engine runs JavaScript only. To load TypeScript, transpile it in `load_module` with the optional `agnijs-js-typescript` crate and return the JavaScript with its source map; the engine then reports TypeScript positions in `Error.stack`, `Exception::stack`, CallSite objects and the debugger. [`examples/embed-typescript`](../examples/embed-typescript/src/main.rs) is the complete program, compiled and run by its test; this is its `Host::load_module` (the `agnijs` crate does not depend on the TypeScript crate, so the block is not a doctest):
 
-```rust
+```rust,ignore
 use agnijs_js_typescript::{transpile, Options};
 
 fn load_module(&self, resolved: &str) -> Result<ModuleSource, String> {
