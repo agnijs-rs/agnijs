@@ -4,7 +4,7 @@
 //! observes the specification's order; a method reads its options in the
 //! order its algorithm lists them (alphabetical, as a rule).
 
-use agnijs_js_temporal::{Precision, RoundingMode, Unit};
+use agnijs_js_temporal::{Overflow, Precision, RoundingMode, ShowCalendar, Unit};
 
 use crate::value::{ObjId, Value};
 use crate::vm::{JsResult, Vm};
@@ -56,6 +56,16 @@ pub fn get_unit(vm: &mut Vm, options: Option<ObjId>, name: &str) -> JsResult<Opt
 /// GetRoundingModeOption, without its default.
 pub fn get_rounding_mode(vm: &mut Vm, options: Option<ObjId>) -> JsResult<Option<RoundingMode>> {
     get_string_option(vm, options, "roundingMode", RoundingMode::parse)
+}
+
+/// GetTemporalOverflowOption: `constrain` when undefined.
+pub fn get_overflow(vm: &mut Vm, options: Option<ObjId>) -> JsResult<Overflow> {
+    Ok(get_string_option(vm, options, "overflow", Overflow::parse)?.unwrap_or_default())
+}
+
+/// GetTemporalShowCalendarNameOption: `auto` when undefined.
+pub fn get_show_calendar(vm: &mut Vm, options: Option<ObjId>) -> JsResult<ShowCalendar> {
+    Ok(get_string_option(vm, options, "calendarName", ShowCalendar::parse)?.unwrap_or_default())
 }
 
 /// GetRoundingIncrementOption: `None` when undefined, else

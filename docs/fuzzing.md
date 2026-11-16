@@ -23,7 +23,7 @@ Every engine the targets create has a fuel budget, an interrupt that fires after
 | `eval` | JavaScript | The engine interface: scripts, or modules (input starting `//@module`) with static and dynamic imports, top-level await and the job queue |
 | `json` | JSON text | `JSON.parse` and `JSON.stringify`; `stringify(parse(x))` must be a fixed point |
 | `intl` | Lines: locale, two options, text | The `Intl` constructors and locale-sensitive methods with fuzzed locales and options |
-| `temporal` | Lines: a duration or time zone, a unit, a rounding mode, `relativeTo` or an instant, a number | `Temporal` parsing, construction, rounding, differences, totals and printing with fuzzed strings and options |
+| `temporal` | Lines: a duration, time zone, month code or calendar; a unit or field name; a rounding mode or overflow; `relativeTo`, an instant or a date; a number | `Temporal` parsing, construction, property bags in any calendar, rounding, differences, totals and printing with fuzzed strings and options |
 | `regex` | Lines: flags, pattern, subject | Regex syntax and matching under all three matcher policies, which must agree; compiled programs must reload |
 | `regex-program` | Bytes | The verifier of compiled regex programs, which bytecode carries |
 | `bytecode` | Bytes | The bytecode loader past the checksum (the input is resealed), then running whatever loads |

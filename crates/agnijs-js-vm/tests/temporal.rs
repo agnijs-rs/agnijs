@@ -273,3 +273,72 @@ fn now_reads_only_the_host_clock_and_zone() {
     check("Object.prototype.toString.call(Temporal.Now)", "[object Temporal.Now]");
     check("typeof Temporal.Now.instant", "function");
 }
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_dates_construct_read_and_print() {
+    check("new Temporal.PlainDate(2024, 2, 29).toString()", "2024-02-29");
+    check("Temporal.PlainDate.from({ year: 2023, month: 2, day: 31 }).toString()", "2023-02-28");
+    check("Temporal.PlainDate.from({ year: 2023, monthCode: 'M03', day: 5 }).toString()", "2023-03-05");
+    check("Temporal.PlainDate.from('2024-01-31T10:00[u-ca=gregory]').toString()", "2024-01-31[u-ca=gregory]");
+    check("new Temporal.PlainDate(2024, 1, 31, 'Japanese').calendarId", "japanese");
+    check("var d = new Temporal.PlainDate(2024, 1, 31, 'japanese'); d.era + ' ' + d.eraYear", "reiwa 6");
+    check(
+        "var d = Temporal.PlainDate.from('2024-01-31'); [d.year, d.month, d.monthCode, d.day, d.dayOfWeek, d.dayOfYear, d.weekOfYear, d.yearOfWeek, d.daysInWeek, d.daysInMonth, d.daysInYear, d.monthsInYear, d.inLeapYear, d.era].join()",
+        "2024,1,M01,31,3,31,5,2024,7,31,366,12,true,",
+    );
+    check("Temporal.PlainDate.from('2024-01-31').toString({ calendarName: 'always' })", "2024-01-31[u-ca=iso8601]");
+    check("JSON.stringify(Temporal.PlainDate.from('2024-01-31'))", "\"2024-01-31\"");
+    check("Object.prototype.toString.call(Temporal.PlainDate.from('2024-01-31'))", "[object Temporal.PlainDate]");
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_date_arithmetic_differences_and_with() {
+    check("Temporal.PlainDate.from('2024-01-31').add({ months: 1 }).toString()", "2024-02-29");
+    check("Temporal.PlainDate.from('2024-03-31').subtract('P1M').toString()", "2024-02-29");
+    check("Temporal.PlainDate.from('2024-01-31').until('2024-03-15', { largestUnit: 'months' }).toString()", "P1M15D");
+    check("Temporal.PlainDate.from('2024-03-15').since('2024-01-31').toString()", "P44D");
+    check("Temporal.PlainDate.from('2024-01-31').with({ day: 1 }).toString()", "2024-01-01");
+    check("Temporal.PlainDate.from('2024-01-31').withCalendar('gregory').calendarId", "gregory");
+    check("Temporal.PlainDate.compare('2024-01-31', { year: 2024, month: 2, day: 1 }) + ''", "-1");
+    check("Temporal.PlainDate.from('2024-01-31').equals('2024-01-31') + ''", "true");
+    check("Temporal.PlainDate.from('2024-01-31').equals('2024-01-31[u-ca=gregory]') + ''", "false");
+    check(
+        "Temporal.Duration.from('P1M').total({ unit: 'day', relativeTo: Temporal.PlainDate.from('2024-02-01') }) + ''",
+        "29",
+    );
+}
+
+#[cfg(feature = "temporal")]
+#[test]
+fn plain_date_errors_have_the_specified_types() {
+    let kind = |src: &str| format!("try {{ {src}; 'no error' }} catch (e) {{ e.constructor.name }}");
+    check(&kind("Temporal.PlainDate(2024, 1, 1)"), "TypeError");
+    check(&kind("new Temporal.PlainDate(2023, 2, 29)"), "RangeError");
+    check(&kind("new Temporal.PlainDate(2024, 1, 1, 1)"), "TypeError");
+    check(&kind("new Temporal.PlainDate(2024, 1, 1, '2024-01-01')"), "RangeError");
+    check(&kind("new Temporal.PlainDate(Infinity, 1, 1)"), "RangeError");
+    check(&kind("new Temporal.PlainDate(-271821, 4, 18)"), "RangeError");
+    check(&kind("Temporal.PlainDate.from({ year: 2024, month: 1 })"), "TypeError");
+    check(&kind("Temporal.PlainDate.from({ year: 2024, month: 0, day: 1 })"), "RangeError");
+    check(&kind("Temporal.PlainDate.from({ year: 2024, monthCode: 'M1', day: 1 })"), "RangeError");
+    check(&kind("Temporal.PlainDate.from({ year: 2023, month: 2, day: 31 }, { overflow: 'reject' })"), "RangeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01T00:00Z')"), "RangeError");
+    check(&kind("Temporal.PlainDate.from(20240101)"), "TypeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01').with({})"), "TypeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01').with({ day: 1, calendar: 'iso8601' })"), "TypeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01').until('2024-01-02', { largestUnit: 'hours' })"), "RangeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01').until('2024-01-02[u-ca=gregory]')"), "RangeError");
+    check(&kind("Temporal.PlainDate.from('2024-01-01').valueOf()"), "TypeError");
+    // The missing-field TypeError comes after the overflow option is read.
+    check(
+        "var log = []; try { Temporal.PlainDate.from({ year: 2024 }, { get overflow() { log.push('overflow'); } }) } catch (e) { log.push(e.constructor.name) } log.join()",
+        "overflow,TypeError",
+    );
+    // Fields are read in alphabetical order, the calendar first.
+    check(
+        "var log = []; var bag = new Proxy({ year: 2024, month: 1, day: 1 }, { get(t, k) { log.push(String(k)); return t[k]; } }); Temporal.PlainDate.from(bag); log.join()",
+        "calendar,day,month,monthCode,year",
+    );
+}

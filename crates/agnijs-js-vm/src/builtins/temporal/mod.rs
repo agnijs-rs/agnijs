@@ -8,10 +8,12 @@
 //! has nothing to trace in it and a snapshot refuses it as it does Intl
 //! objects.
 
+pub mod calendar;
 pub mod duration;
 pub mod instant;
 pub mod now;
 pub mod options;
+pub mod plain_date;
 
 use agnijs_engine_api::RealmId;
 use agnijs_js_temporal as seam;
@@ -25,6 +27,7 @@ use crate::vm::{ErrorType, JsResult, Vm};
 pub enum TemporalData {
     Duration(seam::Duration),
     Instant(seam::Instant),
+    PlainDate(seam::PlainDate),
 }
 
 /// The `TemporalData` of `v` when it is a Temporal object.
@@ -92,4 +95,5 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     now::install(vm, temporal);
     duration::install(vm, temporal);
     instant::install(vm, temporal);
+    plain_date::install(vm, temporal);
 }

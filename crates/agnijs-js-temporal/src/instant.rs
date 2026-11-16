@@ -34,7 +34,7 @@ impl TimeZone {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Instant(pub(crate) temporal_rs::Instant);
 
-fn settings(o: RoundingOptions) -> Result<DifferenceSettings> {
+pub(crate) fn settings(o: RoundingOptions) -> Result<DifferenceSettings> {
     let rs = o.to_rs()?;
     let mut s = DifferenceSettings::default();
     s.largest_unit = rs.largest_unit;

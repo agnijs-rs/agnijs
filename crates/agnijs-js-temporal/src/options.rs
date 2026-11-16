@@ -139,6 +139,62 @@ impl RoundingOptions {
     }
 }
 
+/// The `overflow` option: what to do with a field outside its range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Overflow {
+    #[default]
+    Constrain,
+    Reject,
+}
+
+impl Overflow {
+    pub fn parse(s: &str) -> Option<Overflow> {
+        match s {
+            "constrain" => Some(Overflow::Constrain),
+            "reject" => Some(Overflow::Reject),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn to_rs(self) -> rs::Overflow {
+        match self {
+            Overflow::Constrain => rs::Overflow::Constrain,
+            Overflow::Reject => rs::Overflow::Reject,
+        }
+    }
+}
+
+/// The `calendarName` option of `toString`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShowCalendar {
+    #[default]
+    Auto,
+    Always,
+    Never,
+    Critical,
+}
+
+impl ShowCalendar {
+    pub fn parse(s: &str) -> Option<ShowCalendar> {
+        Some(match s {
+            "auto" => ShowCalendar::Auto,
+            "always" => ShowCalendar::Always,
+            "never" => ShowCalendar::Never,
+            "critical" => ShowCalendar::Critical,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn to_rs(self) -> rs::DisplayCalendar {
+        match self {
+            ShowCalendar::Auto => rs::DisplayCalendar::Auto,
+            ShowCalendar::Always => rs::DisplayCalendar::Always,
+            ShowCalendar::Never => rs::DisplayCalendar::Never,
+            ShowCalendar::Critical => rs::DisplayCalendar::Critical,
+        }
+    }
+}
+
 /// `fractionalSecondDigits`: `"auto"` or 0 to 9 digits.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Precision {

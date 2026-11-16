@@ -298,6 +298,13 @@ pub fn temporal(data: &[u8]) {
             attempt(() => Temporal.Instant.fromEpochMilliseconds(n).since(rel, { largestUnit: unit }).toString());
             attempt(() => new Temporal.Instant(BigInt(Math.trunc(n) || 0) * 1000000n).toJSON());
             attempt(() => new Date(n).toTemporalInstant().toString({ timeZone: rel }));
+            attempt(() => Temporal.PlainDate.from(rel, { overflow: mode }).toString({ calendarName: unit }));
+            attempt(() => new Temporal.PlainDate(n, n, n, d).toString());
+            attempt(() => Temporal.PlainDate.from({ year: n, monthCode: d, day: n, era: unit, eraYear: n, calendar: rel }, { overflow: mode }).toJSON());
+            attempt(() => Temporal.PlainDate.from(rel).withCalendar(d).with({ [unit]: n }).toString());
+            attempt(() => Temporal.PlainDate.from(rel).add(d, { overflow: mode }).until(rel, { largestUnit: unit, roundingMode: mode, roundingIncrement: n }).toString());
+            attempt(() => Temporal.PlainDate.from(rel).since({ year: n, month: n, day: n }, { smallestUnit: unit }).toString());
+            attempt(() => Temporal.Duration.from(d).total({ unit, relativeTo: Temporal.PlainDate.from(rel) }));
             return "ok";
         })()"#,
     );

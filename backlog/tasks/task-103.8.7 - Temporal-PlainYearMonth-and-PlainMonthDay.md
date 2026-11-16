@@ -5,6 +5,7 @@ status: To Do
 assignee:
   - '@claude'
 created_date: '2026-11-16T01:48:00Z'
+updated_date: '2026-11-16T03:35:00Z'
 labels:
   - temporal
 dependencies: []
@@ -23,3 +24,9 @@ The partial date types, with their calendar-specific reference days and years.
 - [ ] #1 Temporal.PlainYearMonth and Temporal.PlainMonthDay are complete
 - [ ] #2 Pass counts recorded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Includes Temporal.PlainDate.prototype.toPlainYearMonth and toPlainMonthDay, and PlainYearMonth/PlainMonthDay.prototype.toPlainDate (left out of 103.8.4).
+<!-- SECTION:NOTES:END -->

@@ -68,6 +68,8 @@ pub const TEMPORAL: &[&str] = &[
     "P1M\nauto\nexpand\n1970-01-01[u-ca=iso8601]\nNaN",
     "Europe/Paris\nsecond\nhalfEven\n2020-01-01T00:00:00.123456789Z\n1700000000123",
     "-12:59\nminutes\nhalfTrunc\n+275760-09-13T00:00Z\n-8.64e15",
+    "M02L\nmonths\nconstrain\n2024-02-29[u-ca=chinese]\n30",
+    "hebrew\neraYear\nreject\n2024-01-31[u-ca=japanese]\n5784",
     "\n\n\n\n",
 ];
 

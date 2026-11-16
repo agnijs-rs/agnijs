@@ -5,6 +5,7 @@ status: To Do
 assignee:
   - '@claude'
 created_date: '2026-11-16T01:48:00Z'
+updated_date: '2026-11-16T03:35:00Z'
 labels:
   - temporal
 dependencies: []
@@ -23,3 +24,9 @@ Date plus wall-clock time, and Temporal.Now.plainDateTimeISO, plainDateISO and p
 - [ ] #1 Temporal.PlainDateTime and the plain Now methods are complete
 - [ ] #2 Pass counts recorded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Includes Temporal.PlainDate.prototype.toPlainDateTime and ToTemporalDate accepting a PlainDateTime (left out of 103.8.4 because the type did not exist yet).
+<!-- SECTION:NOTES:END -->

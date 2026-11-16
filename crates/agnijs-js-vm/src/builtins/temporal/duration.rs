@@ -193,10 +193,12 @@ fn get_relative_to(vm: &mut Vm, options: Option<ObjId>) -> JsResult<Option<seam:
             let s = vm.to_rust_string(v)?;
             seam::RelativeTo::parse(&s).or_throw(vm).map(Some)
         }
-        // Temporal objects and property bags as relativeTo arrive with
-        // Temporal.PlainDate and Temporal.ZonedDateTime (TASK-103.8.4,
-        // TASK-103.8.8).
-        Value::Object(_) => vm.type_error("relativeTo objects are not supported yet"),
+        Value::Object(_) => match temporal_data(vm, v) {
+            Some(TemporalData::PlainDate(d)) => Ok(Some(seam::RelativeTo::from(d))),
+            // Zoned date-times and property bags, which may name a time
+            // zone, arrive with Temporal.ZonedDateTime (TASK-103.8.8).
+            _ => vm.type_error("relativeTo objects other than Temporal.PlainDate are not supported yet"),
+        },
         _ => vm.type_error("relativeTo must be a string or an object"),
     }
 }

@@ -23,13 +23,17 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use temporal_rs::provider::COMPILED_TZ_PROVIDER;
 
+mod calendar;
 mod duration;
 mod instant;
 mod options;
+mod plain_date;
 
+pub use calendar::{Calendar, DateFields, MonthCode};
 pub use duration::{Duration, DurationFields, RelativeTo};
 pub use instant::{Instant, TimeZone};
-pub use options::{Precision, RoundingMode, RoundingOptions, ToStringOptions, Unit};
+pub use options::{Overflow, Precision, RoundingMode, RoundingOptions, ShowCalendar, ToStringOptions, Unit};
+pub use plain_date::PlainDate;
 
 /// What kind of JavaScript error a failed operation throws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

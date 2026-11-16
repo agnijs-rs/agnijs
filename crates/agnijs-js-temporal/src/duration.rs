@@ -63,6 +63,12 @@ pub(crate) fn created(d: temporal_rs::Duration) -> Duration {
 #[derive(Debug, Clone)]
 pub struct RelativeTo(pub(crate) temporal_rs::options::RelativeTo);
 
+impl From<&crate::PlainDate> for RelativeTo {
+    fn from(d: &crate::PlainDate) -> RelativeTo {
+        RelativeTo(temporal_rs::options::RelativeTo::PlainDate(d.0.clone()))
+    }
+}
+
 impl RelativeTo {
     /// A `relativeTo` string: an ISO 8601 date or date-time, with a time
     /// zone annotation for a zoned date-time (GetTemporalRelativeToOption
