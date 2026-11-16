@@ -1,0 +1,3 @@
+// error
+escapes.ts:2:5: Invalid Unicode escape sequence
+  help: an identifier may only escape characters it could hold, as \uXXXX or \u{X}

@@ -32,15 +32,26 @@ Every engine the targets create has a fuel budget, an interrupt that fires after
 | `cdp-frames` | Bytes | The WebSocket frame reader of the CDP server, with its size limit |
 | `source-map` | JSON or a `data:` URL | Source Map v3 parsing and lookups, base64 and percent decoding |
 | `import-map` | Lines: a map, then specifiers | Import map parsing and specifier resolution |
+| `typescript` | TypeScript, with an optional `// @options:` line | The optional TypeScript front end (`agnijs-js-typescript`, ADR 0029), behind the `typescript` feature of `agnijs-fuzz` |
 
 The `bytecode` and `snapshot` targets reseal their input (they recompute the length and checksum after mutation), because a checksum would otherwise refuse almost every mutant before the decoder sees it. Bytecode and snapshots are trusted input ([security-model.md](security-model.md#bytecode-and-snapshots-are-trusted-input)): what these targets hold the loader to is that a container that loads cannot panic the engine, not that it computes anything meaningful.
+
+The `typescript` target transpiles its input as a `.ts`, `.tsx` or `.cts` file, with the options a first line such as `// @options: jsx decorators metadata` selects (`jsx`, `strip-only`, `script`, `decorators`, `metadata`, `verbatim`, `automatic`, `factory=`, `fragment=`, `source=`). It holds the front end to its promises: diagnostics are sorted, bounded in number and point inside the file; the same input gives the same output twice; the source map names the file, embeds its text and maps only to lines that exist; and the output parses in the engine and runs under fuel, an interrupt and a memory limit. Some early errors are left to the engine, which reports them when it compiles the output (an invalid regular expression, a duplicate declaration or export name, an export of an undeclared name), so the target accepts those parse errors. The crate and the target need Rust 1.97, so they are behind a feature:
+
+```sh
+cargo run --profile fuzz -p agnijs-fuzz --features typescript -- typescript --scale 20
+cargo +nightly fuzz run --features typescript --debug-assertions typescript fuzz/corpus/typescript
+```
+
+Its first runs found inputs that Oxc's parser accepts although they are not valid, and prints as code the engine cannot parse or that means something else; the front end refuses them itself now, each with a test in `crates/agnijs-js-typescript/tests/fixtures` (ADR 0029, "What fuzzing found").
 
 ## Running the bounded fuzzer
 
 `agnijs-fuzz` (in `crates/agnijs-fuzz`) is a seeded mutating fuzzer that needs only stable Rust. It runs each target's seed inputs, then mutants of them: text targets get token, line and character edits, binary targets byte and field edits. Mutants that a target accepts (that parse, load or compile) are kept and mutated further. It is not coverage-guided, so it finds shallow bugs fast and is fully reproducible: the same seed and iteration count run the same inputs on every platform.
 
 ```sh
-# Every target at its default size (about 30 s in release), seed 1. This is what CI runs.
+# Every target at its default size (about 30 s in release), seed 1. CI runs this with
+# --features typescript, which adds the typescript target.
 cargo run --profile fuzz -p agnijs-fuzz -- all
 
 # Some targets, longer: 10 times the default, or for 10 minutes each, with another seed.
@@ -89,7 +100,7 @@ These predate `agnijs-fuzz` and stay where they are, close to what they test:
 
 ## What runs in CI
 
-- **Every push and pull request** (`ci.yml`): the `fuzz` job runs `agnijs-fuzz all --seed 1` in the `fuzz` profile, about a minute after the build. The seed and iteration counts are fixed, so the job runs the same inputs every time and is not flaky; a failure is a real bug in the change, or one the change exposed. Failing inputs are uploaded as the `fuzz-failures` artifact. The fuzzers in the table above run in their own jobs.
+- **Every push and pull request** (`ci.yml`): the `fuzz` job runs `agnijs-fuzz --features typescript -- all --seed 1` in the `fuzz` profile, about a minute after the build. The seed and iteration counts are fixed, so the job runs the same inputs every time and is not flaky; a failure is a real bug in the change, or one the change exposed. Failing inputs are uploaded as the `fuzz-failures` artifact. The fuzzers in the table above run in their own jobs.
 - **Nightly and on demand** (`fuzz.yml`): each libFuzzer target runs for 5 minutes (the `seconds` input of a manual run changes it), starting from the seeds and the corpus the previous run saved in the Actions cache, under AddressSanitizer with debug assertions. A crash fails that target's job and uploads `fuzz/artifacts/<target>`. These runs are not reproducible and do not gate merges; a failure there is a bug to file.
 
 AgniJS is not in OSS-Fuzz. The `fuzz/` targets are in the form OSS-Fuzz builds, so applying is a matter of a project file and a build script once the project wants it.

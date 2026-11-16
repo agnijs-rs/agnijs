@@ -2,6 +2,14 @@
 
 What changed in each workspace version for embedders of the public crates, `agnijs` and `agnijs-engine-api`. The versioning rules are in [docs/stability.md](docs/stability.md). Nothing is published to crates.io yet; a version names the commit that set it, which is what a git-pinned embedder moves to.
 
+## Unreleased
+
+Additions only; nothing an embedder uses changes.
+
+- **TypeScript through Oxc, in a new optional crate, `agnijs-js-typescript`** ([ADR 0029](docs/adr/0029-typescript-is-transpiled-by-oxc-in-an-optional-crate-outside-the-engine.md)). `transpile(name, source, &Options)` returns JavaScript and a Source Map v3 to hand to `ModuleSource::SourceWithMap` (or `eval_script` with `set_source_map`), so `Error.stack`, `Exception::stack`, CallSite objects and the debugger report `.ts` positions. Types are stripped, never checked; `enum`, namespaces, parameter properties, JSX and (opt-in) legacy decorators are transformed; `Mode::StripOnly` accepts only erasable syntax. What would not run (TC39 decorators, `accessor` fields, `import =`, `export =`) is refused with a position. No engine crate depends on it: the default build, its binary size, the C API and the 1.88 MSRV are unchanged. The crate needs Rust 1.97 and is outside the semver policy for now ([docs/stability.md](docs/stability.md#the-rust-api)). See `examples/embed-typescript` and the [embedding guide](docs/embedding-guide.md#typescript-modules).
+- **The `agnijs` command runs `.ts`, `.mts`, `.cts` and `.tsx` files** when built with `--features typescript`, off by default.
+- **A `typescript` fuzz target**, behind a feature of `agnijs-fuzz`, run in CI ([docs/fuzzing.md](docs/fuzzing.md)).
+
 ## 0.3.0 (2026-11-16)
 
 Breaking. The embedding surface changes once now so that later additions to it are not breaking ([ADR 0026's addendum](docs/adr/0026-the-agnijs-crate-is-the-public-embedding-surface-over-the-engine-interface.md)).

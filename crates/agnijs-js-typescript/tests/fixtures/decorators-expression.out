@@ -1,0 +1,5 @@
+// error
+decorators-expression.ts:4:18: legacy decorators apply to class declarations, not class expressions
+  help: declare the class, then use its name
+decorators-expression.ts:5:26: legacy decorators apply to class declarations, not class expressions
+  help: declare the class, then use its name

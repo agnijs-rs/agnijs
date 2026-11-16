@@ -274,3 +274,53 @@ pub fn bytecode_trees() -> Vec<Vec<u8>> {
 pub fn snapshot_bodies() -> Vec<Vec<u8>> {
     vec![snapshot_body()]
 }
+
+/// The TypeScript crate's fixtures, with the option lines their
+/// extensions imply, and some inputs of their own.
+#[cfg(feature = "typescript")]
+pub fn typescript() -> Vec<Vec<u8>> {
+    const FIXTURES: &[(&str, &str)] = &[
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/decorators-prologue.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/decorators.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/enum.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/imports.ts")),
+        ("// @options: jsx\n", include_str!("../../agnijs-js-typescript/tests/fixtures/jsx-automatic.tsx")),
+        ("// @options: jsx\n", include_str!("../../agnijs-js-typescript/tests/fixtures/jsx-classic.tsx")),
+        ("// @options: jsx\n", include_str!("../../agnijs-js-typescript/tests/fixtures/jsx-factory.tsx")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/modern.mts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/namespace-merged.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/namespace.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/param-props.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/refused.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/decorators-expression.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/escapes.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/wrapped.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/nested-modules.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/nameless.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/html-comments.ts")),
+        ("// @options: script\n", include_str!("../../agnijs-js-typescript/tests/fixtures/script-modules.cts")),
+        ("// @options: script\n", include_str!("../../agnijs-js-typescript/tests/fixtures/script.cts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/strip-only-refused.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/strip-only.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/syntax-error.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/types.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/unicode.ts")),
+        ("", include_str!("../../agnijs-js-typescript/tests/fixtures/verbatim.ts")),
+    ];
+    const MORE: &[&str] = &[
+        "let x = f<T>(1) as unknown as number satisfies number;\nlet y = a < b > (c);\nexport {};",
+        "abstract class A<T extends object = {}> { abstract m(): void; declare d: T; static #p?: number; override toString() { return ''; } }",
+        "declare module 'm' { export const v: number; }\ndeclare global { var g: string }\nexport = 1;",
+        "function f(this: Window, ...rest: [a: number, b?: string]): asserts rest is never { throw 0; }\nf.call(globalThis as any);",
+        "// @options: script\nenum E { A = 'a'.length, B = A << 2, C }\nnamespace N.M { export let v = E.C; }\nthrow new Error(String(N.M.v));",
+        "// @options: jsx automatic source=preact\nexport const v = <><a b={1} {...{c: 2}}>t{'x'}</a></>;",
+        "type T<in out U> = { [K in keyof U as `get${string & K}`]-?: () => U[K] };\nlet u: unique symbol;\nexport type { T };",
+        "let a = <any>(<number>1);\nlet b = x!.y!;\nlet c = (d?: number): d is 1 => true;\nfor (const k of [] as const) {}",
+        "\u{FEFF}let s: string = '\\u2028';\r\nlet t = `${s as string}`;\u{2029}export default t;",
+    ];
+    FIXTURES
+        .iter()
+        .map(|(h, f)| format!("{h}{f}").into_bytes())
+        .chain(MORE.iter().map(|s| s.as_bytes().to_vec()))
+        .collect()
+}

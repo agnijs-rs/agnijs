@@ -25,3 +25,9 @@ agnijs-js-debugger.workspace = true
 agnijs-js-cdp.workspace = true
 agnijs-js-resolve.workspace = true
 serde_json.workspace = true
+# The typescript target (ADR 0029); it needs Rust 1.97, above the
+# workspace minimum, so it is opt-in.
+agnijs-js-typescript = { workspace = true, optional = true }
+
+[features]
+typescript = ["dep:agnijs-js-typescript"]

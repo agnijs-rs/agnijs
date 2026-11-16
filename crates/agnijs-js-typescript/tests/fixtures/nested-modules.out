@@ -1,0 +1,4 @@
+// error
+nested-modules.ts:4:3: import and export declarations may only appear at the top level of a module or a namespace
+nested-modules.ts:7:3: import and export declarations may only appear at the top level of a module or a namespace
+nested-modules.ts:9:8: import and export declarations may only appear at the top level of a module or a namespace

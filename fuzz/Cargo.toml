@@ -23,6 +23,10 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 agnijs-fuzz = { path = "../crates/agnijs-fuzz" }
 
+# The typescript target: cargo +nightly fuzz run --features typescript typescript
+[features]
+typescript = ["agnijs-fuzz/typescript"]
+
 [workspace]
 members = ["."]
 
@@ -120,6 +124,14 @@ bench = false
 [[bin]]
 name = "import-map"
 path = "fuzz_targets/import_map.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typescript"
+path = "fuzz_targets/typescript.rs"
+required-features = ["typescript"]
 test = false
 doc = false
 bench = false

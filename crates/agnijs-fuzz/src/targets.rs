@@ -642,3 +642,10 @@ pub fn import_map(data: &[u8]) {
         }
     }
 }
+
+// ---- TypeScript ----------------------------------------------------------------------------------
+
+#[cfg(feature = "typescript")]
+mod typescript;
+#[cfg(feature = "typescript")]
+pub use typescript::typescript;

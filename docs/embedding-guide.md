@@ -199,6 +199,28 @@ fn main() -> Result<(), Error> {
 
 `load_module` returns a promise for the module namespace. A module that cannot be loaded, a syntax error or an exception during evaluation rejects that promise; the call itself fails only for misuse. A host can also return `ModuleSource::Json`, source with a source map (`SourceWithMap`), or bytecode from `compile_module` (`Bytecode`). `import.meta` is filled by the `import_meta` hook. For Node-style resolution (`node_modules`, `package.json` exports, import maps), the optional `agnijs-js-resolve` crate implements these two hooks ([ADR 0023](adr/0023-node-style-module-resolution-is-an-optional-crate-outside-the-engine.md)).
 
+### TypeScript modules
+
+The engine runs JavaScript only. To load TypeScript, transpile it in `load_module` with the optional `agnijs-js-typescript` crate and return the JavaScript with its source map; the engine then reports TypeScript positions in `Error.stack`, `Exception::stack`, CallSite objects and the debugger. [`examples/embed-typescript`](../examples/embed-typescript/src/main.rs) is the complete program:
+
+```rust
+use agnijs_js_typescript::{transpile, Options};
+
+fn load_module(&self, resolved: &str) -> Result<ModuleSource, String> {
+    let source = read(resolved)?;
+    // The settings come from the extension: .ts and .mts are modules,
+    // .cts a script, .tsx a module with JSX. A .d.ts is None.
+    let options = Options::for_path(resolved)
+        .ok_or_else(|| format!("{resolved} is a declaration file"))?;
+    // On a syntax error the text is the diagnostics, one per line with
+    // its position, and the import rejects with it.
+    let out = transpile(resolved, &source, &options).map_err(|e| e.to_string())?;
+    Ok(ModuleSource::SourceWithMap { source: out.code, source_map: out.source_map })
+}
+```
+
+An exception thrown in `account.ts` then reports `at app/account.ts:8:7`, and a file the crate refuses fails its import with `app/broken.ts:2:3: \`accessor\` fields are not supported`. Types are stripped, never checked: run `tsc --noEmit` in your build if you want them checked. `Options` also selects strip-only mode (erasable syntax only), JSX settings and legacy decorators (`experimental_decorators`, off by default). For a script, transpile with `SourceKind::Script` and pass the map to `set_source_map` before `eval_script`. The crate needs Rust 1.97 and runs Oxc on a worker thread with an input-sized stack; for untrusted TypeScript lower `max_source_len` ([security-model.md](security-model.md#typescript-transpiling)). What it supports and refuses is in [ADR 0029](adr/0029-typescript-is-transpiled-by-oxc-in-an-optional-crate-outside-the-engine.md) and the crate's rustdoc.
+
 ## Drive the job loop
 
 The engine never runs promise reactions on its own. The host runs them with `run_jobs`, after the script or module it started and after every task its event loop runs (a timer firing, an I/O completion):
@@ -333,4 +355,4 @@ The `agnijs` crate, including everything under `agnijs::api`, follows the semver
 
 - [docs/security-model.md](security-model.md): the threat model, the guarantees and limits, the non-guarantees, an embedder checklist and an example of granting capabilities one at a time.
 - [SECURITY.md](../SECURITY.md): how to report a vulnerability privately.
-- [docs/fuzzing.md](fuzzing.md): the fuzz targets (parser, bytecode, snapshots, regex, the C API and others), how to run them and what CI runs. The seed corpus for every target is in [`crates/agnijs-fuzz/src/seeds.rs`](../crates/agnijs-fuzz/src/seeds.rs); `agnijs-fuzz --seeds <target> <dir>` writes it out as a libFuzzer corpus. An embedder that feeds the engine its own kind of input can start a fuzz target from there.
+- [docs/fuzzing.md](fuzzing.md): the fuzz targets (parser, bytecode, snapshots, regex, TypeScript, the C API and others), how to run them and what CI runs. The seed corpus for every target is in [`crates/agnijs-fuzz/src/seeds.rs`](../crates/agnijs-fuzz/src/seeds.rs); `agnijs-fuzz --seeds <target> <dir>` writes it out as a libFuzzer corpus. An embedder that feeds the engine its own kind of input can start a fuzz target from there.

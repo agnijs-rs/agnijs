@@ -41,6 +41,8 @@ TypeError: bad thing
 
 A syntax error points at its position. A promise rejected with no handler by the end of its turn is reported as `Uncaught (in promise) …` and also exits 1. When a file ends with `//# sourceMappingURL=` (an inline `data:` URL or a file beside it), stack traces show the original positions.
 
+**TypeScript.** Built with `--features typescript` (`cargo install --path crates/agnijs-cli --features typescript`, Rust 1.97), the command runs `.ts`, `.mts`, `.cts` and `.tsx` files, and imports resolve to them too. Each file is transpiled with `agnijs-js-typescript` ([ADR 0029](../../docs/adr/0029-typescript-is-transpiled-by-oxc-in-an-optional-crate-outside-the-engine.md)) before the engine sees it, and its source map is registered, so code frames, stack traces and `--inspect` show TypeScript positions. Types are stripped, not checked. `.mts` is a module and `.cts` a script; `.ts` and `.tsx` follow `--module`/`--script`, then the `type` of the nearest `package.json`, then whether the output only parses as a module. A file the transpiler refuses prints each diagnostic with its code frame and exits 1. Legacy decorators are not turned on (they need `experimental_decorators` in the crate's options), so a decorator is refused. `agnijs compile` takes JavaScript only: bytecode carries no source map. Without the feature, TypeScript files are not recognised and the command is unchanged.
+
 ### Options
 
 | Option | Meaning |

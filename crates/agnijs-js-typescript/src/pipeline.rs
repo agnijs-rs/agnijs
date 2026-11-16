@@ -8,7 +8,7 @@ use oxc_codegen::{Codegen, CodegenOptions};
 use oxc_diagnostics::{OxcDiagnostic, Severity};
 use oxc_parser::Parser;
 use oxc_semantic::SemanticBuilder;
-use oxc_span::SourceType;
+use oxc_span::{GetSpan, SourceType};
 use oxc_transformer::{HelperLoaderMode, TransformOptions, Transformer};
 
 use crate::position::LineIndex;
@@ -91,6 +91,22 @@ pub(crate) fn run(file: &str, source: &str, options: &Options) -> Result<Output,
         message: r.message,
         help: r.help,
     }));
+    // The lexer reports an HTML-like comment (`<!--`, Annex B) in a module,
+    // but the TypeScript parser drops the error when it rewinds after a
+    // `<`, and the printer keeps the comment, which no module may hold.
+    if options.kind == SourceKind::Module {
+        for c in &program.comments {
+            let text = c.span.source_text(source);
+            if text.starts_with("<!--") || text.starts_with("-->") {
+                errors.push(Raw {
+                    start: c.span.start,
+                    end: c.span.start + if text.starts_with("<!--") { 4 } else { 3 },
+                    message: "HTML comments are not allowed in modules".into(),
+                    help: Some("use `//` or `/* */`, or transpile it as a script".into()),
+                });
+            }
+        }
+    }
     if !errors.is_empty() {
         return fail(errors);
     }
@@ -98,7 +114,25 @@ pub(crate) fn run(file: &str, source: &str, options: &Options) -> Result<Output,
     let transform_options = transform_options(options);
     let transformed = Transformer::new(&alloc, Path::new(file), &transform_options)
         .build_with_scoping(semantic.semantic.into_scoping(), &mut program);
-    let errors: Vec<Raw> = transformed.diagnostics.errors().map(from_oxc).collect();
+    let mut errors: Vec<Raw> = transformed.diagnostics.errors().map(from_oxc).collect();
+    // Oxc parses `import` and `export` in a TypeScript script, where `tsc`
+    // would emit CommonJS for them. What is left of them once the types
+    // are gone cannot run as a script.
+    if options.kind == SourceKind::Script {
+        for span in program
+            .body
+            .iter()
+            .filter_map(|s| s.as_module_declaration())
+            .map(GetSpan::span)
+        {
+            errors.push(Raw {
+                start: span.start,
+                end: span.end,
+                message: "import and export declarations need a module".into(),
+                help: Some("transpile it as SourceKind::Module (a .ts or .mts file)".into()),
+            });
+        }
+    }
     if !errors.is_empty() {
         return fail(errors);
     }

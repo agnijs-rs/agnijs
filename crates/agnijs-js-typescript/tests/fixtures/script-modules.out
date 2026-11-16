@@ -1,0 +1,7 @@
+// error
+script-modules.cts:4:1: import and export declarations need a module
+  help: transpile it as SourceKind::Module (a .ts or .mts file)
+script-modules.cts:5:1: import and export declarations need a module
+  help: transpile it as SourceKind::Module (a .ts or .mts file)
+script-modules.cts:6:1: import and export declarations need a module
+  help: transpile it as SourceKind::Module (a .ts or .mts file)

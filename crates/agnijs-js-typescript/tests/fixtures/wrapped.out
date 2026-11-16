@@ -1,0 +1,9 @@
+// error
+wrapped.ts:4:21: `await` in an enum, which becomes a function
+  help: compute the value outside it
+wrapped.ts:6:20: `await` in a namespace, which becomes a function
+  help: compute the value outside it
+wrapped.ts:8:3: `for await` in a namespace, which becomes a function
+  help: compute the value outside it
+wrapped.ts:9:26: `arguments` in a namespace, which becomes a function
+  help: compute the value outside it

@@ -73,3 +73,15 @@ Three facts about Oxc shape the decision as much as its features:
 - **Decorators are refused in strip-only mode** too: legacy decorators are not erasable.
 - **`SemanticBuilder::with_enum_eval(true)`** is required by the enum transform, which otherwise panics; the panic came back as `Error::Internal`, as designed.
 - **The map's lines agree with the engine's.** Oxc counts a raw U+2028 or U+2029 in a string as a line end, as the engine does, and counts columns in UTF-16 units, so no remapping is needed.
+
+## Addendum (TASK-103.13.3, 2026-11-16): what fuzzing found
+
+The `typescript` target of `agnijs-fuzz` ([fuzzing.md](../fuzzing.md)) found input that Oxc 0.158 accepts although it is invalid, and prints as code the engine cannot parse, or as valid code that means something else. Each is now refused by the crate's refusal pass, with a fixture, and is worth reporting upstream:
+
+- **Lexer errors are lost after a `<`.** The TypeScript parser looks ahead for type arguments at a `<` and rewinds, and an error the lexer raised before it is dropped: `let a\x41 = 1, b = 2 << 1;` prints `let a41` without a diagnostic. Every identifier written with an escape is now checked to spell its name with valid `\u` escapes of characters an identifier may hold (`escapes.ts`). The same loss lets an HTML-like comment (`<!--`, Annex B) through in a module, where the printer would keep it; comments are checked too (`html-comments.ts`).
+- **A nameless function declaration with type parameters** (`function<T>() {}`, also after `export` and in a block) is accepted: "Expected function name" is skipped. Only `export default` may leave a function or class declaration unnamed (`nameless.ts`).
+- **Import and export declarations are accepted in a script, and nested** in blocks, functions and labelled statements of a module. They are refused outside the top level of a module or a namespace body (`script-modules.cts`, `nested-modules.ts`).
+- **Legacy decorators on a class expression** are left in the output, or dropped silently for its members; with `experimental_decorators` they are refused on class expressions (`decorators-expression.ts`).
+- **`await` in an exported enum or namespace** is not reported, although the transform moves the initializer or body into a function, where it is a syntax error or means something else. `await`, `yield`, `for await`, `await using` and `arguments` are refused in enum initializers and namespace bodies, outside nested functions (and arrows, except for `arguments`) (`wrapped.ts`).
+
+Some early errors are not reported by Oxc and are left to the engine, which reports them as a SyntaxError when it compiles the output: invalid regular expression bodies, duplicate declarations, duplicate export names, and exports of undeclared names. The output stays valid JavaScript otherwise, so this needs no refusal.

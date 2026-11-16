@@ -179,8 +179,10 @@ jobs:
         run: cargo test --release --locked -p agnijs-js-typescript --test limits
       - run: cargo test --locked -p agnijs-example-typescript
       - run: cargo test --locked -p agnijs-cli --features typescript
+      - run: cargo test --locked -p agnijs-fuzz --features typescript --test smoke
       - run: cargo clippy --locked -p agnijs-js-typescript -p agnijs-example-typescript --all-targets --no-deps -- -D warnings
       - run: cargo clippy --locked -p agnijs-cli --features typescript --all-targets --no-deps -- -D warnings
+      - run: cargo clippy --locked -p agnijs-fuzz --features typescript --all-targets --no-deps -- -D warnings
 
   capi:
     # The C API (ADR 0021, TASK-103.3): the Rust tests with fault injection,
@@ -218,7 +220,8 @@ jobs:
     # its seeds and a fixed number of seeded mutants, so every run covers
     # the same inputs. Release speed with debug assertions and overflow
     # checks (the `fuzz` profile). A failing input is saved under
-    # target/fuzz-inputs and uploaded.
+    # target/fuzz-inputs and uploaded. With the `typescript` target, which
+    # needs agnijs-js-typescript (Rust 1.97, stable here).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -229,7 +232,7 @@ jobs:
           key: fuzz
       - name: Fuzz every target, bounded (fixed seed)
         timeout-minutes: 15
-        run: cargo run --profile fuzz --locked -p agnijs-fuzz -- all --seed 1
+        run: cargo run --profile fuzz --locked -p agnijs-fuzz --features typescript -- all --seed 1
       - name: Keep the failing inputs
         if: failure()
         uses: actions/upload-artifact@v4

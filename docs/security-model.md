@@ -292,6 +292,19 @@ Tests in `crates/agnijs-js-vm/tests/untrusted_lengths.rs` and `crates/agnijs/tes
 - **Untrusted patterns.** A host that accepts patterns from untrusted users should refuse such patterns before they reach the engine, or run them in a process it can kill.
 - **Builds without the linear matcher.** The `linear-regex` feature can be turned off. Bytecode written by such a build marks every pattern ineligible, so they all backtrack wherever that bytecode is loaded.
 
+### TypeScript transpiling
+
+The optional `agnijs-js-typescript` crate ([ADR 0029](adr/0029-typescript-is-transpiled-by-oxc-in-an-optional-crate-outside-the-engine.md)) runs before the engine sees any code, so fuel, interrupts and the memory limit do not apply to it, and Oxc has no cancellation. What bounds it instead:
+
+- **`Options::max_source_len`** (1 MiB by default): longer source is refused with `Error::TooLarge` before anything is parsed. It is the bound on time and memory, so lower it for untrusted input.
+- **A worker thread per call, with a stack sized from the input** (16 MiB plus 1 KiB per source byte in release, 4 KiB in debug). Oxc's parser, transform and printer are recursive with no depth guard; that stack is reserved so no input within the limit can overflow it. It is committed only as deep as the input nests, so ordinary code touches a few hundred kilobytes, but pathological nesting can touch the whole reservation (about 1 GiB at the default limit). If the thread cannot be started the call returns `Error::Resource`.
+- **Time** is linear in the source for every pattern tried except deeply nested `switch` statements, which Oxc's analysis handles in quadratic time: about 2.3 s for the worst 1 MiB in release. A host that cannot afford that stall runs `transpile` on a thread of its own with a timeout, or lowers the limit.
+- **Output stays proportional to the input**: the printer's indentation, quadratic in the nesting, is dropped for input nested far deeper than real code, and at most `MAX_DIAGNOSTICS` (100) diagnostics are reported.
+- **A panic in Oxc is caught** on the worker thread and returned as `Error::Internal`, never unwound into the caller.
+- **Invalid input is refused, not passed on.** Where Oxc accepts invalid input and would print code that means something else, the crate refuses it itself (the cases are listed in ADR 0029); the `typescript` fuzz target holds it to that ([fuzzing.md](fuzzing.md)).
+
+The JavaScript it returns is ordinary code: the engine parses it and runs it under every limit above. Types are never checked, so they are no defence: `x as number` is a string if the program says so. On targets without threads (`wasm32-unknown-unknown`) the pipeline runs on the caller's stack and is safe only for trusted input.
+
 ## Non-guarantees
 
 ### Side channels
@@ -367,7 +380,7 @@ Some failures are outside the engine's control:
 - The operating system can refuse memory, and Rust's allocator then aborts.
 - The host's thread can have less stack than the budget plus headroom.
 - A host bug can corrupt the process.
-- A dependency the engine links (ICU4X data, `serde_json` in the CDP crate, Cranelift under `jit`) can have a bug.
+- A dependency the engine links (ICU4X data, `serde_json` in the CDP crate, Cranelift under `jit`, Oxc in `agnijs-js-typescript`) can have a bug.
 
 ## Embedder checklist
 
@@ -384,7 +397,8 @@ For code you do not trust:
 9. **No untrusted bytecode or snapshots.** Authenticate anything that crossed a trust boundary before `eval_bytecode`, `ModuleSource::Bytecode` or `make_engine_from_snapshot`.
 10. **No debugger in production.** Never bind CDP to a non-loopback address, and do not leave it listening.
 11. **The `jit` feature off** unless you accept code-generator bugs as memory-safety bugs.
-12. **Treat a panic as fatal to the engine.** Discard it after a caught panic. A Rust API engine reports `Error::Poisoned`, a C API engine `AGNIJS_ERR_POISONED`.
+12. **A source limit for untrusted TypeScript.** Lower `max_source_len` in `agnijs-js-typescript`'s `Options` to what you accept, and run `transpile` with a timeout if a stall of seconds matters ([above](#typescript-transpiling)).
+13. **Treat a panic as fatal to the engine.** Discard it after a caught panic. A Rust API engine reports `Error::Poisoned`, a C API engine `AGNIJS_ERR_POISONED`.
 
 ## Example: granting capabilities one by one
 

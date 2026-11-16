@@ -29,6 +29,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | `agnijs-js-intl` | The ICU4X seam and ECMA-402 services |
 | `agnijs-js-debugger` | The debugger interface |
 | `agnijs-js-cdp` | The Chrome DevTools Protocol adapter |
+| `agnijs-js-typescript` | Optional: TypeScript to JavaScript and a source map through Oxc, for a host's module loader; no engine crate depends on it ([ADR 0029](docs/adr/0029-typescript-is-transpiled-by-oxc-in-an-optional-crate-outside-the-engine.md)) |
 | `agnijs-js-test262` | The test262 runner, baselines and the ADR 0016 boundary tests |
 | `agnijs-js-bench` | Micro-benchmarks and the benchmark protocol |
 | `agnijs-engine-quickjs` | An adapter over QuickJS-NG, used as a comparison engine |
@@ -57,7 +58,9 @@ The engine has no ambient authority: script reaches only what the host grants. M
 
 `agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3.6 MB instead of about 20.5 MB, stripped (QuickJS-NG is about 1.2 MB, Boa about 10.8 MB). A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.
 
-Rust 1.88 or newer for the libraries (the `agnijs` command needs 1.95, the opt-in JIT 1.97; see [docs/stability.md](docs/stability.md#minimum-supported-rust-version)). Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
+**TypeScript** is not part of the engine. A host that loads `.ts` files transpiles them with the optional `agnijs-js-typescript` crate in `Host::load_module` and hands the engine the JavaScript with its source map, so stack traces and the debugger show TypeScript positions; types are stripped, never checked. Builds that do not use it pay nothing; builds that do add about 2.5 MB. [`examples/embed-typescript`](examples/embed-typescript) is a complete host, the [embedding guide](docs/embedding-guide.md#typescript-modules) walks through it, and the `agnijs` command runs TypeScript files when built with `--features typescript`.
+
+Rust 1.88 or newer for the libraries (the `agnijs` command needs 1.95, the opt-in JIT and the optional TypeScript crate 1.97; see [docs/stability.md](docs/stability.md#minimum-supported-rust-version)). Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
 
 ## License
 

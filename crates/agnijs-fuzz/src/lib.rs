@@ -159,6 +159,15 @@ pub const TARGETS: &[Target] = &[
         seeds: seeds::import_maps,
         default_iters: 30_000,
     },
+    #[cfg(feature = "typescript")]
+    Target {
+        name: "typescript",
+        about: "the optional TypeScript front end: diagnostics, deterministic output, source maps, output that parses and runs",
+        shape: Shape::Text,
+        run: typescript,
+        seeds: seeds::typescript,
+        default_iters: 2_000,
+    },
 ];
 
 /// The target called `name`.

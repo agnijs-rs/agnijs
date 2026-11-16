@@ -1,0 +1,3 @@
+// error
+html-comments.ts:4:1: HTML comments are not allowed in modules
+  help: use `//` or `/* */`, or transpile it as a script

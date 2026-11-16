@@ -1,0 +1,7 @@
+// error
+nameless.ts:3:1: Expected function name
+  help: a declaration needs a name, except after `export default`
+nameless.ts:4:8: Expected function name
+  help: a declaration needs a name, except after `export default`
+nameless.ts:5:3: Expected function name
+  help: a declaration needs a name, except after `export default`

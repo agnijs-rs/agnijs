@@ -95,6 +95,7 @@ dependencies = [
  "agnijs-js-parser",
  "agnijs-js-regex",
  "agnijs-js-resolve",
+ "agnijs-js-typescript",
  "agnijs-js-vm",
  "serde_json",
 ]
@@ -256,6 +257,7 @@ dependencies = [
  "oxc_parser",
  "oxc_semantic",
  "oxc_span",
+ "oxc_syntax",
  "oxc_transformer",
  "serde_json",
 ]
