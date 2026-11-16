@@ -9,6 +9,8 @@
 //! objects.
 
 pub mod duration;
+pub mod instant;
+pub mod now;
 pub mod options;
 
 use agnijs_engine_api::RealmId;
@@ -22,6 +24,7 @@ use crate::vm::{ErrorType, JsResult, Vm};
 /// The internal slots of a Temporal object.
 pub enum TemporalData {
     Duration(seam::Duration),
+    Instant(seam::Instant),
 }
 
 /// The `TemporalData` of `v` when it is a Temporal object.
@@ -86,5 +89,7 @@ pub fn install(vm: &mut Vm, realm: RealmId) {
     let global = vm.realm_of(realm).global;
     vm.define_raw_str(global, "Temporal", Value::Object(temporal), Attrs::METHOD);
     super::to_string_tag(vm, temporal, "Temporal");
+    now::install(vm, temporal);
     duration::install(vm, temporal);
+    instant::install(vm, temporal);
 }

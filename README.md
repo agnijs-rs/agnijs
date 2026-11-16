@@ -15,7 +15,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | test262, source scripts and modules | 42231 / 42231 |
 | test262, every script and module run from bytecode (`--precompile`) | 42231 / 42231 |
 | test262 `intl402` (reported separately) | 981 / 981 |
-| test262 Temporal, in progress behind the `temporal` feature (`--only-temporal`, ADR 0027) | 466 / 5168 |
+| test262 Temporal, in progress behind the `temporal` feature (`--only-temporal`, ADR 0027) | 935 / 5168 |
 
 ## Layout
 

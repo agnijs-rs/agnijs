@@ -269,8 +269,9 @@ pub fn intl(data: &[u8]) {
 }
 
 /// The Temporal types with fuzzed ISO 8601 strings, units, rounding
-/// options and `relativeTo` values. Input lines: a duration string, a
-/// unit, a rounding mode, a `relativeTo` string, then a number.
+/// options, `relativeTo` values, instants and time zones. Input lines: a
+/// duration string (also tried as a time zone), a unit, a rounding mode, a
+/// `relativeTo` or instant string, then a number.
 pub fn temporal(data: &[u8]) {
     run_with_input(
         &text(data),
@@ -291,6 +292,12 @@ pub fn temporal(data: &[u8]) {
                 attempt(() => Temporal.Duration.compare(d, { [unit]: n }, { relativeTo }));
                 attempt(() => Temporal.Duration.from(d).add({ [unit]: n }).subtract(d).toString());
             }
+            attempt(() => Temporal.Instant.from(rel).round({ smallestUnit: unit, roundingMode: mode, roundingIncrement: n }).toString());
+            attempt(() => Temporal.Instant.from(rel).toString({ timeZone: d, smallestUnit: unit, fractionalSecondDigits: n }));
+            attempt(() => Temporal.Instant.from(rel).add(d).until(rel, { largestUnit: unit, smallestUnit: mode, roundingMode: mode }).toString());
+            attempt(() => Temporal.Instant.fromEpochMilliseconds(n).since(rel, { largestUnit: unit }).toString());
+            attempt(() => new Temporal.Instant(BigInt(Math.trunc(n) || 0) * 1000000n).toJSON());
+            attempt(() => new Date(n).toTemporalInstant().toString({ timeZone: rel }));
             return "ok";
         })()"#,
     );

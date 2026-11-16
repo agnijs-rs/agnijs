@@ -796,7 +796,7 @@ fn to_locale(vm: &mut Vm, a: &CallArgs, method: &str, required: Required, _: Def
     Ok(vm.str(&s))
 }
 
-fn this_time_value(vm: &mut Vm, this: Value, method: &str) -> JsResult<(ObjId, f64)> {
+pub(crate) fn this_time_value(vm: &mut Vm, this: Value, method: &str) -> JsResult<(ObjId, f64)> {
     if let Value::Object(o) = this {
         if let Class::Date(t) = &vm.heap.obj(o).class {
             return Ok((o, *t));

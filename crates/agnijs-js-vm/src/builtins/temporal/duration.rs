@@ -124,7 +124,7 @@ fn new_duration(vm: &mut Vm, n: [f64; 10]) -> JsResult<seam::Duration> {
     seam::Duration::new(fields).or_throw(vm)
 }
 
-fn wrap(vm: &mut Vm, d: seam::Duration) -> JsResult<Value> {
+pub fn wrap_duration(vm: &mut Vm, d: seam::Duration) -> JsResult<Value> {
     let o = create(vm, Value::Undefined, Intrinsic::TemporalDurationPrototype, TemporalData::Duration(d))?;
     Ok(Value::Object(o))
 }
@@ -203,7 +203,7 @@ fn get_relative_to(vm: &mut Vm, options: Option<ObjId>) -> JsResult<Option<seam:
 
 fn from(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let d = to_temporal_duration(vm, a.arg(0))?;
-    wrap(vm, d)
+    wrap_duration(vm, d)
 }
 
 fn compare(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
@@ -270,36 +270,36 @@ fn with(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         n[i] = partial[i].unwrap_or(current[i]);
     }
     let d = new_duration(vm, n)?;
-    wrap(vm, d)
+    wrap_duration(vm, d)
 }
 
 fn negated(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let d = this_duration(vm, a.this, "negated")?;
-    wrap(vm, d.negated())
+    wrap_duration(vm, d.negated())
 }
 
 fn abs(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let d = this_duration(vm, a.this, "abs")?;
-    wrap(vm, d.abs())
+    wrap_duration(vm, d.abs())
 }
 
 fn add(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let d = this_duration(vm, a.this, "add")?;
     let other = to_temporal_duration(vm, a.arg(0))?;
     let sum = d.add(&other).or_throw(vm)?;
-    wrap(vm, sum)
+    wrap_duration(vm, sum)
 }
 
 fn subtract(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     let d = this_duration(vm, a.this, "subtract")?;
     let other = to_temporal_duration(vm, a.arg(0))?;
     let difference = d.subtract(&other).or_throw(vm)?;
-    wrap(vm, difference)
+    wrap_duration(vm, difference)
 }
 
 /// A string argument in place of an options bag (`round("hour")`,
 /// `total("day")`): the value of the one option it stands for.
-fn unit_from_string(vm: &mut Vm, v: Value, name: &str) -> JsResult<Unit> {
+pub(super) fn unit_from_string(vm: &mut Vm, v: Value, name: &str) -> JsResult<Unit> {
     let s = vm.to_rust_string(v)?;
     match Unit::parse(&s) {
         Some(u) => Ok(u),
@@ -331,7 +331,7 @@ fn round(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
         return vm.range_error("one of smallestUnit or largestUnit is required");
     }
     let rounded = d.round(options, relative_to.as_ref()).or_throw(vm)?;
-    wrap(vm, rounded)
+    wrap_duration(vm, rounded)
 }
 
 fn total(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {

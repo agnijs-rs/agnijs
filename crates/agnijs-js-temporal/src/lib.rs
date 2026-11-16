@@ -24,9 +24,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use temporal_rs::provider::COMPILED_TZ_PROVIDER;
 
 mod duration;
+mod instant;
 mod options;
 
 pub use duration::{Duration, DurationFields, RelativeTo};
+pub use instant::{Instant, TimeZone};
 pub use options::{Precision, RoundingMode, RoundingOptions, ToStringOptions, Unit};
 
 /// What kind of JavaScript error a failed operation throws.

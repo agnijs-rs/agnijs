@@ -36,7 +36,7 @@ pub struct Duration(pub(crate) temporal_rs::Duration);
 /// library keeps exact integers; this rounds them. Rounding cannot make a
 /// valid duration invalid by more than the specification's own
 /// conversion does, and if it would, the exact result is kept.
-fn created(d: temporal_rs::Duration) -> Duration {
+pub(crate) fn created(d: temporal_rs::Duration) -> Duration {
     fn f(v: i64) -> i64 {
         v as f64 as i64
     }

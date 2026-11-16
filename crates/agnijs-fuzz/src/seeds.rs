@@ -66,6 +66,8 @@ pub const TEMPORAL: &[&str] = &[
     "P4294967295Y\nyear\nceil\n-271821-04-19T00:00Z[UTC]\n1e9",
     "pt1,5h\nweeks\nhalfEven\n2020-02-29T12:00+05:30[+05:30]\n-0",
     "P1M\nauto\nexpand\n1970-01-01[u-ca=iso8601]\nNaN",
+    "Europe/Paris\nsecond\nhalfEven\n2020-01-01T00:00:00.123456789Z\n1700000000123",
+    "-12:59\nminutes\nhalfTrunc\n+275760-09-13T00:00Z\n-8.64e15",
     "\n\n\n\n",
 ];
 
