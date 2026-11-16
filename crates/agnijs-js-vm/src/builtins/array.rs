@@ -7,7 +7,7 @@ use crate::realm::Intrinsic;
 use crate::string::StrBuilder;
 use crate::value::{Attrs, ObjId, PropKey, Value};
 use crate::vm::{Fault, JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use std::cmp::Ordering;
 
 const MAX_SAFE: f64 = 9007199254740991.0;

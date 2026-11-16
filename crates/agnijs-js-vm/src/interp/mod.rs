@@ -16,7 +16,7 @@ pub mod step;
 use crate::convert::{number_arith, number_binop, number_bitwise, number_compare};
 use crate::value::{EnvId, ObjId, Value};
 use crate::vm::{Fault, JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{BinOp, CodeBlock, Constant, Instr};
 use std::rc::Rc;
 use step::instr_arith;

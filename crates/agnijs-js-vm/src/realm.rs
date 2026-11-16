@@ -4,11 +4,20 @@ use crate::env::Environment;
 use crate::object::{Class, ObjectData};
 use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, SymId, Value};
 use crate::vm::Vm;
-use agnijs_engine_api::RealmId;
 use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock};
 use hashbrown::HashMap;
 use indexmap::IndexMap;
 use std::rc::Rc;
+
+/// A realm of this VM: its index in `Vm::realms`.
+///
+/// The engine interface's [`agnijs_engine_api::RealmId`] is this index
+/// tagged with the engine's id. The VM checks the tag where a realm id
+/// comes in from the host (`Vm::realm_index`) and tags the index where one
+/// goes out (`Vm::api_realm`); inside, frames, environments and compiled
+/// code carry the bare 32-bit index (the JIT stores it as a `u32`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct RealmId(pub u32);
 
 macro_rules! intrinsics {
     ($($name:ident),* $(,)?) => {

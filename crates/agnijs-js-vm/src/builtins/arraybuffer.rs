@@ -3,7 +3,7 @@
 //! thread, so a SharedArrayBuffer is an ArrayBuffer that cannot be
 //! detached and grows instead of resizing.
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use super::typedarray::{
     read_element, write_element, BufferData, Converted, DataViewData, ElementKind,

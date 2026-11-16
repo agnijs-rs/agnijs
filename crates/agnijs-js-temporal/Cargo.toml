@@ -3,9 +3,8 @@ name = "agnijs-js-temporal"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-# temporal_rs 0.2 needs Rust 1.86; the workspace stays at 1.85 and only
-# builds with the engine's `temporal` feature need this crate (ADR 0027).
-rust-version = "1.86"
+# temporal_rs 0.2 needs Rust 1.86, below the workspace minimum (ADR 0027).
+rust-version.workspace = true
 repository.workspace = true
 description = "The temporal_rs seam for the AgniJS JavaScript engine: Temporal date, time, calendar and time zone arithmetic behind an engine-independent API"
 

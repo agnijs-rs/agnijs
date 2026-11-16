@@ -119,6 +119,10 @@ impl Drop for Inspected {
     }
 }
 
+// The CLI's debugging wrapper forwards every call to the engine it wraps;
+// it is an engine of this workspace, so it carries the seal (ADR 0026).
+impl agnijs::api::engine::sealed::Sealed for Inspected {}
+
 impl Engine for Inspected {
     fn info(&self) -> EngineInfo {
         self.debuggee.borrow_mut().engine().info()

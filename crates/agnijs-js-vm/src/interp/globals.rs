@@ -986,7 +986,7 @@ impl Vm {
 
     fn create_global_var_binding(
         &mut self,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
         global: ObjId,
         n: &Rc<str>,
         deletable: bool,
@@ -1006,7 +1006,7 @@ impl Vm {
 
     fn create_global_function_binding(
         &mut self,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
         global: ObjId,
         n: &Rc<str>,
         v: Value,
@@ -1349,7 +1349,7 @@ impl Vm {
             return Ok(arg);
         };
         let realm = self.frames[fi].realm;
-        if !self.host.can_compile_strings(realm) {
+        if !self.host.can_compile_strings(self.api_realm(realm)) {
             return Err(self.throw(
                 crate::vm::ErrorType::EvalError,
                 "Code generation from strings disallowed for this context",
@@ -1373,13 +1373,13 @@ impl Vm {
     /// Indirect eval: global environment of `realm`.
     pub fn indirect_eval(
         &mut self,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
         arg: Value,
     ) -> JsResult<Value> {
         let Value::String(s) = arg else {
             return Ok(arg);
         };
-        if !self.host.can_compile_strings(realm) {
+        if !self.host.can_compile_strings(self.api_realm(realm)) {
             return Err(self.throw(
                 crate::vm::ErrorType::EvalError,
                 "Code generation from strings disallowed for this context",
@@ -1409,7 +1409,7 @@ impl Vm {
         &mut self,
         code: Rc<CodeBlock>,
         env: Option<EnvId>,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
         this: Value,
         callee: Option<ObjId>,
         new_target: Value,

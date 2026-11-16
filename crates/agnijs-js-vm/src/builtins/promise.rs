@@ -34,7 +34,7 @@ pub enum ReactionKind {
 #[derive(Clone)]
 pub struct Capability {
     pub promise: ObjId,
-    pub realm: agnijs_engine_api::RealmId,
+    pub realm: crate::realm::RealmId,
     pub resolve: Value,
     pub reject: Value,
 }
@@ -68,12 +68,12 @@ pub enum Handler {
     /// body `gen` with the value (fulfil) or by throwing it (reject).
     Await {
         gen: ObjId,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
     },
     /// AsyncGeneratorAwaitReturn's continuation for `gen`.
     AsyncGenReturn {
         gen: ObjId,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
     },
 }
 
@@ -371,15 +371,17 @@ pub fn flush_rejections(vm: &mut Vm) {
         let pv = vm.to_api_value(Value::Object(p));
         let host = vm.host.clone();
         if handled {
-            host.promise_rejection(vm, realm, RejectionEvent::Handle { promise: pv });
+            let api_realm = vm.api_realm(realm);
+            host.promise_rejection(vm, api_realm, RejectionEvent::Handle { promise: pv });
         } else {
             let reason = promise_data(vm, p)
                 .map(|d| d.result)
                 .unwrap_or(Value::Undefined);
             let rv = vm.to_api_value(reason);
+            let api_realm = vm.api_realm(realm);
             host.promise_rejection(
                 vm,
-                realm,
+                api_realm,
                 RejectionEvent::Reject {
                     promise: pv,
                     reason: rv,
@@ -680,7 +682,7 @@ impl Vm {
     /// drops.
     fn run_continuation(
         &mut self,
-        realm: agnijs_engine_api::RealmId,
+        realm: crate::realm::RealmId,
         f: impl FnOnce(&mut Vm) -> JsResult<()>,
     ) -> JsResult<()> {
         let saved = self.current_realm;
@@ -762,7 +764,7 @@ impl Vm {
 
 // ---- the Promise constructor and prototype ----------------------------------------------
 
-pub fn install(vm: &mut Vm, realm: agnijs_engine_api::RealmId) {
+pub fn install(vm: &mut Vm, realm: crate::realm::RealmId) {
     let proto = vm.new_object();
     vm.realm_mut()
         .set_intrinsic(Intrinsic::PromisePrototype, proto);

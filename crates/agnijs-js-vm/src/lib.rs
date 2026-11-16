@@ -46,7 +46,7 @@ mod conformance_from_snapshot {
         thread_local! {
             static BYTES: Vec<u8> = {
                 let mut vm = crate::Vm::new(agnijs_engine_api::conformance::TestHost::new());
-                vm.write_snapshot(agnijs_engine_api::RealmId(0)).expect("snapshot")
+                vm.write_snapshot(crate::realm::RealmId(0)).expect("snapshot")
             };
         }
         BYTES.with(|b| b.clone())

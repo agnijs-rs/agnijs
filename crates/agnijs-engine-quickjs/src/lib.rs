@@ -54,7 +54,7 @@ type PersistentValue = Persistent<rquickjs::Value<'static>>;
 /// Field order matters: Rust drops fields in declaration order, and every
 /// persistent JS value must be freed before the contexts and the runtime.
 struct Shared {
-    #[allow(dead_code)]
+    /// Tags the handles and realm ids this engine issues.
     id: EngineId,
     handles: RefCell<HandleRegistry<PersistentValue>>,
     /// Saved intrinsics per realm: (eval, Function).
@@ -183,7 +183,7 @@ impl Loader for HostLoader {
                 shared
                     .sources
                     .borrow_mut()
-                    .insert((realm.0, name.to_string()), text.clone());
+                    .insert((realm.index(), name.to_string()), text.clone());
                 Module::declare(ctx.clone(), name, text)?
             }
             ModuleSource::Json(json) => {
@@ -201,6 +201,12 @@ impl Loader for HostLoader {
                 // this same QuickJS-NG version, which the format tag checked
                 // above guarantees; QuickJS validates the structure itself.
                 unsafe { Module::load(ctx.clone(), payload)? }
+            }
+            // A kind of source added to the interface after this adapter.
+            _ => {
+                let message = "a kind of module source this engine does not load".to_string();
+                *shared.loader_error.borrow_mut() = Some(message.clone());
+                return Err(rquickjs::Error::new_loading_message(name, message));
             }
         };
         // import.meta: let the host populate it now, while the module is
@@ -231,10 +237,10 @@ fn realm_of(shared: &Shared, ctx: &Ctx<'_>) -> RealmId {
     let realms = shared.realms.borrow();
     for (i, c) in realms.iter().enumerate() {
         if c.as_raw() == raw {
-            return RealmId(i as u32);
+            return RealmId::new(shared.id, i as u32);
         }
     }
-    RealmId(0)
+    RealmId::new(shared.id, 0)
 }
 
 // ---- engine -------------------------------------------------------------
@@ -301,10 +307,13 @@ impl QuickJsEngine {
     }
 
     fn context(&self, realm: RealmId) -> Result<Rc<Context>> {
+        if realm.engine() != self.shared.id {
+            return Err(Error::UnknownRealm);
+        }
         self.shared
             .realms
             .borrow()
-            .get(realm.0 as usize)
+            .get(realm.index() as usize)
             .cloned()
             .ok_or(Error::UnknownRealm)
     }
@@ -332,13 +341,16 @@ impl QuickJsEngine {
     /// Entry-point housekeeping: free dropped handles, sync the
     /// compile-strings switch.
     fn enter(&mut self, realm: RealmId) -> Result<()> {
+        // Another engine's realm id, or one this engine never issued, is
+        // refused before the host is asked about it.
+        self.context(realm)?;
         self.reclaim_handles();
         let allowed = self.shared.host.can_compile_strings(realm);
         let blocked = self
             .shared
             .compile_blocked
             .borrow()
-            .get(realm.0 as usize)
+            .get(realm.index() as usize)
             .copied()
             .unwrap_or(false);
         if allowed == blocked {
@@ -352,7 +364,7 @@ impl QuickJsEngine {
         self.with_ctx(realm, |ctx| -> rquickjs::Result<()> {
             let globals = ctx.globals();
             let mut intrinsics = shared.intrinsics.borrow_mut();
-            let slot = &mut intrinsics[realm.0 as usize];
+            let slot = &mut intrinsics[realm.index() as usize];
             if blocked {
                 let eval: rquickjs::Value = globals.get("eval")?;
                 let function: rquickjs::Value = globals.get("Function")?;
@@ -381,7 +393,7 @@ impl QuickJsEngine {
             Ok(())
         })?
         .map_err(|e| Error::Internal(e.to_string()))?;
-        self.shared.compile_blocked.borrow_mut()[realm.0 as usize] = blocked;
+        self.shared.compile_blocked.borrow_mut()[realm.index() as usize] = blocked;
         Ok(())
     }
 
@@ -786,6 +798,8 @@ fn split_location(loc: &str) -> (String, u32, u32) {
     }
 }
 
+impl agnijs_engine_api::engine::sealed::Sealed for QuickJsEngine {}
+
 impl Engine for QuickJsEngine {
     fn info(&self) -> EngineInfo {
         EngineInfo {
@@ -803,7 +817,7 @@ impl Engine for QuickJsEngine {
             // new context belongs to it, and `from_raw` takes over the one
             // reference `JS_NewContext` returns.
             unsafe {
-                let rt = qjs::JS_GetRuntime(self.context(RealmId(0))?.as_raw().as_ptr());
+                let rt = qjs::JS_GetRuntime(self.context(self.main_realm())?.as_raw().as_ptr());
                 let raw = qjs::JS_NewContext(rt);
                 let raw = std::ptr::NonNull::new(raw).ok_or(Error::OutOfMemory)?;
                 Context::from_raw(raw, self.shared.rt.clone())
@@ -814,7 +828,7 @@ impl Engine for QuickJsEngine {
         let id = {
             let mut realms = self.shared.realms.borrow_mut();
             realms.push(Rc::new(context));
-            RealmId((realms.len() - 1) as u32)
+            RealmId::new(self.shared.id, (realms.len() - 1) as u32)
         };
         self.shared.compile_blocked.borrow_mut().push(false);
         self.shared.intrinsics.borrow_mut().push(None);
@@ -831,7 +845,7 @@ impl Engine for QuickJsEngine {
     }
 
     fn main_realm(&self) -> RealmId {
-        RealmId(0)
+        RealmId::new(self.shared.id, 0)
     }
 
     fn global_object(&mut self, realm: RealmId) -> Result<Value> {
@@ -842,10 +856,11 @@ impl Engine for QuickJsEngine {
     }
 
     fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> Result<Value> {
+        self.context(realm)?;
         self.shared
             .sources
             .borrow_mut()
-            .insert((realm.0, name.to_string()), source.to_string());
+            .insert((realm.index(), name.to_string()), source.to_string());
         self.with_api(realm, |e, ctx| {
             let v = e.eval_in(ctx, name, source, qjs::JS_EVAL_TYPE_GLOBAL)?;
             Ok(e.to_api(ctx, v))
@@ -933,10 +948,11 @@ impl Engine for QuickJsEngine {
     }
 
     fn script_source(&mut self, realm: RealmId, name: &str) -> Option<String> {
+        self.context(realm).ok()?;
         self.shared
             .sources
             .borrow()
-            .get(&(realm.0, name.to_string()))
+            .get(&(realm.index(), name.to_string()))
             .cloned()
     }
 

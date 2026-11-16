@@ -12,10 +12,11 @@ use crate::object::{CallArgs, Class, HostObjectData, NativeData, NativeKind, Obj
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
+use crate::realm::RealmId;
 use agnijs_engine_api::{
     self as api, CallContext, Engine, EngineInfo, Error, ErrorKind, Exception, Handle, HeapKind,
     HostClassDef, HostClassId, HostFunction, HostObject, JsBigInt, JsString, MemoryUsage,
-    PromiseState, PropertyKey, RealmId, TypeOf,
+    PromiseState, PropertyKey, TypeOf,
 };
 use agnijs_js_compiler::bytecode::CodeBlock;
 use agnijs_js_parser::stack::StackBudget;
@@ -50,6 +51,10 @@ fn checksum(kind: u8, tree: &[u8]) -> u64 {
     const PRIME: u64 = 0x0000_0100_0000_01b3;
     let mut h: u64 = 0xcbf2_9ce4_8422_2325 ^ kind as u64;
     h = h.wrapping_mul(PRIME);
+    // `as_chunks` (clippy's suggestion at the 1.88 MSRV) measurably moved
+    // unrelated hot code in release builds (regex-long-input +15%), so
+    // these startup-only loops keep `chunks_exact`.
+    #[allow(clippy::chunks_exact_to_as_chunks)]
     let mut words = tree.chunks_exact(8);
     for w in &mut words {
         h ^= u64::from_le_bytes(w.try_into().unwrap());
@@ -204,6 +209,7 @@ fn decode_payload(bytes: &[u8]) -> Result<(Decoded, Vec<RegexEntry>), Error> {
     for _ in 0..count {
         let n = f.u32()?;
         let units = f.take(n.checked_mul(2).ok_or_else(|| Error::BytecodeCorrupt("truncated payload".into()))?)?;
+        #[allow(clippy::chunks_exact_to_as_chunks)] // see `checksum`
         let pattern = units.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
         let flags = f.take(1)?[0];
         let len = f.u32()?;
@@ -471,6 +477,21 @@ impl Vm {
         });
     }
 
+    /// The VM's index for a realm id from the host: `UnknownRealm` unless
+    /// this engine issued it (the id carries its engine, like a handle).
+    pub(crate) fn realm_index(&self, realm: api::RealmId) -> api::Result<RealmId> {
+        if realm.engine() == self.engine_id && (realm.index() as usize) < self.realms.len() {
+            Ok(RealmId(realm.index()))
+        } else {
+            Err(Error::UnknownRealm)
+        }
+    }
+
+    /// The realm id the host sees for one of this VM's realms.
+    pub(crate) fn api_realm(&self, realm: RealmId) -> api::RealmId {
+        api::RealmId::new(self.engine_id, realm.0)
+    }
+
     fn check_realm(&self, realm: RealmId) -> api::Result<()> {
         self.check_poisoned()?;
         if (realm.0 as usize) < self.realms.len() {
@@ -601,7 +622,7 @@ pub fn call_host_function(
         Some(vm.to_api_value(new_target))
     };
     let cx = CallContext {
-        realm,
+        realm: vm.api_realm(realm),
         this: this_v,
         args: args_v,
         new_target,
@@ -624,8 +645,12 @@ fn error_type(kind: ErrorKind) -> ErrorType {
         ErrorKind::ReferenceError => ErrorType::ReferenceError,
         ErrorKind::EvalError => ErrorType::EvalError,
         ErrorKind::UriError => ErrorType::URIError,
+        // A kind added to the interface after this engine.
+        _ => ErrorType::Error,
     }
 }
+
+impl api::engine::sealed::Sealed for Vm {}
 
 impl Engine for Vm {
     fn info(&self) -> EngineInfo {
@@ -635,23 +660,26 @@ impl Engine for Vm {
         }
     }
 
-    fn create_realm(&mut self) -> api::Result<RealmId> {
+    fn create_realm(&mut self) -> api::Result<api::RealmId> {
         self.check_poisoned()?;
         let _poison = self.poison_on_unwind();
-        Ok(Vm::create_realm(self))
+        let realm = Vm::create_realm(self);
+        Ok(self.api_realm(realm))
     }
 
-    fn main_realm(&self) -> RealmId {
-        RealmId(0)
+    fn main_realm(&self) -> api::RealmId {
+        self.api_realm(RealmId(0))
     }
 
-    fn global_object(&mut self, realm: RealmId) -> api::Result<api::Value> {
+    fn global_object(&mut self, realm: api::RealmId) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         let g = self.realm_of(realm).global;
         Ok(self.to_api_value(Value::Object(g)))
     }
 
-    fn eval_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<api::Value> {
+    fn eval_script(&mut self, realm: api::RealmId, name: &str, source: &str) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         let _stack = self.stack_guard();
         let code = match agnijs_js_compiler::compile_script(source, name) {
@@ -666,19 +694,22 @@ impl Engine for Vm {
         Ok(self.to_api_value(v))
     }
 
-    fn load_module(&mut self, realm: RealmId, specifier: &str) -> api::Result<api::Value> {
+    fn load_module(&mut self, realm: api::RealmId, specifier: &str) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let p = self.enter(realm, |vm| {
             vm.load_and_evaluate_module(realm, None, specifier, &[])
         })?;
         Ok(self.to_api_value(Value::Object(p)))
     }
 
-    fn release_module(&mut self, realm: RealmId, specifier: &str) -> api::Result<bool> {
+    fn release_module(&mut self, realm: api::RealmId, specifier: &str) -> api::Result<bool> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         Ok(self.modules.remove(&(realm, specifier.to_string())).is_some())
     }
 
-    fn run_jobs(&mut self, realm: RealmId) -> api::Result<usize> {
+    fn run_jobs(&mut self, realm: api::RealmId) -> api::Result<usize> {
+        let realm = self.realm_index(realm)?;
         self.run_pending_finalizers();
         self.enter(realm, |vm| vm.drain_jobs())
     }
@@ -687,7 +718,7 @@ impl Engine for Vm {
         !self.jobs.is_empty() || !self.pending_finalizers.is_empty()
     }
 
-    fn script_source(&mut self, _realm: RealmId, name: &str) -> Option<String> {
+    fn script_source(&mut self, _realm: api::RealmId, name: &str) -> Option<String> {
         self.scripts.get(name).map(|s| s.code.source.text.to_string())
     }
 
@@ -696,7 +727,8 @@ impl Engine for Vm {
         Ok(())
     }
 
-    fn compile_script(&mut self, realm: RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {
+    fn compile_script(&mut self, realm: api::RealmId, name: &str, source: &str) -> api::Result<Vec<u8>> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         let _stack = self.stack_guard();
         match agnijs_js_compiler::compile_script(source, name) {
@@ -707,10 +739,11 @@ impl Engine for Vm {
 
     fn compile_module(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         specifier: &str,
         source: &str,
     ) -> api::Result<Vec<u8>> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         let _stack = self.stack_guard();
         match agnijs_js_compiler::compile_module(source, specifier) {
@@ -719,7 +752,8 @@ impl Engine for Vm {
         }
     }
 
-    fn eval_bytecode(&mut self, realm: RealmId, bytecode: &[u8]) -> api::Result<api::Value> {
+    fn eval_bytecode(&mut self, realm: api::RealmId, bytecode: &[u8]) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         self.check_realm(realm)?;
         let _stack = self.stack_guard();
         let decoded = self.load_bytecode(bytecode, false)?;
@@ -755,7 +789,8 @@ impl Engine for Vm {
         }
     }
 
-    fn snapshot(&mut self, realm: RealmId) -> api::Result<Vec<u8>> {
+    fn snapshot(&mut self, realm: api::RealmId) -> api::Result<Vec<u8>> {
+        let realm = self.realm_index(realm)?;
         self.check_poisoned()?;
         let _poison = self.poison_on_unwind();
         self.write_snapshot(realm)
@@ -837,22 +872,26 @@ impl Engine for Vm {
         }
     }
 
-    fn to_string(&mut self, realm: RealmId, value: &api::Value) -> api::Result<String> {
+    fn to_string(&mut self, realm: api::RealmId, value: &api::Value) -> api::Result<String> {
+        let realm = self.realm_index(realm)?;
         let v = self.from_api_value(value)?;
         self.enter(realm, |vm| vm.to_rust_string(v))
     }
 
-    fn to_number(&mut self, realm: RealmId, value: &api::Value) -> api::Result<f64> {
+    fn to_number(&mut self, realm: api::RealmId, value: &api::Value) -> api::Result<f64> {
+        let realm = self.realm_index(realm)?;
         let v = self.from_api_value(value)?;
         self.enter(realm, |vm| vm.to_number(v))
     }
 
-    fn new_object(&mut self, realm: RealmId) -> api::Result<api::Value> {
+    fn new_object(&mut self, realm: api::RealmId) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let o = self.enter(realm, |vm| Ok(vm.new_object()))?;
         Ok(self.to_api_value(Value::Object(o)))
     }
 
-    fn new_array(&mut self, realm: RealmId, items: &[api::Value]) -> api::Result<api::Value> {
+    fn new_array(&mut self, realm: api::RealmId, items: &[api::Value]) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let mut vals = Vec::with_capacity(items.len());
         for i in items {
             vals.push(self.from_api_value(i)?);
@@ -863,15 +902,17 @@ impl Engine for Vm {
 
     fn new_error(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         kind: ErrorKind,
         message: &str,
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let v = self.enter(realm, |vm| Ok(vm.make_error(error_type(kind), message)))?;
         Ok(self.to_api_value(v))
     }
 
-    fn new_symbol(&mut self, realm: RealmId, description: &str) -> api::Result<api::Value> {
+    fn new_symbol(&mut self, realm: api::RealmId, description: &str) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let v = self.enter(realm, |vm| {
             let d = vm.heap.alloc_str(description);
             Ok(Value::Symbol(vm.heap.alloc_symbol(
@@ -883,10 +924,11 @@ impl Engine for Vm {
 
     fn get(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         object: &api::Value,
         key: &PropertyKey,
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let o = self.api_object(object)?;
         let k = self.api_key(key)?;
         let v = self.enter(realm, |vm| vm.get(o, k))?;
@@ -895,18 +937,20 @@ impl Engine for Vm {
 
     fn set(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         object: &api::Value,
         key: &PropertyKey,
         value: &api::Value,
     ) -> api::Result<()> {
+        let realm = self.realm_index(realm)?;
         let o = self.api_object(object)?;
         let k = self.api_key(key)?;
         let v = self.from_api_value(value)?;
         self.enter(realm, |vm| vm.set(o, k, v, true))
     }
 
-    fn has(&mut self, realm: RealmId, object: &api::Value, key: &PropertyKey) -> api::Result<bool> {
+    fn has(&mut self, realm: api::RealmId, object: &api::Value, key: &PropertyKey) -> api::Result<bool> {
+        let realm = self.realm_index(realm)?;
         let o = self.api_object(object)?;
         let k = self.api_key(key)?;
         self.enter(realm, |vm| vm.has_property(o, k))
@@ -914,16 +958,18 @@ impl Engine for Vm {
 
     fn delete(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         object: &api::Value,
         key: &PropertyKey,
     ) -> api::Result<bool> {
+        let realm = self.realm_index(realm)?;
         let o = self.api_object(object)?;
         let k = self.api_key(key)?;
         self.enter(realm, |vm| vm.delete_property(o, k))
     }
 
-    fn own_keys(&mut self, realm: RealmId, object: &api::Value) -> api::Result<Vec<PropertyKey>> {
+    fn own_keys(&mut self, realm: api::RealmId, object: &api::Value) -> api::Result<Vec<PropertyKey>> {
+        let realm = self.realm_index(realm)?;
         let o = self.api_object(object)?;
         let keys = self.enter(realm, |vm| {
             let all = vm.own_property_keys(o)?;
@@ -945,11 +991,12 @@ impl Engine for Vm {
 
     fn call(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         function: &api::Value,
         this: &api::Value,
         args: &[api::Value],
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         self.host_call_safe_point();
         let f = self.from_api_value(function)?;
         let t = self.from_api_value(this)?;
@@ -968,10 +1015,11 @@ impl Engine for Vm {
 
     fn construct(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         constructor: &api::Value,
         args: &[api::Value],
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         self.host_call_safe_point();
         let c = self.from_api_value(constructor)?;
         let mut vals = Vec::with_capacity(args.len());
@@ -1003,7 +1051,7 @@ impl Engine for Vm {
 
     fn promise_state(
         &mut self,
-        _realm: RealmId,
+        _realm: api::RealmId,
         promise: &api::Value,
     ) -> api::Result<PromiseState> {
         let o = self.api_object(promise)?;
@@ -1022,7 +1070,7 @@ impl Engine for Vm {
         })
     }
 
-    fn detach_array_buffer(&mut self, _realm: RealmId, buffer: &api::Value) -> api::Result<()> {
+    fn detach_array_buffer(&mut self, _realm: api::RealmId, buffer: &api::Value) -> api::Result<()> {
         let o = self.api_object(buffer)?;
         match &mut self.heap.obj_mut(o).class {
             Class::ArrayBuffer(b) => {
@@ -1039,10 +1087,11 @@ impl Engine for Vm {
 
     fn new_function(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         name: &str,
         f: Rc<HostFunction>,
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let o = self.enter(realm, |vm| {
             let proto = vm.intrinsic_in(realm, Intrinsic::FunctionPrototype);
             let data = NativeData {
@@ -1080,11 +1129,12 @@ impl Engine for Vm {
 
     fn new_host_object(
         &mut self,
-        realm: RealmId,
+        realm: api::RealmId,
         class: HostClassId,
         data: Box<dyn HostObject>,
         prototype: Option<&api::Value>,
     ) -> api::Result<api::Value> {
+        let realm = self.realm_index(realm)?;
         let proto = match prototype {
             Some(p) => Some(self.api_object(p)?),
             None => None,

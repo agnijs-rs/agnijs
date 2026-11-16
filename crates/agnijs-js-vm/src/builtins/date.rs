@@ -26,7 +26,7 @@ enum Defaults {
     Time,
     All,
 }
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use crate::convert::Hint;
 use crate::object::{CallArgs, Class, ObjectData};

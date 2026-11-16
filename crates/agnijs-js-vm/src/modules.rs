@@ -13,7 +13,8 @@ use crate::gc::Tracer;
 use crate::object::{CallArgs, Class, ObjectData};
 use crate::value::{Attrs, EnvId, ObjId, PropKey, Property, PropertyDescriptor, StrId, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
-use agnijs_engine_api::{ImportAttribute, ModuleSource, RealmId};
+use agnijs_engine_api::{ImportAttribute, ModuleSource};
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{CodeBlock, ScopeKind};
 use std::rc::Rc;
 
@@ -360,6 +361,11 @@ impl Vm {
             ModuleSource::Json(text) => {
                 let v = crate::builtins::json::parse_json_text(self, &text)?;
                 self.new_module_record(realm, &resolved, None, Some(v))
+            }
+            // A kind of source added to the interface after this engine.
+            _ => {
+                return self
+                    .type_error(&format!("Module '{resolved}' has a kind of source this engine does not load"))
             }
         };
         self.modules.insert((realm, resolved.clone()), module);
@@ -1109,7 +1115,8 @@ pub fn import_meta(vm: &mut Vm, fi: usize) -> JsResult<Value> {
     let specifier = record(vm, module).specifier.clone();
     let host = vm.host.clone();
     let api_meta = vm.to_api_value(Value::Object(meta));
-    let r = host.import_meta(vm, realm, &specifier, &api_meta);
+    let api_realm = vm.api_realm(realm);
+    let r = host.import_meta(vm, api_realm, &specifier, &api_meta);
     if let Err(e) = r {
         return Err(vm.api_error_to_fault(e));
     }

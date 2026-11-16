@@ -4,7 +4,7 @@ A pure-Rust, embeddable JavaScript engine: full ES2025 (test262-complete, with t
 
 AgniJS began as the engine of [Gable](https://github.com/jcannon98188/gable) Native and was extracted into this repository with its full history (TASK-100.12). Gable depends on it by pinned git revision; it is meant to be useful to any embedder.
 
-> Status: pre-release. The embedding surface is the `agnijs` crate: `Context` for the common cases and `agnijs::api`, the engine interface (a handle-based, host-driven trait, ADR 0006, ADR 0026). Start with the [embedding guide](docs/embedding-guide.md) and the [cookbook](docs/embedding-cookbook.md); [`examples/embed-minimal`](examples/embed-minimal) is a complete program. Nothing is published to crates.io yet and the crate names may change before then. [`docs/stability.md`](docs/stability.md) says what is versioned and promised today: the Rust API (semver, checked in CI), the C ABI, the bytecode and snapshot formats, the CLI and the DevTools protocol.
+> Status: pre-release. The embedding surface is the `agnijs` crate: `Context` for the common cases and `agnijs::api`, the engine interface (a handle-based, host-driven trait, ADR 0006, ADR 0026). Start with the [embedding guide](docs/embedding-guide.md) and the [cookbook](docs/embedding-cookbook.md); [`examples/embed-minimal`](examples/embed-minimal) is a complete program. Nothing is published to crates.io yet and the crate names may change before then. [`docs/stability.md`](docs/stability.md) says what is versioned and promised today: the Rust API (semver, checked in CI), the C ABI, the bytecode and snapshot formats, the CLI and the DevTools protocol. [CHANGELOG.md](CHANGELOG.md) lists what each version changed for embedders.
 
 ## Conformance
 
@@ -57,7 +57,7 @@ The engine has no ambient authority: script reaches only what the host grants. M
 
 `agnijs-js-vm`'s default features are `intl` (ECMA-402 on ICU4X) and `linear-regex`. Building without `intl` drops the `Intl` global and all of ICU4X: about 3.6 MB instead of about 20.5 MB, stripped (QuickJS-NG is about 1.2 MB, Boa about 10.8 MB). A custom ICU4X data directory trimmed to an app's locales sits in between. [`docs/binary-size.md`](docs/binary-size.md) has the numbers, what each profile drops, the data-trimming recipe and a comparison with QuickJS-NG and Boa.
 
-Rust 1.85 or newer. Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
+Rust 1.88 or newer for the libraries (the `agnijs` command needs 1.95, the opt-in JIT 1.97; see [docs/stability.md](docs/stability.md#minimum-supported-rust-version)). Work is tracked with [Backlog.md](https://github.com/MrLesk/Backlog.md) in `backlog/`; see `AGENTS.md`.
 
 ## License
 

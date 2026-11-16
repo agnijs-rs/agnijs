@@ -6,7 +6,7 @@ use crate::object::CallArgs;
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_compiler::DynamicFunctionKind;
 
 pub fn install(vm: &mut Vm, _realm: RealmId) {

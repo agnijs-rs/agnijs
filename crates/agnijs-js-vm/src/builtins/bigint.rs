@@ -5,7 +5,7 @@ use crate::object::{CallArgs, Class, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::{BigId, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use num_bigint::BigInt;
 
 pub fn install(vm: &mut Vm, realm: RealmId) {

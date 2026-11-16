@@ -7,7 +7,8 @@ use crate::realm::Intrinsic;
 use crate::string::{is_js_whitespace, StrBuilder};
 use crate::value::{Attrs, Value};
 use crate::vm::{ErrorType, JsResult, Vm};
-use agnijs_engine_api::{ConsoleLevel, RealmId};
+use agnijs_engine_api::ConsoleLevel;
+use crate::realm::RealmId;
 
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let global = vm.realm_of(realm).global;
@@ -429,7 +430,7 @@ fn console_emit(vm: &mut Vm, a: &CallArgs, level: ConsoleLevel) -> JsResult<Valu
         parts.push(s);
     }
     let host = vm.host.clone();
-    host.console(vm.current_realm, level, parts);
+    host.console(vm.api_realm(vm.current_realm), level, parts);
     Ok(Value::Undefined)
 }
 

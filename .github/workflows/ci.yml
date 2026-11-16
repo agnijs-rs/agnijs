@@ -208,6 +208,27 @@ jobs:
           path: target/fuzz-inputs
           if-no-files-found: ignore
 
+  msrv:
+    # The workspace's default features built with the toolchain its
+    # `rust-version` names (docs/stability.md#minimum-supported-rust-version).
+    # The JIT crate (opt-in) and the command declare their own, newer
+    # minimums and are left out.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The workspace MSRV from Cargo.toml
+        id: msrv
+        run: echo "version=$(grep -m1 '^rust-version' Cargo.toml | cut -d'"' -f2)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+          key: msrv
+      - name: Build the workspace at the MSRV (${{ steps.msrv.outputs.version }})
+        run: cargo build --workspace --locked --exclude agnijs-js-jit --exclude agnijs-cli
+
   capi-checks:
     # The checked-in header matches the sources, clippy is clean, the C test
     # runs under AddressSanitizer and LeakSanitizer, and the raw-pointer

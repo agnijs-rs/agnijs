@@ -473,7 +473,7 @@ pub fn f16_bits_to_f64(h: u16) -> f64 {
     sign * (1.0 + mant / 1024.0) * 2f64.powi(exp - 15)
 }
 
-pub fn install(vm: &mut Vm, realm: agnijs_engine_api::RealmId) {
+pub fn install(vm: &mut Vm, realm: crate::realm::RealmId) {
     super::arraybuffer::install(vm, realm);
     super::typedarray_ctor::install(vm, realm);
     super::atomics::install(vm, realm);

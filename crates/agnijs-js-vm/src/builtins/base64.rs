@@ -7,7 +7,7 @@ use crate::builtins::typedarray_ctor::{allocate_typed_array, kind_intrinsics, ta
 use crate::object::{CallArgs, Class};
 use crate::value::{ObjId, PropKey, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 pub fn install(vm: &mut Vm, _realm: RealmId) {
     let (ci, pi) = kind_intrinsics(ElementKind::Uint8);
@@ -309,7 +309,7 @@ fn hex_value(c: u16) -> Option<u8> {
 /// FromHex(string, maxLength).
 fn decode_hex(s: &[u16], max_len: usize) -> Decoded {
     let mut d = Decoded { read: 0, bytes: Vec::new(), error: false };
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         d.error = true;
         return d;
     }

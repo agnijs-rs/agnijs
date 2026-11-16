@@ -250,6 +250,8 @@ impl Host for CliHost {
                     r.remove(i);
                 }
             }
+            // An event added to the engine interface later: not tracked.
+            _ => {}
         }
     }
 

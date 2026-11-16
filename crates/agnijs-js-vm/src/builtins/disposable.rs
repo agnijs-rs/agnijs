@@ -16,7 +16,7 @@ use crate::object::{CallArgs, Class, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Value};
 use crate::vm::{ErrorType, Fault, JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 /// How a resource's dispose method is called.
 #[derive(Clone, Copy, PartialEq, Eq)]

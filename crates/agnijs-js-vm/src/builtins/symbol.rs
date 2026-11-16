@@ -5,7 +5,7 @@ use crate::realm::Intrinsic;
 use crate::symbol::{SymbolData, SymbolKind};
 use crate::value::{Attrs, PropKey, SymId, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 pub fn install(vm: &mut Vm, realm: RealmId) {
     let object_proto = vm.intrinsic(Intrinsic::ObjectPrototype);

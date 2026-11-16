@@ -38,7 +38,7 @@ use crate::object::NativeFn;
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Value};
 use crate::vm::Vm;
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 pub fn install(vm: &mut Vm, realm: RealmId) {
     // %Function.prototype% is itself callable and everything else hangs off it.

@@ -52,7 +52,8 @@ pub enum Error {
     OutOfFuel,
     /// A handle from another engine, or an already-released slot.
     ForeignHandle,
-    /// The realm id is unknown.
+    /// The realm id is unknown: this engine did not issue it (another
+    /// engine did, or no engine did).
     UnknownRealm,
     /// Bytecode produced by a different engine or format version.
     BytecodeMismatch { expected: String, found: String },

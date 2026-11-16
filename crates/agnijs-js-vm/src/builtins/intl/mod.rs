@@ -15,7 +15,7 @@ pub mod pluralrules;
 pub mod relativetimeformat;
 pub mod segmenter;
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use crate::gc::Tracer;
 use crate::object::{CallArgs, Class, ObjectData};

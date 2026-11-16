@@ -13,7 +13,7 @@ use crate::object::{CallArgs, Class, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
 use crate::vm::{Fault, JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 const KIND_MAP: u8 = 0;
 const KIND_FILTER: u8 = 1;

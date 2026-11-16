@@ -17,7 +17,7 @@ default = ["linear-regex", "intl"]
 intl = ["dep:agnijs-js-intl"]
 # Temporal on temporal_rs (agnijs-js-temporal, ADR 0027). Off by default
 # while the built-ins are completed (TASK-103.8); with it the realm has a
-# `Temporal` global. Needs Rust 1.86.
+# `Temporal` global.
 temporal = ["dep:agnijs-js-temporal"]
 # The linear-time regular-expression matcher (ADR 0013 addendum). Without
 # it every pattern backtracks, whatever Host::regex_matcher says.

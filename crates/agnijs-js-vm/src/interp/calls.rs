@@ -8,7 +8,7 @@ use crate::object::{
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, PropSlot, Property, ShapeId, StrId, Value};
 use crate::vm::{ErrorType, FnShape, Fault, JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{CodeBlock, CodeKind, ConstString};
 use agnijs_js_parser::ast::FunctionKind;
 use std::rc::Rc;

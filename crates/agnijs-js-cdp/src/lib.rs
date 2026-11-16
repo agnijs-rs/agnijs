@@ -121,6 +121,8 @@ fn level_name(level: ConsoleLevel) -> &'static str {
         ConsoleLevel::Warn => "warning",
         ConsoleLevel::Error => "error",
         ConsoleLevel::Debug => "debug",
+        // A level added to the interface after this adapter.
+        _ => "log",
     }
 }
 
@@ -317,10 +319,10 @@ impl Session {
                 self.event(
                     "Runtime.executionContextCreated",
                     json!({"context": {
-                        "id": self.realm.0 + 1,
+                        "id": self.realm.index() + 1,
                         "origin": "",
                         "name": "main",
-                        "uniqueId": format!("agnijs-{}", self.realm.0 + 1),
+                        "uniqueId": format!("agnijs-{}", self.realm.index() + 1),
                         "auxData": {"isDefault": true},
                     }}),
                 );
@@ -801,7 +803,7 @@ impl Session {
             "startColumn": 0,
             "endLine": s.end_line,
             "endColumn": s.end_column,
-            "executionContextId": s.realm.0 + 1,
+            "executionContextId": s.realm.index() + 1,
             "hash": hash,
             "isModule": s.kind == agnijs_js_debugger::ScriptKind::Module,
             "length": source.encode_utf16().count(),
@@ -965,7 +967,7 @@ impl DebugClient for Session {
             json!({
                 "type": level_name(level),
                 "args": args,
-                "executionContextId": realm.0 + 1,
+                "executionContextId": realm.index() + 1,
                 "timestamp": timestamp(),
             }),
         );
@@ -997,7 +999,7 @@ impl DebugClient for Session {
             "lineNumber": top.map(|f| f.line).unwrap_or(0),
             "columnNumber": top.map(|f| f.column).unwrap_or(0),
             "exception": exception,
-            "executionContextId": self.realm.0 + 1,
+            "executionContextId": self.realm.index() + 1,
             "stackTrace": { "callFrames": e.stack.iter().map(stack_frame_json).collect::<Vec<_>>() },
         });
         if let Some(f) = top {

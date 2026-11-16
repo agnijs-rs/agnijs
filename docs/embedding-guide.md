@@ -248,12 +248,12 @@ Every engine call returns `agnijs::api::Result`. The `Error` kinds an embedder h
 | `Interrupted` | The `interrupt` hook returned true. | Usable |
 | `OutOfMemory` | The memory limit was reached. | Usable |
 | `OutOfFuel` | The fuel budget ran out. | Usable once fuel is set again |
-| `ForeignHandle`, `UnknownRealm` | A handle from another engine, or a realm id this engine does not have: a host bug. | Usable |
+| `ForeignHandle`, `UnknownRealm` | A handle or a realm id from another engine, or a realm id this engine never issued: a host bug. | Usable |
 | `BytecodeMismatch`, `BytecodeCorrupt` | Bytecode or a snapshot from another build, or damaged. | Usable |
 | `Host(message)` | A host hook failed. | Usable |
 | `Poisoned` | A panic unwound through this engine earlier; every later call that runs code is refused. | Drop it |
 
-`Error` is `#[non_exhaustive]`: new kinds may be added in a minor version, so a `match` on it needs a wildcard arm. A panic in a host function or hook is not caught; it unwinds to the caller and poisons the engine. The C API catches panics at its boundary instead ([c-api.md](c-api.md)).
+`Error` is `#[non_exhaustive]`: new kinds may be added in a minor version, so a `match` on it needs a wildcard arm. So are the enums a host receives in its hooks (`ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher`, `ErrorKind`): give each `match` a wildcard arm that does something harmless, such as logging a console message of an unknown level as `Log`. A panic in a host function or hook is not caught; it unwinds to the caller and poisons the engine. The C API catches panics at its boundary instead ([c-api.md](c-api.md)).
 
 ```rust
 use agnijs::api::{Engine, Error, Host};

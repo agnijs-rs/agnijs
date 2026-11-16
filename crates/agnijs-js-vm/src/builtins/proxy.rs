@@ -459,7 +459,7 @@ pub fn proxy_construct(
 
 // ---- constructor ---------------------------------------------------------------------
 
-pub fn install(vm: &mut Vm, realm: agnijs_engine_api::RealmId) {
+pub fn install(vm: &mut Vm, realm: crate::realm::RealmId) {
     let ctor = vm.new_native_ctor("Proxy", 2, proxy_constructor);
     vm.realm_mut().set_intrinsic(Intrinsic::Proxy, ctor);
     vm.method(ctor, "revocable", 2, proxy_revocable);

@@ -6,7 +6,8 @@ use crate::interp::Frame;
 use crate::object::{CallArgs, Class, NativeData, NativeFn, NativeKind, NativeTag, ObjectData};
 use crate::realm::{Intrinsic, Realm};
 use crate::value::{Attrs, ObjId, PropKey, Property, ShapeId, StrId, SymId, Value};
-use agnijs_engine_api::{EngineId, Host, RealmId};
+use agnijs_engine_api::{EngineId, Host};
+use crate::realm::RealmId;
 use hashbrown::HashMap;
 use std::collections::VecDeque;
 use std::rc::Rc;
@@ -488,6 +489,8 @@ impl Vm {
             agnijs_engine_api::RegexMatcher::LinearWhenEligible => {
                 agnijs_js_regex::MatcherMode::LinearWhenEligible
             }
+            // A policy added to the interface after this engine.
+            _ => agnijs_js_regex::MatcherMode::Auto,
         };
         Vm {
             heap,

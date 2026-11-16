@@ -4,7 +4,7 @@ use crate::object::{CallArgs, Class, ObjectData};
 use crate::realm::Intrinsic;
 use crate::value::Value;
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use num_bigint::BigInt;
 use num_traits::{One, Zero};
 

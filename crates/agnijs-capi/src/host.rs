@@ -409,6 +409,9 @@ impl api::Host for CHost {
         let (kind, values) = match event {
             api::RejectionEvent::Reject { promise, reason } => (AGNIJS_REJECTION_UNHANDLED, vec![Some(promise), Some(reason)]),
             api::RejectionEvent::Handle { promise } => (AGNIJS_REJECTION_HANDLED, vec![Some(promise), None]),
+            // An event added to the engine interface that the C ABI has no
+            // constant for yet is not reported.
+            _ => return,
         };
         let Ok((guard, ids)) = Borrowed::new(e, values) else { return };
         let p = ids.first().copied().unwrap_or(0);
@@ -431,6 +434,9 @@ impl api::Host for CHost {
             api::ConsoleLevel::Warn => AGNIJS_CONSOLE_WARN,
             api::ConsoleLevel::Error => AGNIJS_CONSOLE_ERROR,
             api::ConsoleLevel::Debug => AGNIJS_CONSOLE_DEBUG,
+            // A level added to the engine interface that the C ABI has no
+            // constant for yet is reported as a log.
+            _ => AGNIJS_CONSOLE_LOG,
         };
         let Ok(realm_id) = with_state(self.engine, true, |st| Ok(st.realm_id(realm))) else { return };
         let text = c_text(&args.join(" "));

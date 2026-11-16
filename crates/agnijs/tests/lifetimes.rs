@@ -245,9 +245,33 @@ fn a_handle_from_another_engine_is_an_error_not_a_panic() {
 }
 
 #[test]
+fn a_realm_id_from_another_engine_is_an_error_not_another_realm() {
+    let (mut a, realm_a, _, _) = setup();
+    let (mut b, realm_b, _, _) = setup();
+    let second_a = a.create_realm().unwrap();
+    a.eval_script(realm_a, "a.js", "globalThis.marker = 'a'").unwrap();
+    b.eval_script(realm_b, "b.js", "globalThis.marker = 'b'").unwrap();
+    // Both main realms have index 0; the engine tag tells them apart.
+    for foreign in [realm_a, second_a] {
+        assert!(matches!(
+            b.eval_script(foreign, "x.js", "marker"),
+            Err(Error::UnknownRealm)
+        ));
+        assert!(matches!(b.global_object(foreign), Err(Error::UnknownRealm)));
+        assert!(matches!(b.new_object(foreign), Err(Error::UnknownRealm)));
+        assert!(matches!(b.run_jobs(foreign), Err(Error::UnknownRealm)));
+    }
+    assert_eq!(
+        b.eval_script(realm_b, "b.js", "marker").unwrap(),
+        Value::string("b")
+    );
+}
+
+#[test]
 fn an_unknown_realm_is_an_error() {
-    let (mut engine, _, _, _) = setup();
-    let nowhere = RealmId(9_999);
+    let (mut engine, main, _, _) = setup();
+    // An index this engine never issued, with this engine's tag.
+    let nowhere = RealmId::new(main.engine(), 9_999);
     assert!(matches!(
         engine.eval_script(nowhere, "x.js", "1"),
         Err(Error::UnknownRealm)

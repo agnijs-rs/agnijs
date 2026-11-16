@@ -19,7 +19,12 @@ pub struct ImportAttribute {
 }
 
 /// What the host hands back for a module specifier.
+///
+/// `#[non_exhaustive]`: a new kind of module source may be added in a minor
+/// version. Code outside this crate that matches it needs a wildcard arm;
+/// an engine fails to load a module whose kind of source it does not know.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum ModuleSource {
     /// JavaScript module source text.
     Source(String),
@@ -36,7 +41,12 @@ pub enum ModuleSource {
 
 /// Console levels. The engine provides the `console` global and routes every
 /// call here; the host decides where messages go.
+///
+/// `#[non_exhaustive]`: a new level may be added in a minor version, so a
+/// host's match needs a wildcard arm. Treat a level you do not know as
+/// [`ConsoleLevel::Log`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ConsoleLevel {
     Log,
     Info,
@@ -46,7 +56,12 @@ pub enum ConsoleLevel {
 }
 
 /// Promise-rejection tracking (`HostPromiseRejectionTracker`).
+///
+/// `#[non_exhaustive]`: a new event may be added in a minor version, so a
+/// host's match needs a wildcard arm. An event you do not know can be
+/// ignored: it reports, it does not ask for anything.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum RejectionEvent {
     /// A promise was rejected with no handler attached.
     Reject { promise: Value, reason: Value },
@@ -56,7 +71,11 @@ pub enum RejectionEvent {
 
 /// Which regular-expression matcher an engine may use. Both give the same
 /// results; they differ in worst-case time.
+///
+/// `#[non_exhaustive]`: a new policy may be added in a minor version. An
+/// engine treats a policy it does not know as [`RegexMatcher::Auto`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RegexMatcher {
     /// The engine picks per pattern and input. Patterns whose backtracking
     /// worst case is exponential or too large for the input run on a

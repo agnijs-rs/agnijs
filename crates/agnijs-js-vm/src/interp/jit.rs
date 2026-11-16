@@ -1402,7 +1402,7 @@ impl Runtime<Value> for JitRt<'_> {
         CallView {
             frames: &mut vm.frames as *mut Vec<Frame> as *mut u8,
             registers: &mut vm.regs as *mut Vec<Value> as *mut u8,
-            realm: &mut vm.current_realm as *mut agnijs_engine_api::RealmId as *mut u8,
+            realm: &mut vm.current_realm as *mut crate::realm::RealmId as *mut u8,
             callees: vm.jit.callees.base(),
         }
     }
@@ -1715,7 +1715,7 @@ fn jit_call_layout(code: &Rc<CodeBlock>) -> Option<CallLayout> {
 fn compute_call_layout(code: &Rc<CodeBlock>) -> Option<CallLayout> {
     use crate::object::{class_tag, Class, ConstructorKind, FunctionData, ObjectData};
     use crate::value::{EnvId, ObjId};
-    use agnijs_engine_api::RealmId;
+    use crate::realm::RealmId;
     use std::mem::{offset_of, size_of};
     fn addr<T>(r: &T) -> usize {
         r as *const T as usize

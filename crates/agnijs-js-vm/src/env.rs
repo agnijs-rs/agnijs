@@ -6,7 +6,7 @@
 //! dynamic lookup (`with`, direct `eval`) and the debugger can find them.
 
 use crate::value::{EnvId, ObjId, Value};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, ScopeInfo};
 use indexmap::IndexMap;
 use std::rc::Rc;

@@ -5,7 +5,7 @@ use crate::realm::Intrinsic;
 use crate::string::{StrBuilder, Units};
 use crate::value::{Attrs, ObjId, PropKey, StrId, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_parser::number::{format_js_number, NUMBER_BUF_LEN};
 
 pub fn install(vm: &mut Vm, realm: RealmId) {

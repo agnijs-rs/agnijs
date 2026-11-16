@@ -88,7 +88,7 @@ pub fn text(rng: &mut Rng, input: &[u8], others: &[Vec<u8>]) -> Vec<u8> {
                 };
             }
             11 | 12 if !others.is_empty() => {
-                let other: Vec<char> = String::from_utf8_lossy(rng.pick(others)).chars().collect();
+                let other: Vec<char> = String::from_utf8_lossy(rng.pick(others).as_slice()).chars().collect();
                 if !other.is_empty() {
                     let from = rng.below(other.len());
                     let n = 1 + rng.below((other.len() - from).min(64));

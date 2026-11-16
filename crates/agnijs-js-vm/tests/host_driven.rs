@@ -447,8 +447,9 @@ fn each_realm_has_its_own_module_map_and_runs_bytecode() {
 
 #[test]
 fn an_unknown_realm_is_refused() {
-    let (_host, mut e, _main) = engine();
-    let bogus = RealmId(9999);
+    let (_host, mut e, main) = engine();
+    // An index this engine never issued, with this engine's tag.
+    let bogus = RealmId::new(main.engine(), 9999);
     assert!(matches!(
         e.eval_script(bogus, "x.js", "1"),
         Err(Error::UnknownRealm)

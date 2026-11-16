@@ -2,7 +2,7 @@
 //! §24.1–24.4 and §26.1–26.2), including the ES2025 Set methods, plus the
 //! weak-reference processing the collector calls between mark and sweep.
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use crate::gc::Tracer;
 use crate::object::{CallArgs, Class, IterKind, ObjectData};

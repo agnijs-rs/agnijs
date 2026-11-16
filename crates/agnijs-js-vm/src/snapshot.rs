@@ -64,7 +64,8 @@ use crate::string::Units;
 use crate::symbol::{PrivateElement, SymbolData, SymbolKind};
 use crate::value::{Attrs, BigId, EnvId, ObjId, PropKey, PropSlot, Property, StrId, SymId, Value};
 use crate::vm::Vm;
-use agnijs_engine_api::{self as api, Error, RealmId};
+use agnijs_engine_api::{self as api, Error};
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, CodeKind, Constant};
 use agnijs_js_debugger::ScriptKind;
 use hashbrown::HashMap;
@@ -226,6 +227,7 @@ impl Fnv {
         self.bytes(s.as_bytes());
     }
     fn bytes(&mut self, b: &[u8]) {
+        #[allow(clippy::chunks_exact_to_as_chunks)] // see `checksum` in engine.rs
         let mut words = b.chunks_exact(8);
         for w in &mut words {
             let mut a = [0u8; 8];
@@ -1623,6 +1625,7 @@ fn load(vm: &mut Vm, body: &[u8]) -> Result<(), Error> {
         let n = r.count(if flags & 2 != 0 { 2 } else { 1 })?;
         let id = if flags & 2 != 0 {
             let raw = r.take(n * 2)?;
+            #[allow(clippy::chunks_exact_to_as_chunks)] // see `checksum` in engine.rs
             let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
             if atom {
                 vm.heap.atom_utf16(&units)
@@ -2377,10 +2380,11 @@ mod tests {
         let realm = vm.main_realm();
         vm.eval_script(realm, "a.js", "var f = (() => { let a = 1, b = 2; return () => a + b; })();")
             .unwrap();
-        let bytes = vm.write_snapshot(realm).unwrap();
+        let bytes = vm.write_snapshot(RealmId(0)).unwrap();
         let mut vm = restore(Rc::new(NullHost), &bytes).unwrap();
+        // The restored VM is another engine: its realm ids carry its own tag.
         let realm = vm.main_realm();
-        let global = vm.realm_of(realm).global;
+        let global = vm.realm_of(RealmId(0)).global;
         let key = PropKey::Str(vm.heap.atom_units(Units::One(b"f")));
         let Some(Value::Object(f)) = vm.heap.get_own_property(global, key).and_then(|p| p.value()) else {
             panic!("f")

@@ -15,7 +15,8 @@ use crate::value::{
     Attrs, BigId, EnvId, ObjId, OptObj, PropKey, PropSlot, Property, ShapeId, StrId, SymId, Value,
 };
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::{HostClassId, HostFunction, HostObject, RealmId};
+use agnijs_engine_api::{HostClassId, HostFunction, HostObject};
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::CodeBlock;
 use hashbrown::HashMap;
 use indexmap::IndexMap;

@@ -35,11 +35,11 @@
 //! - **A handle is engine-wide.** It works in every realm of the engine that
 //!   issued it (all realms share one heap), whichever realm created the
 //!   value.
-//! - **A [`RealmId`] is an index, valid on the engine that issued it.**
-//!   Realms live as long as their engine; nothing drops a realm on its own.
-//!   An id the engine never issued is [`crate::Error::UnknownRealm`]. A
-//!   realm id is not tagged with its engine the way a handle is, so an id
-//!   from another engine names whichever realm has that index here, if any.
+//! - **A [`RealmId`] is valid on the engine that issued it.** Realms live
+//!   as long as their engine; nothing drops a realm on its own. A realm id
+//!   is tagged with its engine the way a handle is, so an id from another
+//!   engine, like one this engine never issued, is
+//!   [`crate::Error::UnknownRealm`] from every call that takes a realm.
 //! - **Handles are single-threaded.** `Handle` is neither `Send` nor `Sync`,
 //!   like the engine.
 //! - **Misuse is an error, never undefined behaviour.** The engine crates
@@ -116,14 +116,39 @@ impl PartialEq<str> for JsString {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct JsBigInt(pub String);
 
-/// Identifies a realm created by [`crate::Engine::create_realm`]: an index
-/// valid on the engine that issued it, for that engine's lifetime (see the
-/// [module docs](crate::value#lifetimes)).
+/// Identifies a realm created by [`crate::Engine::create_realm`] or returned
+/// by [`crate::Engine::main_realm`]: valid on the engine that issued it, for
+/// that engine's lifetime (see the [module docs](crate::value#lifetimes)).
+/// It is tagged with that engine, like a [`Handle`], so another engine
+/// refuses it with [`crate::Error::UnknownRealm`] rather than reading it as
+/// one of its own realms. Only an engine creates realm ids.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct RealmId(pub u32);
+pub struct RealmId {
+    engine: EngineId,
+    index: u32,
+}
 
-/// Which engine a handle belongs to. Handles from one engine instance must not
-/// be given to another; engines check this and report [`crate::Error::ForeignHandle`].
+impl RealmId {
+    /// The id of realm `index` of `engine`. Implementor-only (ADR 0026):
+    /// engines create realm ids, embedders receive them.
+    #[doc(hidden)]
+    pub fn new(engine: EngineId, index: u32) -> Self {
+        RealmId { engine, index }
+    }
+    /// The engine that issued this id.
+    pub fn engine(self) -> EngineId {
+        self.engine
+    }
+    /// The realm's index within its engine. Implementor-only (ADR 0026).
+    #[doc(hidden)]
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
+/// Which engine a handle or a realm id belongs to. Handles and realm ids from
+/// one engine instance must not be given to another; engines check this and
+/// report [`crate::Error::ForeignHandle`] or [`crate::Error::UnknownRealm`].
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct EngineId(pub u64);
 

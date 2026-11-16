@@ -223,8 +223,8 @@ fn misuse_errors_throw_a_type_error() {
     define(&mut *engine, realm, "foreignArg", move |engine, cx| {
         engine.get(cx.realm, &foreign, &PropertyKey::from("x"))
     });
-    define(&mut *engine, realm, "badRealm", |engine, _cx| {
-        engine.new_object(RealmId(9_999))
+    define(&mut *engine, realm, "badRealm", move |engine, _cx| {
+        engine.new_object(other_realm)
     });
     for f in ["foreignArg", "badRealm"] {
         assert_eq!(

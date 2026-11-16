@@ -589,6 +589,30 @@ pub fn realms_are_isolated(factory: &mut Factory) {
     );
 }
 
+/// A realm id carries its engine: another engine refuses it, whatever its
+/// index, and an index the engine never issued is refused too.
+pub fn realm_ids_belong_to_their_engine(factory: &mut Factory) {
+    let (_host, mut a, main_a) = setup(factory);
+    let (_host_b, mut b, main_b) = setup(factory);
+    let second_a = a.create_realm().unwrap();
+    assert_eq!(main_a.engine(), second_a.engine());
+    assert_ne!(main_a.engine(), main_b.engine());
+    assert_ne!(main_a, main_b);
+    for foreign in [main_a, second_a] {
+        assert!(matches!(b.eval_script(foreign, "x.js", "1"), Err(Error::UnknownRealm)));
+        assert!(matches!(b.global_object(foreign), Err(Error::UnknownRealm)));
+        assert!(matches!(b.new_object(foreign), Err(Error::UnknownRealm)));
+        assert!(matches!(b.run_jobs(foreign), Err(Error::UnknownRealm)));
+        assert!(matches!(b.compile_script(foreign, "x.js", "1"), Err(Error::UnknownRealm)));
+        assert!(matches!(b.load_module(foreign, "m.js"), Err(Error::UnknownRealm)));
+    }
+    let never = RealmId::new(main_b.engine(), 9_999);
+    assert!(matches!(b.eval_script(never, "x.js", "1"), Err(Error::UnknownRealm)));
+    // Both engines are still usable with their own ids.
+    assert_eq!(num(&eval(&mut *a, second_a, "1 + 1")), 2.0);
+    assert_eq!(num(&eval(&mut *b, main_b, "2 + 2")), 4.0);
+}
+
 pub fn the_host_can_interrupt_execution(factory: &mut Factory) {
     let (host, mut engine, realm) = setup(factory);
     host.interrupt_after.set(Some(3));
@@ -1066,6 +1090,10 @@ pub const ALL: &[(&str, fn(&mut Factory))] = &[
     ),
     ("realms_are_isolated", realms_are_isolated),
     (
+        "realm_ids_belong_to_their_engine",
+        realm_ids_belong_to_their_engine,
+    ),
+    (
         "the_host_can_interrupt_execution",
         the_host_can_interrupt_execution,
     ),
@@ -1121,6 +1149,7 @@ macro_rules! conformance_tests {
                 import_meta_is_populated_by_the_host,
                 modules_reload_under_a_new_specifier_and_old_records_are_collected,
                 realms_are_isolated,
+                realm_ids_belong_to_their_engine,
                 the_host_can_interrupt_execution,
                 memory_limits_are_enforced,
                 the_engine_has_no_timers_or_event_loop,

@@ -4,7 +4,7 @@ use crate::object::{CallArgs, Class, NativeTag};
 use crate::realm::Intrinsic;
 use crate::value::{Attrs, ObjId, PropKey, Property, Value};
 use crate::vm::{JsResult, Vm};
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_compiler::DynamicFunctionKind;
 
 /// `Function.prototype` itself: callable, accepts anything, returns undefined.
@@ -60,7 +60,7 @@ pub fn create_dynamic_function(
 ) -> JsResult<Value> {
     let realm = vm.current_realm;
     let host = vm.host.clone();
-    if !host.can_compile_strings(realm) {
+    if !host.can_compile_strings(vm.api_realm(realm)) {
         return Err(vm.throw(
             crate::vm::ErrorType::EvalError,
             "Code generation from strings disallowed for this context",

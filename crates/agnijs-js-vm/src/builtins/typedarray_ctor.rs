@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use super::arraybuffer::{
     buffer_byte_length, buffer_data, is_detached, kind_from_tag, new_array_buffer,
@@ -361,7 +361,7 @@ fn typed_array_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
     // From an ArrayBuffer.
     if buffer_data(vm, src).is_some() {
         let offset = vm.to_index(a.arg(1))?;
-        if offset as usize % size != 0 {
+        if !(offset as usize).is_multiple_of(size) {
             return vm.range_error(&format!(
                 "start offset of {name} should be a multiple of {size}"
             ));
@@ -385,7 +385,7 @@ fn typed_array_constructor(vm: &mut Vm, a: &CallArgs) -> JsResult<Value> {
                 None
             }
             None => {
-                if buf_len as usize % size != 0 {
+                if !(buf_len as usize).is_multiple_of(size) {
                     return vm.range_error(&format!(
                         "byte length of {name} should be a multiple of {size}"
                     ));

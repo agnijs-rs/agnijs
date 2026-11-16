@@ -3,7 +3,10 @@ name = "agnijs-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-rust-version.workspace = true
+# rustyline 19 needs Rust 1.95 (`cfg_select!`). The command is a binary,
+# not part of the embedding surface, so the library crates keep the
+# workspace minimum (docs/stability.md#minimum-supported-rust-version).
+rust-version = "1.95"
 repository.workspace = true
 description = "The agnijs command: run a file, evaluate code or start a REPL, with source-mapped stack traces, resource limits, bytecode, snapshots and a DevTools endpoint"
 

@@ -6,7 +6,7 @@
 
 use std::rc::Rc;
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_regex::{Captures, Flags, Regex};
 
 use crate::gc::Tracer;

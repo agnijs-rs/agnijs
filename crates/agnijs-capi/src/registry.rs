@@ -54,6 +54,8 @@ struct Lent {
 pub struct EngineState {
     pub id: AgnijsEngine,
     pub tag: u32,
+    /// The engine's own id, which tags its realm ids (`api::RealmId`).
+    engine_id: api::EngineId,
     /// The ids the host holds. Declared before `engine` so it is dropped
     /// first.
     pub table: Table,
@@ -85,6 +87,7 @@ impl EngineState {
         EngineState {
             id,
             tag: tag.0,
+            engine_id: engine.main_realm().engine(),
             table: Table::new(tag.0),
             exception: None,
             pending_throw: None,
@@ -104,7 +107,7 @@ impl EngineState {
         join(
             self.tag,
             GEN_REALM,
-            realm.0.saturating_add(1).min(INDEX_MAX),
+            realm.index().saturating_add(1).min(INDEX_MAX),
         )
     }
 
@@ -116,7 +119,7 @@ impl EngineState {
         if tag != self.tag {
             return Err(Fail::new(AGNIJS_ERR_WRONG_ENGINE, "the realm belongs to another engine"));
         }
-        Ok(api::RealmId(index.saturating_sub(1)))
+        Ok(api::RealmId::new(self.engine_id, index.saturating_sub(1)))
     }
 
     pub fn class_id(&self, index: usize) -> AgnijsClass {

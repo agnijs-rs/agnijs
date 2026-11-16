@@ -10,7 +10,12 @@ use crate::value::{Handle, PromiseState, PropertyKey, RealmId, TypeOf, Value};
 use std::rc::Rc;
 
 /// The kind of a newly created Error object.
+///
+/// `#[non_exhaustive]`: a new kind may be added in a minor version, so a
+/// match outside this crate needs a wildcard arm. An engine throws a plain
+/// `Error` for a kind it does not know.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[non_exhaustive]
 pub enum ErrorKind {
     Error,
     TypeError,
@@ -51,7 +56,23 @@ pub struct EngineInfo {
     pub bytecode_format: &'static str,
 }
 
-pub trait Engine {
+/// The seal on [`Engine`]. Implementor-only and outside the semver policy
+/// (ADR 0026): the engines in this workspace implement it, embedders never
+/// need to.
+#[doc(hidden)]
+pub mod sealed {
+    /// Implemented by every engine in this workspace. Implementing it
+    /// elsewhere is not supported and may break in any version.
+    pub trait Sealed {}
+}
+
+/// An engine instance, as the host drives it.
+///
+/// Embedders call `Engine`; they do not implement it. The trait is sealed
+/// (its supertrait is implementor-only), so a new method may be added in a
+/// minor version without a default body. Engines come from
+/// `agnijs::new_engine` and the engine crates' constructors.
+pub trait Engine: sealed::Sealed {
     fn info(&self) -> EngineInfo;
 
     // ---- realms -------------------------------------------------------

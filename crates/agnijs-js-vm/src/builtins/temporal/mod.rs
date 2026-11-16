@@ -16,7 +16,7 @@ pub mod options;
 pub mod plain_date;
 pub mod plain_time;
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 use agnijs_js_temporal as seam;
 
 use crate::object::{Class, NativeFn, ObjectData};

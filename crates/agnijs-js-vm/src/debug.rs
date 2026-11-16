@@ -16,7 +16,8 @@ use crate::interp::Frame;
 use crate::object::Class;
 use crate::value::{EnvId, ObjId, PropKey, PropSlot, Value};
 use crate::vm::{Fault, JsResult, Vm};
-use agnijs_engine_api::{self as api, ConsoleLevel, Engine, RealmId};
+use agnijs_engine_api::{self as api, ConsoleLevel, Engine};
+use crate::realm::RealmId;
 use agnijs_js_compiler::bytecode::{BindingKind, CodeBlock, ScopeKind as CScopeKind, SourceText};
 use agnijs_js_debugger::{
     self as dbg, AsyncStackTrace, BreakpointId, BreakpointSpec, BreakpointTarget, DebugClient,
@@ -50,7 +51,7 @@ struct ScriptRecord {
 }
 
 impl ScriptRecord {
-    fn new(id: ScriptId, code: Rc<CodeBlock>, kind: ScriptKind, realm: RealmId) -> ScriptRecord {
+    fn new(id: ScriptId, code: Rc<CodeBlock>, kind: ScriptKind, realm: api::RealmId) -> ScriptRecord {
         let source = code.source.clone();
         let text: &str = &source.text;
         let mut line_starts = vec![0];
@@ -206,6 +207,7 @@ impl Vm {
         realm: RealmId,
     ) -> Option<ScriptId> {
         let key = Rc::as_ptr(&code.source) as usize;
+        let realm = self.api_realm(realm);
         let d = self.debug.as_deref_mut()?;
         if let Some(id) = d.by_source.get(&key) {
             return Some(*id);
@@ -464,7 +466,7 @@ impl Vm {
         let Some(d) = self.debug.as_deref() else { return };
         let client = d.client.clone();
         let args: Vec<api::Value> = args.iter().map(|v| self.to_api_value(*v)).collect();
-        let realm = self.current_realm;
+        let realm = self.api_realm(self.current_realm);
         client.console(self, realm, level, &args);
     }
 

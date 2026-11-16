@@ -26,10 +26,12 @@ members = [
 exclude = ["fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-rust-version = "1.85"
+# The MSRV (docs/stability.md#minimum-supported-rust-version), built by the
+# CI msrv job. ICU4X 2.x, behind the default `intl` feature, sets it.
+rust-version = "1.88"
 repository = "https://github.com/agnijs-rs/agnijs"
 
 [workspace.dependencies]

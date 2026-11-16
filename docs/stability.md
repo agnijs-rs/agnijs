@@ -2,17 +2,17 @@
 
 This page says which AgniJS interfaces you can build on, how each one is versioned, and how it may change. It only states what the code and CI enforce today. Where a policy is not decided yet, it says so and names the task that decides it.
 
-AgniJS is pre-release (workspace version `0.2.0`). Nothing is published to crates.io, there are no tagged releases, and the crate names may still change. Until the first release, "a change" below means a commit to `main`.
+AgniJS is pre-release (workspace version `0.3.0`; changes per version are in [CHANGELOG.md](../CHANGELOG.md)). Nothing is published to crates.io, there are no tagged releases, and the crate names may still change. Until the first release, "a change" below means a commit to `main`.
 
 | Interface | Versioned by | Compatibility today |
 | --- | --- | --- |
 | [C API (ABI)](#the-c-api) | `AGNIJS_ABI_VERSION_MAJOR`/`MINOR`, `agnijs_abi_version()` | Append-only within major 1; enforced by the generated header and `struct_size` checks |
-| [Rust API](#the-rust-api) | Cargo version, now `0.2.0` | Semver for `agnijs` and `agnijs-engine-api`: a breaking change bumps the minor version before 1.0; checked by `cargo-semver-checks` in CI |
+| [Rust API](#the-rust-api) | Cargo version, now `0.3.0` | Semver for `agnijs` and `agnijs-engine-api`: a breaking change bumps the minor version before 1.0; checked by `cargo-semver-checks` in CI |
 | [Bytecode](#bytecode-and-snapshots) | Format tag `agnijs-bc-N` | Loads only in the build that wrote it; anything else is refused, never misread |
 | [Snapshots](#bytecode-and-snapshots) | Tag `agnijs-snap-N+agnijs-bc-M` and native-registry fingerprint | Same build only; anything else is refused |
 | [CLI](#the-agnijs-cli) | `agnijs --version` | Documented flags and exit codes; no compatibility promise yet |
 | [CDP](#the-devtools-protocol) | Chrome DevTools Protocol 1.3 subset | The methods implemented, not a promise about future ones |
-| [Minimum Rust](#minimum-supported-rust-version) | `rust-version` in `Cargo.toml` | 1.85 for the workspace, 1.97 for the JIT crate |
+| [Minimum Rust](#minimum-supported-rust-version) | `rust-version` in `Cargo.toml` | 1.88 for the workspace, built in CI; 1.95 for the CLI, 1.97 for the JIT crate |
 
 ## The C API
 
@@ -39,16 +39,18 @@ The `#[derive(HostClass)]` and `#[host_methods]` macros are public through `agni
 
 **What is breaking.** Anything Cargo's [semver reference](https://doc.rust-lang.org/cargo/reference/semver.html) calls a major change to a public item, which `cargo-semver-checks` reports, and any change to a documented contract that a correct embedder could observe, such as when a dropped handle is released, which errors a host function's result maps to, or when finalizers run. Not breaking:
 
-- a new variant of `Error` or `agnijs::Error`, which are `#[non_exhaustive]`;
-- new items, and new trait methods with a default body. A new `Engine` method gets a default (most return `Error::Unsupported`) unless the version allows a break, since `Engine` is not sealed;
+- a new variant of `Error`, `agnijs::Error` or one of the hook enums (`ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher`, `ErrorKind`), which are `#[non_exhaustive]`. A `match` on them outside `agnijs-engine-api` needs a wildcard arm, and each enum's rustdoc says what to do with a variant you do not know;
+- new items, and new methods on `Engine`, with or without a default body: `Engine` is sealed (embedders call it but cannot implement it). A new `Host` method, which embedders do implement, always has a default body;
 - changes to internal crates and hidden items, and bytecode or snapshot format changes, which are versioned by their own tags ([below](#bytecode-and-snapshots));
 - raising the MSRV, under the rule [below](#minimum-supported-rust-version).
 
-Every other public enum is exhaustive (`Value`, `PropertyKey`, `TypeOf`, `HeapKind`, `PromiseState`, and the hook enums `ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher` and `ErrorKind`), so a new variant in one of them is breaking.
+Every other public enum is exhaustive (`Value`, `PropertyKey`, `TypeOf`, `HeapKind`, `PromiseState`), so a new variant in one of them is breaking.
 
-**How versions move.** All crates share the workspace version, now `0.2.0`.
+A `RealmId`, like a `Handle`, carries the engine that issued it: another engine refuses it with `UnknownRealm`, whatever its index ([value.rs](../crates/agnijs-engine-api/src/value.rs)). Its fields are private; an embedder gets realm ids only from `main_realm` and `create_realm`.
 
-- **Before 1.0** (now, and after a first `0.x` publish): a breaking change bumps the minor version (`0.2.0` to `0.3.0`) in the same commit or pull request. Other changes do not need a bump, except a patch bump when `cargo-semver-checks` asks for one (for example, when an item is newly deprecated). Nothing is published yet, so the version is how a git-pinned embedder such as Gable tells whether moving its pin can break it.
+**How versions move.** All crates share the workspace version, now `0.3.0`; [CHANGELOG.md](../CHANGELOG.md) lists what each version changed.
+
+- **Before 1.0** (now, and after a first `0.x` publish): a breaking change bumps the minor version (`0.3.0` to `0.4.0`) in the same commit or pull request. Other changes do not need a bump, except a patch bump when `cargo-semver-checks` asks for one (for example, when an item is newly deprecated). Nothing is published yet, so the version is how a git-pinned embedder such as Gable tells whether moving its pin can break it.
 - **From 1.0**: a breaking change bumps the major version, and is preceded by at least one minor release in which the replaced item is `#[deprecated]` with a pointer to its replacement. New features bump the minor version, fixes the patch version.
 
 **What enforces it.** The `semver` job in `ci.yml` runs `cargo-semver-checks` on `agnijs` and `agnijs-engine-api`, comparing the change with its base: the pull request's base, or the commit before the push. It fails when the change needs a bigger version bump than it makes. Contract changes the tool cannot see are reviewed by hand, and the contract tests (`crates/agnijs/tests/lifetimes.rs`, `host_contract.rs`) catch the ones they cover. To check locally: `cargo semver-checks -p agnijs -p agnijs-engine-api --baseline-rev origin/main`.
@@ -77,14 +79,16 @@ The command-line tool's commands (`run`, `eval`, `repl`, `compile`, `snapshot`),
 
 ## Minimum supported Rust version
 
-The workspace sets `rust-version = "1.85"`, and the JIT crate (the `jit` feature, opt-in) 1.97. Raising the workspace MSRV is not a breaking change, but it is never done in a patch release: before 1.0 it bumps the minor version, from 1.0 at least the minor version, and the new MSRV is at least six months old (four stable releases) when it is raised. The JIT crate's MSRV follows the toolchain its code generator needs and may be raised with the minor version too. Nothing in CI builds with the MSRV toolchain yet, so it is kept by review.
+The workspace sets `rust-version = "1.88"`, the oldest toolchain its default build compiles with (ICU4X 2.x, behind the default `intl` feature, sets it). Two crates declare their own, newer minimum: the `agnijs` command 1.95 (rustyline 19 uses `cfg_select!`), a binary and not part of the embedding surface, and the JIT crate (the `jit` feature, opt-in) 1.97, which follows the toolchain its code generator needs.
+
+Raising the workspace MSRV is not a breaking change, but it is done only in a minor version, never in a patch release: before 1.0 it bumps the minor version, from 1.0 at least the minor version. The new MSRV is at least six months old (four stable releases) when it is raised. The command's and the JIT crate's minimums may be raised with the minor version too.
+
+The `msrv` job in `ci.yml` builds the workspace's default features with the toolchain `rust-version` names, leaving out the command and the JIT crate. Before it existed the workspace declared 1.85, which its dependencies had outgrown; 0.3.0 declares the real minimum.
 
 ## Decisions still open
 
 These need the owner's decision and are recorded in TASK-103.18's and TASK-104's notes:
 
-- Whether the hook enums (`ModuleSource`, `ConsoleLevel`, `RejectionEvent`, `RegexMatcher`, `ErrorKind`) become `#[non_exhaustive]` before the first release, so that new variants stop being breaking (TASK-104 notes).
-- Whether `Engine` is sealed, so that new methods without a default stop being breaking, and whether `RealmId` is tagged with its engine like `Handle` (TASK-104 notes).
 - Whether a release loads the previous release's bytecode and snapshot formats, or bytecode stays a same-build cache.
 - Whether the CLI's flags and exit codes get a compatibility promise at the first release.
 - Whether CI should compare the C ABI against the last release (for example with `abi-dumper` or a symbol and struct-layout diff) instead of relying on review.

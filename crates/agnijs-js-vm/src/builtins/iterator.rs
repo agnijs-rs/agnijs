@@ -65,7 +65,7 @@ impl HelperState {
     }
 }
 
-pub fn install(vm: &mut Vm, _realm: agnijs_engine_api::RealmId) {
+pub fn install(vm: &mut Vm, _realm: crate::realm::RealmId) {
     let iter_proto = vm.new_object();
     vm.realm_mut()
         .set_intrinsic(Intrinsic::IteratorPrototype, iter_proto);

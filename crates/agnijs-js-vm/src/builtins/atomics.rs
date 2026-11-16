@@ -4,7 +4,7 @@
 //! and `waitAsync` validate their arguments and report `"not-equal"` or
 //! `"timed-out"` without blocking (no other agent can ever `notify`).
 
-use agnijs_engine_api::RealmId;
+use crate::realm::RealmId;
 
 use super::arraybuffer::{buffer_byte_length, is_detached, is_shared};
 use super::typedarray::{read_element, ta_length, write_element, Converted, ElementKind};
