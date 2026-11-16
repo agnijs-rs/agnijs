@@ -22,6 +22,7 @@ members = [
     "crates/agnijs-cli",
     "crates/agnijs-fuzz",
     "examples/embed-minimal",
+    "examples/embed-typescript",
 ]
 # The cargo-fuzz targets are a workspace of their own (nightly, libFuzzer).
 exclude = ["fuzz"]
@@ -57,6 +58,8 @@ agnijs-derive = { path = "crates/agnijs-derive" }
 agnijs-js-jit = { path = "crates/agnijs-js-jit" }
 # Optional Node-style resolver for embedders; no engine crate depends on it (ADR 0023).
 agnijs-js-resolve = { path = "crates/agnijs-js-resolve" }
+# Optional TypeScript front end on Oxc; no engine crate depends on it (ADR 0029).
+agnijs-js-typescript = { path = "crates/agnijs-js-typescript" }
 rquickjs = { version = "0.14", features = ["loader", "array-buffer", "classes", "properties"] }
 regress = { version = "0.12", features = ["utf16"] }
 serde = { version = "1", features = ["derive"] }

@@ -31,4 +31,11 @@ clap.workspace = true
 serde_json.workspace = true
 rustyline = { version = "19", default-features = false, features = ["with-file-history"] }
 ctrlc = "3"
+agnijs-js-typescript = { workspace = true, optional = true }
+
+[features]
+# Run .ts, .mts, .cts and .tsx files, transpiled through Oxc (ADR 0029).
+# Off by default: it adds Oxc to the command and needs Rust 1.97, the
+# TypeScript crate's minimum.
+typescript = ["dep:agnijs-js-typescript"]
 

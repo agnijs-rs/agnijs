@@ -17,8 +17,8 @@ jobs:
         with:
           workspaces: .
       # The TypeScript crate (opt-in, ADR 0029) has its own job.
-      - run: cargo build --workspace --locked --exclude agnijs-js-typescript
-      - run: cargo test --workspace --locked --exclude agnijs-js-typescript
+      - run: cargo build --workspace --locked --exclude agnijs-js-typescript --exclude agnijs-example-typescript
+      - run: cargo test --workspace --locked --exclude agnijs-js-typescript --exclude agnijs-example-typescript
       - name: Minimal embedding example (docs/embedding-guide.md), run and its output checked
         run: cargo run --locked -p agnijs-example-embed && cargo test --locked -p agnijs-example-embed --test output
       - name: Instructions dispatched per iteration and per call on the hot workloads (TASK-100.18)
@@ -156,8 +156,10 @@ jobs:
   typescript:
     # The optional TypeScript front end (ADR 0029, TASK-103.13): its fixture
     # suite (compared byte for byte, so the output must be identical on
-    # every OS), the engine runs of its output, the hostile-nesting limits in
-    # debug and in release, and clippy.
+    # every OS), the engine runs of its output, stack traces and a DevTools
+    # breakpoint in TypeScript positions, the hostile-nesting limits in debug
+    # and in release, the embedding example, the command built with its
+    # `typescript` feature, and clippy.
     strategy:
       fail-fast: false
       matrix:
@@ -175,7 +177,10 @@ jobs:
       - run: cargo test --locked -p agnijs-js-typescript
       - name: Hostile nesting at the size limit, release
         run: cargo test --release --locked -p agnijs-js-typescript --test limits
-      - run: cargo clippy --locked -p agnijs-js-typescript --all-targets --no-deps -- -D warnings
+      - run: cargo test --locked -p agnijs-example-typescript
+      - run: cargo test --locked -p agnijs-cli --features typescript
+      - run: cargo clippy --locked -p agnijs-js-typescript -p agnijs-example-typescript --all-targets --no-deps -- -D warnings
+      - run: cargo clippy --locked -p agnijs-cli --features typescript --all-targets --no-deps -- -D warnings
 
   capi:
     # The C API (ADR 0021, TASK-103.3): the Rust tests with fault injection,
@@ -252,7 +257,7 @@ jobs:
           workspaces: .
           key: msrv
       - name: Build the workspace at the MSRV (${{ steps.msrv.outputs.version }})
-        run: cargo build --workspace --locked --exclude agnijs-js-jit --exclude agnijs-js-typescript --exclude agnijs-cli
+        run: cargo build --workspace --locked --exclude agnijs-js-jit --exclude agnijs-js-typescript --exclude agnijs-example-typescript --exclude agnijs-cli
 
   capi-checks:
     # The checked-in header matches the sources, clippy is clean, the C test
@@ -374,7 +379,11 @@ jobs:
           path: ~/.cargo/bin/icu4x-datagen
           key: icu4x-datagen-2.4.0-unstable
       - if: steps.datagen.outputs.cache-hit != 'true'
-        run: cargo install icu4x-datagen --version 2.4.0 --locked --features unstable
+        # rust-cache can restore ~/.cargo/bin with the binary in it while this
+        # cache misses, and cargo install refuses to overwrite it.
+        run: |
+          if icu4x-datagen --version 2>/dev/null | grep -q '2\.4\.0'; then exit 0; fi
+          cargo install icu4x-datagen --version 2.4.0 --locked --features unstable --force
       - name: Trimmed Intl data (en, de, no segmenter models)
         run: node crates/agnijs-js-intl/tools/gen-icu4x-data.js --out "$RUNNER_TEMP/icu-en-de" --locales en,de --segmenter-models none
       - name: Trimmed Intl data, the feature test and test262 against the main baseline
@@ -403,9 +412,9 @@ jobs:
           mkdir "$RUNNER_TEMP/engine"
           git archive HEAD | tar -x -C "$RUNNER_TEMP/engine"
           ls -A "$RUNNER_TEMP/engine"
-      - run: cargo build --workspace --locked --exclude agnijs-js-typescript
+      - run: cargo build --workspace --locked --exclude agnijs-js-typescript --exclude agnijs-example-typescript
         working-directory: ${{ runner.temp }}/engine
-      - run: cargo test --workspace --locked --exclude agnijs-js-typescript
+      - run: cargo test --workspace --locked --exclude agnijs-js-typescript --exclude agnijs-example-typescript
         working-directory: ${{ runner.temp }}/engine
 
   gc-stress:

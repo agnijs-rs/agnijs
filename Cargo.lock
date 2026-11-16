@@ -37,6 +37,7 @@ dependencies = [
  "agnijs-js-cdp",
  "agnijs-js-debugger",
  "agnijs-js-resolve",
+ "agnijs-js-typescript",
  "agnijs-js-vm",
  "clap",
  "ctrlc",
@@ -73,6 +74,14 @@ name = "agnijs-example-embed"
 version = "0.0.0"
 dependencies = [
  "agnijs",
+]
+
+[[package]]
+name = "agnijs-example-typescript"
+version = "0.0.0"
+dependencies = [
+ "agnijs",
+ "agnijs-js-typescript",
 ]
 
 [[package]]
@@ -236,6 +245,8 @@ name = "agnijs-js-typescript"
 version = "0.3.0"
 dependencies = [
  "agnijs-engine-api",
+ "agnijs-js-cdp",
+ "agnijs-js-debugger",
  "agnijs-js-vm",
  "oxc_allocator",
  "oxc_ast",
@@ -246,6 +257,7 @@ dependencies = [
  "oxc_semantic",
  "oxc_span",
  "oxc_transformer",
+ "serde_json",
 ]
 
 [[package]]

@@ -1,0 +1,17 @@
+[package]
+name = "agnijs-example-typescript"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+# The TypeScript crate's minimum (ADR 0029), above the workspace's.
+rust-version = "1.97"
+publish = false
+description = "An embedder whose modules are TypeScript: agnijs-js-typescript in Host::load_module, with source-mapped stack traces"
+
+[[bin]]
+name = "embed-typescript"
+path = "src/main.rs"
+
+[dependencies]
+agnijs.workspace = true
+agnijs-js-typescript.workspace = true

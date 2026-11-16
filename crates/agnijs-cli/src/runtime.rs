@@ -230,9 +230,27 @@ impl Runtime {
         if let Some(map) = host::source_map_for(name, source) {
             let _ = self.ctx.engine().set_source_map(name, Some(&map));
         }
-        self.main_source = Some((name.to_string(), source.to_string()));
+        self.run_script_text(name, source, source)
+    }
+
+    /// Run `code`, transpiled from the TypeScript `original` with
+    /// `source_map`, as the script `name`.
+    pub fn run_transpiled_script(
+        &mut self,
+        name: &str,
+        original: &str,
+        code: &str,
+        source_map: &str,
+    ) -> Result<Shown, Failure> {
+        let _ = self.ctx.engine().set_source_map(name, Some(source_map));
+        self.host.add_original(name, original);
+        self.run_script_text(name, original, code)
+    }
+
+    fn run_script_text(&mut self, name: &str, shown: &str, code: &str) -> Result<Shown, Failure> {
+        self.main_source = Some((name.to_string(), shown.to_string()));
         let realm = self.realm();
-        let r = self.ctx.engine().eval_script(realm, name, source);
+        let r = self.ctx.engine().eval_script(realm, name, code);
         let v = self.check(r)?;
         self.run_event_loop()?;
         Ok(Shown::Value(v))
@@ -485,9 +503,12 @@ impl Runtime {
             .as_ref()
             .filter(|(name, _)| *name == script)
             .map(|(_, text)| text.clone());
+        // A transpiled file's positions are in its TypeScript text, not in
+        // the code the engine ran.
+        let original = self.host.original(&script);
         let engine = self.ctx.engine();
-        let source = engine
-            .script_source(realm, &script)
+        let source = original
+            .or_else(|| engine.script_source(realm, &script))
             .or(main)
             .or_else(|| std::fs::read_to_string(&script).ok())?;
         let text = source.lines().nth(line.checked_sub(1)?)?;

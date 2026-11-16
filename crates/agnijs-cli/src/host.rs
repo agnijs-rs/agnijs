@@ -30,6 +30,11 @@ pub struct CliHost {
     virtual_modules: RefCell<HashMap<String, ModuleSource>>,
     /// Rejected promises with no handler yet, oldest first.
     rejections: RefCell<Vec<(Value, Value)>>,
+    /// The text of each TypeScript file transpiled, by its path: what its
+    /// mapped positions point into.
+    originals: RefCell<HashMap<String, String>>,
+    /// A module already transpiled (the main file), served once.
+    preloaded: RefCell<HashMap<String, ModuleSource>>,
     config: HostConfig,
 }
 
@@ -39,10 +44,12 @@ impl CliHost {
             .map(|p| slash_path(&p))
             .unwrap_or_else(|_| ".".into());
         CliHost {
-            resolver: Resolver::new(StdFs, Options::default()),
+            resolver: Resolver::new(StdFs, resolver_options()),
             cwd,
             virtual_modules: RefCell::new(HashMap::new()),
             rejections: RefCell::new(Vec::new()),
+            originals: RefCell::new(HashMap::new()),
+            preloaded: RefCell::new(HashMap::new()),
             config,
         }
     }
@@ -52,6 +59,23 @@ impl CliHost {
         self.virtual_modules
             .borrow_mut()
             .insert(name.to_string(), source);
+    }
+
+    /// Remember the text of the TypeScript file `path`, for code frames.
+    pub fn add_original(&self, path: &str, source: &str) {
+        self.originals
+            .borrow_mut()
+            .insert(path.to_string(), source.to_string());
+    }
+
+    /// The TypeScript text of `path`, if it was transpiled.
+    pub fn original(&self, path: &str) -> Option<String> {
+        self.originals.borrow().get(path).cloned()
+    }
+
+    /// Serve `source` for the next load of the file `path`.
+    pub fn preload(&self, path: &str, source: ModuleSource) {
+        self.preloaded.borrow_mut().insert(path.to_string(), source);
     }
 
     /// Take the rejections still unhandled.
@@ -130,6 +154,16 @@ pub fn file_url(path: &str) -> String {
     out
 }
 
+/// The resolver's options: Node's, plus the TypeScript extensions in a
+/// build that runs TypeScript.
+fn resolver_options() -> Options {
+    let mut options = Options::default();
+    options
+        .extensions
+        .extend(crate::ts::EXTENSIONS.iter().map(|e| e.to_string()));
+    options
+}
+
 /// The Source Map a source text points at with `//# sourceMappingURL=`:
 /// an inline `data:` URL, or a file next to `path`.
 pub fn source_map_for(path: &str, source: &str) -> Option<String> {
@@ -189,6 +223,9 @@ impl Host for CliHost {
         if let Some(src) = self.virtual_modules.borrow().get(resolved) {
             return Ok(src.clone());
         }
+        if let Some(src) = self.preloaded.borrow_mut().remove(resolved) {
+            return Ok(src);
+        }
         let bytes = std::fs::read(resolved).map_err(|e| format!("cannot read {resolved}: {e}"))?;
         if is_bytecode(&bytes) {
             return Ok(ModuleSource::Bytecode(bytes));
@@ -196,6 +233,14 @@ impl Host for CliHost {
         let source = String::from_utf8(bytes).map_err(|_| format!("{resolved} is not UTF-8"))?;
         if resolved.ends_with(".json") {
             return Ok(ModuleSource::Json(source));
+        }
+        if crate::ts::is_typescript(resolved) {
+            let out = crate::ts::transpile(resolved, &source, false)?;
+            self.add_original(resolved, &source);
+            return Ok(ModuleSource::SourceWithMap {
+                source: out.code,
+                source_map: out.source_map,
+            });
         }
         Ok(match source_map_for(resolved, &source) {
             Some(source_map) => ModuleSource::SourceWithMap { source, source_map },

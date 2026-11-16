@@ -26,3 +26,6 @@ oxc_transformer = "=0.158.0"
 [dev-dependencies]
 agnijs-engine-api.workspace = true
 agnijs-js-vm = { workspace = true, features = ["linear-regex"] }
+agnijs-js-cdp.workspace = true
+agnijs-js-debugger.workspace = true
+serde_json.workspace = true

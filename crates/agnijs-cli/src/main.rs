@@ -5,6 +5,7 @@ mod host;
 mod inspect;
 mod repl;
 mod runtime;
+mod ts;
 
 use agnijs::api::{self, Engine, ModuleSource, RegexMatcher};
 use agnijs::Context;
@@ -317,6 +318,11 @@ fn decide_mode(rt: &mut Runtime, flags: &ModeOpts, path: Option<&str>, source: &
             return t;
         }
     }
+    detect_mode(rt, source)
+}
+
+/// Code that only parses as a module (it has `import` or `export`) is one.
+fn detect_mode(rt: &mut Runtime, source: &str) -> Mode {
     let realm = rt.realm();
     let engine = rt.ctx.engine();
     if engine.compile_script(realm, "detect", source).is_err()
@@ -384,6 +390,9 @@ fn cmd_run(a: RunArgs) -> i32 {
         return exit::USAGE;
     };
     let path = (file != "-").then_some(name.as_str());
+    if path.is_some_and(ts::is_typescript) {
+        return run_typescript(&mut rt, &a.mode, &name, source);
+    }
     match decide_mode(&mut rt, &a.mode, path, &source) {
         Mode::Script => code_of(rt.run_script(&name, &source)),
         Mode::Module => {
@@ -392,6 +401,56 @@ fn cmd_run(a: RunArgs) -> i32 {
                     .add_virtual_module(&name, ModuleSource::Source(source.clone()));
             }
             code_of(rt.run_module(&name, &source))
+        }
+    }
+}
+
+/// Run the TypeScript file `name` (the `typescript` feature): flags
+/// first, then the extension (`.mts`, `.cts`), then the nearest
+/// `package.json` `type`, then the syntax of the transpiled code.
+fn run_typescript(rt: &mut Runtime, flags: &ModeOpts, name: &str, source: String) -> i32 {
+    let explicit = if flags.module || name.ends_with(".mts") {
+        Some(Mode::Module)
+    } else if flags.script || name.ends_with(".cts") {
+        Some(Mode::Script)
+    } else {
+        package_type(name)
+    };
+    let as_script = explicit == Some(Mode::Script);
+    let out = match ts::transpile(name, &source, as_script) {
+        Ok(out) => out,
+        Err(text) => {
+            eprint!("{text}");
+            return exit::UNCAUGHT;
+        }
+    };
+    match explicit.unwrap_or_else(|| detect_mode(rt, &out.code)) {
+        Mode::Script => {
+            // Detected as a script after a transpile as a module: again as
+            // a script, which only differs for the automatic JSX runtime.
+            let out = if as_script {
+                out
+            } else {
+                match ts::transpile(name, &source, true) {
+                    Ok(out) => out,
+                    Err(text) => {
+                        eprint!("{text}");
+                        return exit::UNCAUGHT;
+                    }
+                }
+            };
+            code_of(rt.run_transpiled_script(name, &source, &out.code, &out.source_map))
+        }
+        Mode::Module => {
+            rt.host.add_original(name, &source);
+            rt.host.preload(
+                name,
+                ModuleSource::SourceWithMap {
+                    source: out.code,
+                    source_map: out.source_map,
+                },
+            );
+            code_of(rt.run_module(name, &source))
         }
     }
 }
@@ -437,6 +496,15 @@ fn cmd_repl(opts: EngineOpts) -> i32 {
 }
 
 fn cmd_compile(a: CompileArgs) -> i32 {
+    if ts::is_typescript(&a.file) {
+        // Bytecode carries no source map, so its stack traces would point
+        // into the transpiled code.
+        eprintln!(
+            "agnijs: compile takes JavaScript; transpile {} first",
+            a.file
+        );
+        return exit::USAGE;
+    }
     let source = match std::fs::read_to_string(&a.file) {
         Ok(s) => s,
         Err(e) => {

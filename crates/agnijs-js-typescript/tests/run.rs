@@ -151,6 +151,88 @@ fn classic_jsx_calls_the_factory() {
     assert_eq!(v, Value::string("div:id|title:frag::n"));
 }
 
+/// A thrower whose generated position differs from its original one: the
+/// interface vanishes, the enum and the parameter property grow, and the
+/// annotations shift the columns.
+const THROWER: &str = "interface P { x: number }\n\
+enum E { A, B }\n\
+class Box { constructor(public p: P) {} }\n\
+export function boom(b: Box, label: string = 'q'): never {\n\
+\x20 const n: number = b.p.x + E.B; throw new Error(label + n);\n\
+}\n";
+
+#[test]
+fn error_stack_shows_typescript_positions_in_a_module() {
+    let main = "import { boom } from './lib/thrower.ts';\n\
+                let s: string = '';\n\
+                try { boom(new (class X { constructor(public p: { x: number }) {} })({ x: 1 }) as any); } catch (e: any) { s = e.stack; }\n\
+                export default s;";
+    let host = Rc::new(TsHost {
+        files: [("/app/main.ts", main), ("lib/thrower.ts", THROWER)]
+            .into_iter()
+            .collect(),
+        options: Options::default(),
+    });
+    let mut engine = agnijs_js_vm::make_engine(host);
+    let realm = engine.main_realm();
+    let p = engine.load_module(realm, "/app/main.ts").unwrap();
+    engine.run_jobs(realm).unwrap();
+    let PromiseState::Fulfilled(ns) = engine.promise_state(realm, &p).unwrap() else {
+        panic!("main.ts did not finish");
+    };
+    let Value::String(stack) = engine
+        .get(realm, &ns, &PropertyKey::from("default"))
+        .unwrap()
+    else {
+        panic!("no stack");
+    };
+    let stack = stack.to_string_lossy();
+    // `new Error` on line 5, column 40 of the TypeScript; the call in
+    // main.ts on line 3, column 7.
+    assert!(stack.contains("at boom (lib/thrower.ts:5:40)"), "{stack}");
+    assert!(stack.contains("/app/main.ts:3:7"), "{stack}");
+}
+
+#[test]
+fn exception_stack_shows_typescript_positions_in_a_script() {
+    let mut options = Options::default();
+    options.kind = SourceKind::Script;
+    let ts = "type Num = number;\n\
+              function div(a: Num, b: Num): Num {\n\
+              \x20 if (b === 0) { throw new RangeError('zero' as string); }\n\
+              \x20 return a / b;\n\
+              }\n\
+              let r: Num = div(1, <Num>0);\n";
+    let out = transpile("calc.cts", ts, &options).unwrap();
+    let mut engine = agnijs_js_vm::make_engine(Rc::new(TsHost {
+        files: HashMap::new(),
+        options: Options::default(),
+    }));
+    engine
+        .set_source_map("calc.cts", Some(&out.source_map))
+        .unwrap();
+    let realm = engine.main_realm();
+    match engine.eval_script(realm, "calc.cts", &out.code) {
+        Err(agnijs_engine_api::Error::Exception(e)) => {
+            assert_eq!(e.name, "RangeError");
+            let frames: Vec<_> = e
+                .stack
+                .iter()
+                .map(|f| (f.function.as_str(), f.script.as_str(), f.line, f.column))
+                .collect();
+            // The engine places an uncaught exception's frame at the
+            // `throw` (column 18 of the TypeScript, 3 of the output) and
+            // the caller's at the call.
+            assert_eq!(
+                &frames[..2],
+                &[("div", "calc.cts", 3, 18), ("", "calc.cts", 6, 14)],
+                "{frames:?}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn a_script_runs_as_a_script() {
     let mut options = Options::for_path("lib.cts").unwrap();
