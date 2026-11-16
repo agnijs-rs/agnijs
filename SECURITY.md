@@ -4,10 +4,7 @@ AgniJS is a JavaScript engine meant to run code its embedder does not trust, so 
 
 ## Reporting a vulnerability
 
-**Do not open a public issue, pull request or discussion for a vulnerability.** Report it privately:
-
-- **Email:** `TODO-security-contact@example.invalid`. <!-- TODO(owner): replace with a real security contact address before relying on this page (TASK-103.18). -->
-- **GitHub:** private vulnerability reporting ("Report a vulnerability" on the repository's Security tab). <!-- TODO(owner): this is not enabled on agnijs-rs/agnijs yet; enable it in Settings > Code security, or remove this line (TASK-103.18). -->
+**Do not open a public issue, pull request or discussion for a vulnerability.** Report it privately with GitHub's private vulnerability reporting: "Report a vulnerability" on the repository's [Security tab](https://github.com/agnijs-rs/agnijs/security). That is the only channel; there is no security email address.
 
 Include what you can of:
 
@@ -29,15 +26,14 @@ AgniJS is pre-release. No version has been published to crates.io and there are 
 
 ## What to expect
 
-The project is maintained by a single person, so these are aims, not a service-level agreement:
+AgniJS is provided as is, with no warranty and no support commitment, so no promises can be made about how quickly a report is answered or a vulnerability fixed. Security is nonetheless very important to this project, and every report will be acted on as soon as possible.
 
-- an acknowledgement within 7 days;
-- an assessment (whether it is in scope, and how severe) within 30 days;
-- a fix on `main` as soon as one is ready, with a regression test, and a GitHub security advisory once the fix is public. Reporters are credited unless they ask not to be.
+What a report leads to:
 
-Please give us 90 days, or until a fix is public if that is sooner, before you disclose the issue. If it is being exploited, say so and we will move faster.
+- an assessment: whether it is in scope, and how severe;
+- a fix on `main`, with a regression test, and a GitHub security advisory once the fix is public. Reporters are credited unless they ask not to be.
 
-<!-- TODO(owner): confirm or change the response times and the 90-day embargo above (TASK-103.18). -->
+Please keep the issue private until the fix is public, or until we have agreed a disclosure date with you. If it is being exploited, say so.
 
 ## Scope
 

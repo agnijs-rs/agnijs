@@ -13,6 +13,8 @@ Breaking. The embedding surface changes once now so that later additions to it a
 
 The C ABI is unchanged (still 1.2): its integer realm ids and constants are the same.
 
+Policy decided in this version ([docs/stability.md](docs/stability.md)): bytecode stays a same-build cache in every release, and snapshots get no promise across releases before 1.0; from the first release the CLI promises its exit codes and core flags only; a CI comparison of the C ABI against the last release comes with the first release. Security reports go through GitHub private vulnerability reporting only ([SECURITY.md](SECURITY.md)).
+
 ## 0.2.0 (2026-11-15)
 
 Breaking.
