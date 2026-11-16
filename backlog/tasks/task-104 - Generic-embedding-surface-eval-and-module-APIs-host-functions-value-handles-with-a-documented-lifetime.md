@@ -3,11 +3,11 @@ id: TASK-104
 title: >-
   Generic embedding surface: eval and module APIs, host functions, value handles
   with a documented lifetime
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T05:07:00Z'
-updated_date: '2026-11-15T22:44:00Z'
+updated_date: '2026-11-16T01:23:00Z'
 labels:
   - needs-triage
 dependencies:
@@ -29,12 +29,12 @@ The engine is an embeddable library, but its only embedding surface today is the
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A written design (ADR) records which parts of the current Engine and Host traits become the public embedding API, which stay internal to adapters, and what changes, with the reasons drawn from the Gable adapter in the harness and the QuickJS-NG adapter
-- [ ] #2 The lifetime story for Value and Handle is documented and tested: when a handle keeps a heap value alive, what reclaim_handles and collect_garbage guarantee, what happens to handles after an engine or realm is dropped, and that misuse is an error rather than undefined behaviour
-- [ ] #3 The eval API (scripts, modules, bytecode), the job loop and the module loader hooks are documented with runnable examples in rustdoc, including error and exception handling and the interrupt hook
-- [ ] #4 Host functions and host classes have a documented, tested contract: argument and return conversion, errors thrown from the host, tracing of values held by host objects for the collector, and re-entrancy rules
-- [ ] #5 A semver and stability policy for the public crates is written down (which crates and items are public, what counts as breaking, how bytecode format changes are versioned) and a cargo-semver-checks or equivalent check runs in CI
-- [ ] #6 An embedding guide and a minimal example crate (embed, run a script and a module, expose a host function, run the job loop) build and run in CI; a fuzzing corpus and a security disclosure policy (SECURITY.md) exist before the first external dependent
+- [x] #1 A written design (ADR) records which parts of the current Engine and Host traits become the public embedding API, which stay internal to adapters, and what changes, with the reasons drawn from the Gable adapter in the harness and the QuickJS-NG adapter
+- [x] #2 The lifetime story for Value and Handle is documented and tested: when a handle keeps a heap value alive, what reclaim_handles and collect_garbage guarantee, what happens to handles after an engine or realm is dropped, and that misuse is an error rather than undefined behaviour
+- [x] #3 The eval API (scripts, modules, bytecode), the job loop and the module loader hooks are documented with runnable examples in rustdoc, including error and exception handling and the interrupt hook
+- [x] #4 Host functions and host classes have a documented, tested contract: argument and return conversion, errors thrown from the host, tracing of values held by host objects for the collector, and re-entrancy rules
+- [x] #5 A semver and stability policy for the public crates is written down (which crates and items are public, what counts as breaking, how bytecode format changes are versioned) and a cargo-semver-checks or equivalent check runs in CI
+- [x] #6 An embedding guide and a minimal example crate (embed, run a script and a module, expose a host function, run the job loop) build and run in CI; a fuzzing corpus and a security disclosure policy (SECURITY.md) exist before the first external dependent
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -78,3 +78,9 @@ Further owner decisions (TASK-104.6; defaults taken, none hard to reverse):
 9. Engine is not sealed, so a new Engine method without a default is breaking to cargo-semver-checks. Default: new methods get a default body or the bump. Recommend sealing Engine (doc(hidden) supertrait implemented by the VM and the QuickJS-NG adapter) before 1.0.
 10. MSRV: raising it is not breaking but never in a patch release; before 1.0 it bumps the minor version; a new MSRV is at least six months old. No MSRV CI job yet (kept by review); recommend adding one before publishing.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Done through subtasks 104.1-104.6. ADR 0026 makes the agnijs crate (Context plus agnijs::api) the public embedding surface, with new_engine/new_engine_from_snapshot; Error enums are non_exhaustive and implementor items doc(hidden). The value/handle lifetime contract (value module rustdoc, tests/lifetimes.rs) and the host function/host object contract (HostFunction, CallContext, HostObject rustdoc, tests/host_contract.rs) are documented and tested. Engine/Host methods have runnable rustdoc examples covering exceptions, syntax errors, module load failure, BytecodeMismatch and interrupts. docs/embedding-guide.md (doctested) and examples/embed-minimal (output checked in CI). docs/stability.md states the semver policy; the CI semver job runs cargo-semver-checks against the base of each push/PR; workspace bumped to 0.2.0 for the breaking changes. SECURITY.md and the fuzz seed corpus (crates/agnijs-fuzz/src/seeds.rs) exist; SECURITY.md still has the owner's TODO contact address (TASK-103.18). Verified: workspace tests, clippy on touched crates, test262 default/precompile/snapshot/intl402/QuickJS-NG 0 regressions, GC-stress slice, C API fault injection/fuzz/header drift, agnijs-fuzz all --seed 1, CI run 43774584750 green (all 26 jobs). Open owner decisions are in the notes (hook enums non_exhaustive, sealing Engine, tagging RealmId, MSRV rule and CI).
+<!-- SECTION:FINAL_SUMMARY:END -->
