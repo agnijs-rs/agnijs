@@ -1,0 +1,8 @@
+// code
+// Map columns count UTF-16 units: 𝒳 is two, é one. A raw U+2028 in a
+// string ends a line for the engine's positions, so the map must agree.
+const 𝒳 = "é😀", after = 1;
+const separator = "a\u2028b";
+export const 名前 = `${𝒳}${after}${separator}`;
+// map
+{"version":3,"names":[],"sources":["unicode.ts"],"sourcesContent":["// Map columns count UTF-16 units: 𝒳 is two, é one. A raw U+2028 in a\n// string ends a line for the engine's positions, so the map must agree.\nconst 𝒳: string = \"é😀\", after: number = 1;\nconst separator = \"a b\";\nexport const 名前: string = `${𝒳}${after}${separator}`;\n"],"mappings":";;AAEA,MAAM,KAAa,OAAO,QAAgB;AAC1C,MAAM,YAAY;AAElB,OAAO,MAAM,KAAa,GAAG,KAAK,QAAQ"}

@@ -1,0 +1,9 @@
+// code
+import { Fragment as _Fragment, jsx as _jsx, jsxs as _jsxs } from "preact/jsx-runtime";
+// @options: automatic source=preact
+export const view = (name) => /* @__PURE__ */ _jsxs("div", {
+	title: name,
+	children: [name, /* @__PURE__ */ _jsx(_Fragment, { children: "x" })]
+});
+// map
+{"version":3,"names":[],"sources":["jsx-automatic.tsx"],"sourcesContent":["// @options: automatic source=preact\nexport const view = (name: string) => <div title={name}>{name}<>x</></div>;\n"],"mappings":";;AACA,OAAO,MAAM,QAAQ,SAAiB,sBAAC,OAAD;CAAK,OAAO;WAAZ,CAAmB,MAAK,4CAAE,IAAG,EAAM"}

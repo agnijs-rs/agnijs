@@ -1,0 +1,7 @@
+// code
+import { value } from "./values.js";
+import { unusedAsValue } from "./unused.js";
+let typed = 1;
+export const used = [value, typed];
+// map
+{"version":3,"names":[],"sources":["verbatim.ts"],"sourcesContent":["// @options: verbatim\nimport type { OnlyType } from \"./types.js\";\nimport { type Mixed, value } from \"./values.js\";\nimport { unusedAsValue } from \"./unused.js\";\nlet typed: unusedAsValue | OnlyType | Mixed = 1;\nexport const used = [value, typed];\n"],"mappings":"AAEA,SAAqB,aAAa;AAClC,SAAS,qBAAqB;AAC9B,IAAI,QAA0C;AAC9C,OAAO,MAAM,OAAO,CAAC,OAAO,KAAK"}

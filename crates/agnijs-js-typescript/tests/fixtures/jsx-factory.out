@@ -1,0 +1,6 @@
+// code
+// @options: factory=h fragment=Fragment
+import { h, Fragment } from "./dom.js";
+export const view = (items) => /* @__PURE__ */ h("ul", null, items.map((item) => /* @__PURE__ */ h("li", null, item)), /* @__PURE__ */ h(Fragment, null));
+// map
+{"version":3,"names":[],"sources":["jsx-factory.tsx"],"sourcesContent":["// @options: factory=h fragment=Fragment\nimport { h, Fragment } from \"./dom.js\";\nexport const view = (items: string[]) => (\n  <ul>\n    {items.map((item) => <li>{item}</li>)}\n    <></>\n  </ul>\n);\n"],"mappings":";AACA,SAAS,GAAG,gBAAgB;AAC5B,OAAO,MAAM,QAAQ,UACnB,kBAAC,YACE,MAAM,KAAK,SAAS,kBAAC,YAAI,IAAS,CAAC,GACpC,gCAAI,CACF"}

@@ -1,0 +1,15 @@
+// error
+strip-only-refused.ts:3:1: an `enum` is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:6:1: a `const enum` is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:9:1: a namespace with values is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:13:15: a parameter property is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:13:33: a parameter property is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:14:3: a decorator is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript
+strip-only-refused.ts:16:1: an `import x = y` alias is not erasable syntax, and the mode is strip-only
+  help: use Mode::Transform, or rewrite it as plain JavaScript

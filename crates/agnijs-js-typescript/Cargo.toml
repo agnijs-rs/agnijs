@@ -1,0 +1,28 @@
+[package]
+name = "agnijs-js-typescript"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+# Oxc 0.158 needs Rust 1.97, above the workspace minimum: this crate is
+# opt-in, like the JIT crate, and the msrv CI job leaves it out (ADR 0029).
+rust-version = "1.97"
+repository.workspace = true
+description = "Optional TypeScript front end for AgniJS embedders: TypeScript to JavaScript plus a source map through Oxc; the engine does not depend on it"
+
+# Every Oxc crate is pinned to one exact version and moves only in a commit
+# that runs this crate's fixture suite and the typescript fuzz target
+# (ADR 0029). Nothing outside this crate names an Oxc type.
+[dependencies]
+oxc_allocator = "=0.158.0"
+oxc_ast = "=0.158.0"
+oxc_ast_visit = "=0.158.0"
+oxc_codegen = "=0.158.0"
+oxc_diagnostics = "=0.158.0"
+oxc_parser = "=0.158.0"
+oxc_semantic = "=0.158.0"
+oxc_span = "=0.158.0"
+oxc_transformer = "=0.158.0"
+
+[dev-dependencies]
+agnijs-engine-api.workspace = true
+agnijs-js-vm = { workspace = true, features = ["linear-regex"] }

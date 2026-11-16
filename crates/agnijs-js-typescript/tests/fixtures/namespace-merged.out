@@ -1,0 +1,9 @@
+// error
+namespace-merged.ts:10:20: `a` is exported by another declaration of namespace `N`, which the transform does not resolve
+  help: refer to it as `N.a`
+namespace-merged.ts:10:24: `f` is exported by another declaration of namespace `N`, which the transform does not resolve
+  help: refer to it as `N.f`
+namespace-merged.ts:13:28: `a` is exported by another declaration of namespace `N`, which the transform does not resolve
+  help: refer to it as `N.a`
+namespace-merged.ts:18:24: `b` is exported by another declaration of namespace `N`, which the transform does not resolve
+  help: refer to it as `N.b`

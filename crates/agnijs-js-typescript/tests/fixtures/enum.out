@@ -1,0 +1,30 @@
+// code
+export let Direction = /* @__PURE__ */ function(Direction) {
+	Direction[Direction["Up"] = 1] = "Up";
+	Direction[Direction["Down"] = 2] = "Down";
+	Direction[Direction["Left"] = 16] = "Left";
+	Direction[Direction["Right"] = "right".length] = "Right";
+	return Direction;
+}({});
+export let Label = /* @__PURE__ */ function(Label) {
+	Label["Yes"] = "yes";
+	Label["No"] = "no";
+	return Label;
+}({});
+export let Inline = /* @__PURE__ */ function(Inline) {
+	Inline[Inline["A"] = 0] = "A";
+	Inline[Inline["B"] = 10] = "B";
+	return Inline;
+}({});
+Direction = /* @__PURE__ */ function(Direction) {
+	Direction[Direction["Center"] = 100] = "Center";
+	return Direction;
+}(Direction || {});
+export const values = [
+	Direction.Up,
+	Direction[2],
+	Label.No,
+	Inline.B
+];
+// map
+{"version":3,"names":[],"sources":["enum.ts"],"sourcesContent":["export enum Direction {\n  Up = 1,\n  Down,\n  Left = Up << 4,\n  Right = \"right\".length,\n}\nexport enum Label {\n  Yes = \"yes\",\n  No = `no`,\n}\nexport const enum Inline {\n  A,\n  B = A + 10,\n}\ndeclare enum Ambient {\n  X,\n}\nenum Direction {\n  Center = 100,\n}\nexport const values = [Direction.Up, Direction[2], Label.No, Inline.B];\n"],"mappings":"AAAA,OAAO,IAAK,YAAL;CACL;CACA;CACA;CACA,+BAAQ,QAAQ;;AAClB;AACA,OAAO,IAAK,QAAL;CACL;CACA;;AACF;AACA,OAAO,IAAW,SAAX;CACL;CACA;;AACF;AAIK,YAAL;CACE;;AACF,EAFK,eAEL;AACA,OAAO,MAAM,SAAS;CAAC,UAAU;CAAI,UAAU;CAAI,MAAM;CAAI,OAAO;AAAC"}

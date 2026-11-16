@@ -1,0 +1,13 @@
+// code
+#!/usr/bin/env agnijs
+"use strict";
+"another directive";
+var babelHelpers = { decorate: function (decorators, target, key, desc) { var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d; if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc); else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r; return c > 3 && r && Object.defineProperty(target, key, r), r; }, decorateParam: function (paramIndex, decorator) { return function (target, key) { decorator(target, key, paramIndex); }; }, decorateMetadata: function (k, v) { if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v); } };
+// @options: decorators script
+// The helpers go after the hashbang and the directives, so "use strict"
+// still applies, and the map gets an empty line there.
+function mark(target) {}
+let Marked = class Marked {};
+Marked = babelHelpers.decorate([mark], Marked);
+// map
+{"version":3,"names":[],"sources":["decorators-prologue.ts"],"sourcesContent":["#!/usr/bin/env agnijs\n\"use strict\";\n\"another directive\";\n// @options: decorators script\n// The helpers go after the hashbang and the directives, so \"use strict\"\n// still applies, and the map gets an empty line there.\nfunction mark(target: Function) {}\n@mark\nclass Marked {}\n"],"mappings":";AACA;AACA;;;;;AAIA,SAAS,KAAK,QAAkB,CAAC;AACjC,IACM,SADN,MACM,OAAO,CAAC;gCADb"}

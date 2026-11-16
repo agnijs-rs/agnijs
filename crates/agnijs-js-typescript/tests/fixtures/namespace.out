@@ -1,0 +1,23 @@
+// code
+export let Geometry;
+(function(_Geometry) {
+	const unit = _Geometry.unit = 1;
+	function double(x) {
+		return x * 2 * unit;
+	}
+	_Geometry.double = double;
+	let Deep;
+	(function(_Deep) {
+		let Deeper;
+		(function(_Deeper) {
+			const level = _Deeper.level = 3;
+		})(Deeper || (Deeper = _Deep.Deeper || (_Deep.Deeper = {})));
+	})(Deep || (Deep = _Geometry.Deep || (_Geometry.Deep = {})));
+})(Geometry || (Geometry = {}));
+(function(_Geometry2) {
+	const merged = _Geometry2.merged = Geometry.double(Geometry.unit);
+})(Geometry || (Geometry = {}));
+var level = Geometry.Deep.Deeper.level;
+export const fromAlias = level;
+// map
+{"version":3,"names":[],"sources":["namespace.ts"],"sourcesContent":["export namespace Geometry {\n  export const unit = 1;\n  export function double(x: number): number {\n    return x * 2 * unit;\n  }\n  export namespace Deep.Deeper {\n    export const level = 3;\n  }\n}\nexport namespace Geometry {\n  // Names another block exports are qualified (see namespace-merged.ts).\n  export const merged = Geometry.double(Geometry.unit);\n}\n// Types only: emits nothing.\nnamespace Types {\n  export interface Shape {}\n  export type Id = string;\n}\ndeclare namespace Ambient {\n  const x: number;\n}\nimport level = Geometry.Deep.Deeper.level;\nexport const fromAlias = level;\n"],"mappings":"AAAO,WAAU;CAAV;CACE,MAAM,wBAAO;CACb,SAAS,OAAO,GAAmB;EACxC,OAAO,IAAI,IAAI;CACjB;;CACO,IAAU;CAAV;EAAe;;GACb,MAAM,wBAAQ;IACtB,yDAAD;GAAC,yDAAD;EACD,4BAAD;CACO;CAEE,MAAM,6BAAS,SAAS,OAAO,SAAS,IAAI;EACpD,4BAAD;IASO,QAAQ,SAAS,KAAK,OAAO;AACpC,OAAO,MAAM,YAAY"}

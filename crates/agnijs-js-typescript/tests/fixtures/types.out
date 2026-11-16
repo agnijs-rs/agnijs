@@ -1,0 +1,34 @@
+// code
+function overloaded(x) {
+	return x;
+}
+class Shape {
+	x = 0;
+	secret;
+	static count;
+	describe(prefix) {
+		return `${prefix ?? ""}${this.area()}`;
+	}
+}
+class Square extends Shape {
+	side;
+	constructor(side) {
+		super();
+		this.side = side;
+	}
+	area() {
+		return this.side ** 2;
+	}
+}
+const p = {
+	x: 1,
+	y: 2
+};
+const n = p.x;
+const legacy = p.y;
+const instantiated = overloaded;
+let definite;
+export function assert(value) {}
+export { Square, p, n, legacy, instantiated, definite };
+// map
+{"version":3,"names":[],"sources":["types.ts"],"sourcesContent":["// Type-level syntax only: all of it is erased.\ninterface Point<T = number> {\n  readonly x: T;\n  y?: T;\n  [key: string]: unknown;\n}\ntype Pair<A, B> = [first: A, second?: B];\ntype Mapped<T> = { -readonly [K in keyof T as `get${Capitalize<string & K>}`]-?: () => T[K] };\ndeclare const ambient: unique symbol;\ndeclare function external(x: number): string;\ndeclare class Outside {\n  method(): void;\n}\n\nfunction overloaded(x: string): string;\nfunction overloaded(x: number): number;\nfunction overloaded(x: unknown): unknown {\n  return x;\n}\n\nabstract class Shape implements Point {\n  [key: string]: unknown;\n  readonly x: number = 0;\n  declare y?: number;\n  private secret!: string;\n  protected static count: number;\n  abstract area(): number;\n  public describe(this: Shape, prefix?: string): string {\n    return `${prefix ?? \"\"}${this.area()}`;\n  }\n}\n\nclass Square extends Shape {\n  constructor(private readonly side: number) {\n    super();\n  }\n  override area(): number {\n    return this.side! ** 2;\n  }\n}\n\nconst p = { x: 1, y: 2 } satisfies Point;\nconst n = (p as unknown as Point<number>).x;\nconst legacy = <number>(<unknown>p.y);\nconst instantiated = overloaded<string>;\nlet definite!: number;\nexport function assert(value: unknown): asserts value is string {}\nexport { Square, p, n, legacy, instantiated, definite };\nexport type { Point, Pair, Mapped };\n"],"mappings":"AAgBA,SAAS,WAAW,GAAqB;CACvC,OAAO;AACT;AAEA,MAAe,MAAuB;CAE3B,IAAY;CAEb;CACR,OAAiB;CAEV,SAAsB,QAAyB;EACpD,OAAO,GAAG,UAAU,KAAK,KAAK,KAAK;CACrC;AACF;AAEA,MAAM,eAAe,MAAM;CACI;CAA7B,YAA6B,MAAc;EACzC,MAAM;EADqB;CAE7B;CACS,OAAe;EACtB,OAAO,KAAK,QAAS;CACvB;AACF;AAEA,MAAM,IAAI;CAAE,GAAG;CAAG,GAAG;AAAE;AACvB,MAAM,IAAK,EAA+B;AAC1C,MAAM,SAA2B,EAAE;AACnC,MAAM,eAAe;AACrB,IAAI;AACJ,OAAO,SAAS,OAAO,OAAyC,CAAC;AACjE,SAAS,QAAQ,GAAG,GAAG,QAAQ,cAAc"}

@@ -1,0 +1,16 @@
+// code
+import { value } from "./values.js";
+import Default, * as all from "./all.js";
+import "./side-effect.js";
+export * from "./reexport.js";
+export * as group from "./group.js";
+export { value as renamed } from "./values.js";
+let typed = 1;
+export const used = [
+	value,
+	Default,
+	all.member,
+	typed
+];
+// map
+{"version":3,"names":[],"sources":["imports.ts"],"sourcesContent":["import type { OnlyType } from \"./types.js\";\nimport { type Mixed, value } from \"./values.js\";\nimport { unusedAsValue } from \"./unused.js\";\nimport Default, * as all from \"./all.js\";\nimport \"./side-effect.js\";\nexport type { OnlyType };\nexport { type Mixed };\nexport * from \"./reexport.js\";\nexport * as group from \"./group.js\";\nexport { value as renamed } from \"./values.js\";\nexport type { Other } from \"./other.js\";\n\nlet typed: unusedAsValue = 1;\nexport const used = [value, Default, all.member, typed];\n"],"mappings":"AACA,SAAqB,aAAa;AAElC,OAAO,cAAc,SAAS;AAC9B,OAAO;AAGP,cAAc;AACd,YAAY,WAAW;AACvB,SAAS,SAAS,eAAe;AAGjC,IAAI,QAAuB;AAC3B,OAAO,MAAM,OAAO;CAAC;CAAO;CAAS,IAAI;CAAQ;AAAK"}

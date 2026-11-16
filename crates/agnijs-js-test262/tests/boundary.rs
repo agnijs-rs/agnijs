@@ -90,3 +90,58 @@ fn engine_sources_do_not_use_framework_vocabulary() {
     }
     assert!(offenders.is_empty(), "framework vocabulary in engine sources:\n{}", offenders.join("\n"));
 }
+
+/// The crates an embedder of the engine links, by default.
+const ENGINE_CRATES: &[&str] =
+    &["agnijs", "agnijs-engine-api", "agnijs-js-vm", "agnijs-js-compiler", "agnijs-js-parser", "agnijs-capi"];
+
+#[test]
+fn typescript_stays_out_of_the_engine_and_the_c_api() {
+    // ADR 0029: Oxc reaches only the embedders that ask for
+    // agnijs-js-typescript; no engine crate depends on it, by default or
+    // through any of their own features.
+    let meta = metadata();
+    let names: std::collections::HashMap<&str, &str> = meta["packages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| (p["id"].as_str().unwrap(), p["name"].as_str().unwrap()))
+        .collect();
+    for pkg in meta["packages"].as_array().unwrap() {
+        let name = pkg["name"].as_str().unwrap();
+        if !ENGINE_CRATES.contains(&name) {
+            continue;
+        }
+        for dep in pkg["dependencies"].as_array().unwrap() {
+            let dep_name = dep["name"].as_str().unwrap();
+            let dev = dep["kind"].as_str() == Some("dev");
+            assert!(
+                dev || !(dep_name == "agnijs-js-typescript" || dep_name.starts_with("oxc")),
+                "{name} depends on {dep_name}"
+            );
+        }
+    }
+    // And nothing reaches Oxc through the resolved default graph.
+    let nodes = meta["resolve"]["nodes"].as_array().unwrap();
+    let node = |id: &str| nodes.iter().find(|n| n["id"].as_str() == Some(id)).unwrap();
+    let mut stack: Vec<&str> =
+        names.iter().filter(|(_, n)| ENGINE_CRATES.contains(n)).map(|(id, _)| *id).collect();
+    assert_eq!(stack.len(), ENGINE_CRATES.len(), "an engine crate was renamed: update ENGINE_CRATES");
+    let mut seen = std::collections::HashSet::new();
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let name = names[id];
+        assert!(
+            name != "agnijs-js-typescript" && !name.starts_with("oxc"),
+            "{name} is in the engine's default dependency graph"
+        );
+        for dep in node(id)["deps"].as_array().unwrap() {
+            let normal = dep["dep_kinds"].as_array().unwrap().iter().any(|k| k["kind"].as_str() != Some("dev"));
+            if normal {
+                stack.push(dep["pkg"].as_str().unwrap());
+            }
+        }
+    }
+}

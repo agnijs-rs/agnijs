@@ -1,0 +1,26 @@
+// code
+// TypeScript 5.x syntax and recent ECMAScript, which passes through.
+function first(x) {
+	return x[0];
+}
+class Base {
+	m() {}
+}
+class Derived extends Base {
+	m() {}
+	static #count = 0;
+	static {
+		Derived.#count++;
+	}
+}
+const config = { retries: 3 };
+const one = first([1]);
+export { config, one };
+export async function work() {
+	await using resource = { async [Symbol.asyncDispose]() {} };
+	using sync = { [Symbol.dispose]() {} };
+	const m = await import("./m.js", { with: { type: "json" } });
+	return /(?<year>\d{4})/v.exec("2026")?.groups?.year?.length ?? 0n;
+}
+// map
+{"version":3,"names":[],"sources":["modern.mts"],"sourcesContent":["// TypeScript 5.x syntax and recent ECMAScript, which passes through.\nfunction first<const T extends readonly unknown[]>(x: T): T[0] {\n  return x[0];\n}\ninterface Box<in out T> {\n  value: T;\n}\nexport type * from \"./types.js\";\ntype Head<T> = T extends [infer H extends string, ...infer _] ? H : never;\nclass Base {\n  m(): void {}\n}\nclass Derived extends Base {\n  override m(): void {}\n  declare readonly tag: unique symbol;\n  static #count = 0;\n  static {\n    Derived.#count++;\n  }\n}\ntype Tpl = `a${string}`;\nconst config = { retries: 3 } satisfies Record<string, number>;\nconst one = first<[1]>([1]);\nexport { type Box, config, one };\nexport async function work(): Promise<number> {\n  await using resource = { async [Symbol.asyncDispose]() {} };\n  using sync = { [Symbol.dispose]() {} };\n  const m = await import(\"./m.js\", { with: { type: \"json\" } });\n  return /(?<year>\\d{4})/v.exec(\"2026\")?.groups?.year?.length ?? 0n as unknown as number;\n}\n"],"mappings":";AACA,SAAS,MAA0C,GAAY;CAC7D,OAAO,EAAE;AACX;AAMA,MAAM,KAAK;CACT,IAAU,CAAC;AACb;AACA,MAAM,gBAAgB,KAAK;CAChB,IAAU,CAAC;CAEpB,OAAO,SAAS;CAChB;EACE,QAAQ;CACV;AACF;AAEA,MAAM,SAAS,EAAE,SAAS,EAAE;AAC5B,MAAM,MAAM,MAAW,CAAC,CAAC,CAAC;AAC1B,SAAmB,QAAQ;AAC3B,OAAO,eAAe,OAAwB;CAC5C,YAAY,WAAW,EAAE,OAAO,OAAO,gBAAgB,CAAC,EAAE;CAC1D,MAAM,OAAO,EAAE,CAAC,OAAO,WAAW,CAAC,EAAE;CACrC,MAAM,IAAI,MAAM,OAAO,UAAU,EAAE,MAAM,EAAE,MAAM,OAAO,EAAE;CAC1D,OAAO,kBAAkB,KAAK,MAAM,CAAC,EAAE,QAAQ,MAAM,UAAU;AACjE"}

@@ -16,6 +16,7 @@ members = [
     "crates/agnijs-js-jit",
     "crates/agnijs-capi",
     "crates/agnijs-js-resolve",
+    "crates/agnijs-js-typescript",
     "crates/agnijs",
     "crates/agnijs-derive",
     "crates/agnijs-cli",

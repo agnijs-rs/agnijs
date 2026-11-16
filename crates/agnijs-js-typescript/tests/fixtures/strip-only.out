@@ -1,0 +1,8 @@
+// code
+class C {
+	a = 1;
+	m(x, y) {}
+}
+export const value = new C();
+// map
+{"version":3,"names":[],"sources":["strip-only.ts"],"sourcesContent":["// @options: strip-only\n// Erasable syntax only: strip-only accepts all of it.\nimport type { T } from \"./t.js\";\ninterface I {\n  a: number;\n}\ntype U = I | T;\ndeclare enum Ambient {\n  X,\n}\ndeclare namespace Lib {\n  const v: number;\n}\nnamespace TypesOnly {\n  export type V = number;\n  export interface W {}\n}\nclass C<X> implements I {\n  a: number = 1;\n  declare b: string;\n  m<Y>(x: X, y?: Y): asserts x is X {}\n}\nexport const value = new C<number>() as I satisfies I;\n"],"mappings":"AAiBA,MAAM,EAAkB;CACtB,IAAY;CAEZ,EAAK,GAAM,GAAuB,CAAC;AACrC;AACA,OAAO,MAAM,QAAQ,IAAI,EAAU"}

@@ -1,0 +1,36 @@
+// code
+var babelHelpers = { decorate: function (decorators, target, key, desc) { var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d; if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc); else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r; return c > 3 && r && Object.defineProperty(target, key, r), r; }, decorateParam: function (paramIndex, decorator) { return function (target, key) { decorator(target, key, paramIndex); }; }, decorateMetadata: function (k, v) { if (typeof Reflect === "object" && typeof Reflect.metadata === "function") return Reflect.metadata(k, v); } };
+var _Service;
+// @options: decorators metadata
+function sealed(target) {
+	Object.seal(target);
+}
+function log(target, key, desc) {
+	return desc;
+}
+function inject(target, key, index) {}
+let Service = _Service = class Service {
+	run(name, count) {
+		return name.length > count;
+	}
+	static make() {
+		return new _Service();
+	}
+};
+babelHelpers.decorate([
+	log,
+	babelHelpers.decorateParam(0, inject),
+	babelHelpers.decorateMetadata("design:type", Function),
+	babelHelpers.decorateMetadata("design:paramtypes", [String, Number]),
+	babelHelpers.decorateMetadata("design:returntype", Boolean)
+], Service.prototype, "run", null);
+babelHelpers.decorate([
+	log,
+	babelHelpers.decorateMetadata("design:type", Function),
+	babelHelpers.decorateMetadata("design:paramtypes", []),
+	babelHelpers.decorateMetadata("design:returntype", typeof Service === "undefined" ? Object : Service)
+], Service, "make", null);
+Service = _Service = babelHelpers.decorate([sealed], Service);
+export { Service };
+// map
+{"version":3,"names":[],"sources":["decorators.ts"],"sourcesContent":["// @options: decorators metadata\nfunction sealed(target: Function) {\n  Object.seal(target);\n}\nfunction log(target: object, key: string, desc: PropertyDescriptor) {\n  return desc;\n}\nfunction inject(target: object, key: string | undefined, index: number) {}\n\n@sealed\nexport class Service {\n  @log\n  run(@inject name: string, count: number): boolean {\n    return name.length > count;\n  }\n  @log static make(): Service {\n    return new Service();\n  }\n}\n"],"mappings":";;;AACA,SAAS,OAAO,QAAkB;CAChC,OAAO,KAAK,MAAM;AACpB;AACA,SAAS,IAAI,QAAgB,KAAa,MAA0B;CAClE,OAAO;AACT;AACA,SAAS,OAAO,QAAgB,KAAyB,OAAe,CAAC;AAGlE,IAAM,qBAAN,MAAM,QAAQ;CAEnB,IAAY,MAAc,OAAwB;EAChD,OAAO,KAAK,SAAS;CACvB;CACA,OAAY,OAAgB;EAC1B,OAAO,aAAY;CACrB;AACF;;CAPG;+BACI;;;;;;CAGJ;;;;;4CANF"}

@@ -1,0 +1,14 @@
+// code
+// .cts is a script: no import or export, var at the top is global.
+var counter = 0;
+function next(step = 1) {
+	return counter += step;
+}
+var Mode = /* @__PURE__ */ function(Mode) {
+	Mode[Mode["Fast"] = 0] = "Fast";
+	Mode[Mode["Slow"] = 1] = "Slow";
+	return Mode;
+}(Mode || {});
+next(Mode.Slow);
+// map
+{"version":3,"names":[],"sources":["script.cts"],"sourcesContent":["// .cts is a script: no import or export, var at the top is global.\nvar counter: number = 0;\nfunction next(step: number = 1): number {\n  return (counter += step);\n}\nenum Mode {\n  Fast,\n  Slow,\n}\nnext(Mode.Slow);\n"],"mappings":";AACA,IAAI,UAAkB;AACtB,SAAS,KAAK,OAAe,GAAW;CACtC,OAAQ,WAAW;AACrB;AACA,IAAK,OAAL;CACE;CACA;;AACF,EAHK,UAGL;AACA,KAAK,KAAK,IAAI"}

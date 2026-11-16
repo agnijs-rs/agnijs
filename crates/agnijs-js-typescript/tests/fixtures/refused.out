@@ -1,0 +1,9 @@
+// error
+refused.ts:2:1: decorators need Options::experimental_decorators
+  help: only TypeScript's legacy decorators (experimentalDecorators) are transformed; standard decorators are not supported
+refused.ts:4:3: `accessor` fields are not supported
+  help: use a getter and a setter
+refused.ts:6:1: `import x = require()` is CommonJS, which the engine does not provide
+  help: use `import * as x from "..."`
+refused.ts:8:1: `export =` is CommonJS, which the engine does not provide
+  help: use `export default`

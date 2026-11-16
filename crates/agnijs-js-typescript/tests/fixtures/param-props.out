@@ -1,0 +1,29 @@
+// code
+export class Account {
+	id;
+	owner;
+	override_;
+	balance = 0;
+	constructor(id, owner, override_, plain = 1) {
+		this.id = id;
+		this.owner = owner;
+		this.override_ = override_;
+		this.balance = plain;
+	}
+}
+class Base {
+	name;
+	constructor(name) {
+		this.name = name;
+	}
+}
+export class Child extends Base {
+	age;
+	extra = "x";
+	constructor(name, age) {
+		super(name);
+		this.age = age;
+	}
+}
+// map
+{"version":3,"names":[],"sources":["param-props.ts"],"sourcesContent":["export class Account {\n  balance = 0;\n  constructor(\n    public readonly id: string,\n    private owner: string,\n    protected override_?: boolean,\n    plain = 1,\n  ) {\n    this.balance = plain;\n  }\n}\nclass Base {\n  constructor(public name: string) {}\n}\nexport class Child extends Base {\n  extra = \"x\";\n  constructor(name: string, public age: number) {\n    super(name);\n  }\n}\n"],"mappings":"AAAA,OAAO,MAAM,QAAQ;CAGD;CACR;CACE;CAJZ,UAAU;CACV,YACkB,IACR,OACE,WACV,QAAQ,GACR;EAJgB;EACR;EACE;EAGV,KAAK,UAAU;CACjB;AACF;AACA,MAAM,KAAK;CACU;CAAnB,YAAmB,MAAc;EAAd;CAAe;AACpC;AACA,OAAO,MAAM,cAAc,KAAK;CAEG;CADjC,QAAQ;CACR,YAAY,MAAqB,KAAa;EAC5C,MAAM,IAAI;EADqB;CAEjC;AACF"}
