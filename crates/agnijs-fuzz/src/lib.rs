@@ -88,6 +88,14 @@ pub const TARGETS: &[Target] = &[
         default_iters: 2_000,
     },
     Target {
+        name: "temporal",
+        about: "Temporal with fuzzed ISO 8601 strings, units, rounding options and relativeTo values",
+        shape: Shape::Text,
+        run: temporal,
+        seeds: seeds::temporal,
+        default_iters: 2_000,
+    },
+    Target {
         name: "regex",
         about: "regex syntax and matching; the backtracker and the linear matcher must agree",
         shape: Shape::Text,

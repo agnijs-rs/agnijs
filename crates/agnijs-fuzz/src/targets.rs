@@ -268,6 +268,34 @@ pub fn intl(data: &[u8]) {
     );
 }
 
+/// The Temporal types with fuzzed ISO 8601 strings, units, rounding
+/// options and `relativeTo` values. Input lines: a duration string, a
+/// unit, a rounding mode, a `relativeTo` string, then a number.
+pub fn temporal(data: &[u8]) {
+    run_with_input(
+        &text(data),
+        r#"(() => {
+            const [d = "", unit = "", mode = "", rel = "", ...rest] = input.split("\n");
+            const n = Number(rest.join("\n"));
+            const attempt = (f) => { try { f(); } catch (e) { if (!(e instanceof Error)) throw e; } };
+            const relatives = [undefined, rel];
+            attempt(() => Temporal.Duration.from(d).toString());
+            attempt(() => Temporal.Duration.from(d).toString({ fractionalSecondDigits: n, smallestUnit: unit, roundingMode: mode }));
+            attempt(() => Temporal.Duration.from({ [unit]: n, days: n }).toJSON());
+            attempt(() => new Temporal.Duration(n, n, n, n, n, n, n, n, n, n).toString());
+            attempt(() => new Temporal.Duration(0, 0, 0, n, n, n, n, n, n, n).negated().abs().toString());
+            for (const relativeTo of relatives) {
+                attempt(() => Temporal.Duration.from(d).round({ smallestUnit: unit, roundingMode: mode, roundingIncrement: n, relativeTo }).toString());
+                attempt(() => Temporal.Duration.from(d).round({ largestUnit: unit, relativeTo }).toString());
+                attempt(() => Temporal.Duration.from(d).total({ unit, relativeTo }));
+                attempt(() => Temporal.Duration.compare(d, { [unit]: n }, { relativeTo }));
+                attempt(() => Temporal.Duration.from(d).add({ [unit]: n }).subtract(d).toString());
+            }
+            return "ok";
+        })()"#,
+    );
+}
+
 // ---- regular expressions -------------------------------------------------------------------------
 
 /// Regex host polls a search may take before it is stopped. A poll comes

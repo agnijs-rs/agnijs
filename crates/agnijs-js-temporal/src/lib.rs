@@ -13,10 +13,21 @@
 //! `Intl.DateTimeFormat`, so both agree on every offset. Nothing here
 //! reads the system clock or the system time zone: the engine passes the
 //! host's values in.
+//!
+//! Every call into the library goes through [`guard`]: a panic inside it
+//! (a library bug) comes back as an [`ErrorKind::Internal`] error, so it
+//! never unwinds into the engine or through the C API.
 
 use std::fmt;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use temporal_rs::provider::COMPILED_TZ_PROVIDER;
+
+mod duration;
+mod options;
+
+pub use duration::{Duration, DurationFields, RelativeTo};
+pub use options::{Precision, RoundingMode, RoundingOptions, ToStringOptions, Unit};
 
 /// What kind of JavaScript error a failed operation throws.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,12 +82,21 @@ impl From<temporal_rs::TemporalError> for Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Run a library call, turning a panic into an `Internal` error.
+pub(crate) fn guard<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {
+        Err(Error { kind: ErrorKind::Internal, message: "internal error in the Temporal library".to_string() })
+    })
+}
+
 /// The canonical case of a time zone identifier the database knows
 /// (`"america/new_york"` gives `"America/New_York"`), or of a UTC offset
 /// time zone (`"+05:30"`). An unknown name is a `RangeError`.
 pub fn time_zone_identifier(id: &str) -> Result<String> {
-    let tz = temporal_rs::TimeZone::try_from_identifier_str_with_provider(id, &*COMPILED_TZ_PROVIDER)?;
-    Ok(tz.identifier_with_provider(&*COMPILED_TZ_PROVIDER)?)
+    guard(|| {
+        let tz = temporal_rs::TimeZone::try_from_identifier_str_with_provider(id, &*COMPILED_TZ_PROVIDER)?;
+        Ok(tz.identifier_with_provider(&*COMPILED_TZ_PROVIDER)?)
+    })
 }
 
 #[cfg(test)]
@@ -89,5 +109,11 @@ mod tests {
         assert_eq!(time_zone_identifier("UTC").unwrap(), "UTC");
         assert_eq!(time_zone_identifier("+05:30").unwrap(), "+05:30");
         assert_eq!(time_zone_identifier("Mars/Olympus_Mons").unwrap_err().kind, ErrorKind::Range);
+    }
+
+    #[test]
+    fn a_panic_in_the_library_is_an_internal_error() {
+        let e = guard::<()>(|| panic!("library bug")).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Internal);
     }
 }

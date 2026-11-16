@@ -59,6 +59,16 @@ pub const JSON: &[&str] = &[
 ];
 
 /// Intl inputs: locale, two option values, text.
+pub const TEMPORAL: &[&str] = &[
+    "P1Y2M3W4DT5H6M7.008009010S\nday\nhalfExpand\n2024-02-01\n3",
+    "-PT36H\nhours\nfloor\n2024-03-10T00:00[America/New_York]\n15",
+    "PT18014398509.481981S\nmicrosecond\ntrunc\n+275760-09-13\n9007199254740991",
+    "P4294967295Y\nyear\nceil\n-271821-04-19T00:00Z[UTC]\n1e9",
+    "pt1,5h\nweeks\nhalfEven\n2020-02-29T12:00+05:30[+05:30]\n-0",
+    "P1M\nauto\nexpand\n1970-01-01[u-ca=iso8601]\nNaN",
+    "\n\n\n\n",
+];
+
 pub const INTL: &[&str] = &[
     "en-US\nunit\nkilometer-per-hour\n1234.5",
     "de-DE-u-co-phonebk\ncurrency\nEUR\n-0.005",
@@ -199,6 +209,10 @@ pub fn json() -> Vec<Vec<u8>> {
 
 pub fn intl() -> Vec<Vec<u8>> {
     INTL.iter().map(|s| s.as_bytes().to_vec()).collect()
+}
+
+pub fn temporal() -> Vec<Vec<u8>> {
+    TEMPORAL.iter().map(|s| s.as_bytes().to_vec()).collect()
 }
 
 pub fn regex() -> Vec<Vec<u8>> {

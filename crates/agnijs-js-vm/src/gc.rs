@@ -446,6 +446,9 @@ impl Class {
             Class::Map(m) | Class::Set(m) | Class::WeakMap(m) | Class::WeakSet(m) => m.trace(t),
             #[cfg(feature = "intl")]
             Class::Intl(d) => d.trace(t),
+            // Temporal values hold no references into the heap.
+            #[cfg(feature = "temporal")]
+            Class::Temporal(_) => {}
             Class::MapIterator(i) | Class::SetIterator(i) => t.opt_obj(i.target),
             Class::WeakRef(v) => {
                 // Weak: the target is handled after marking.

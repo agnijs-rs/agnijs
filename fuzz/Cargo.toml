@@ -62,6 +62,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "temporal"
+path = "fuzz_targets/temporal.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "regex"
 path = "fuzz_targets/regex.rs"
 test = false

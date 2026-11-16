@@ -439,6 +439,9 @@ pub enum Class {
     /// An ECMA-402 service object (`Intl.NumberFormat` and friends).
     #[cfg(feature = "intl")]
     Intl(Box<crate::builtins::intl::IntlData>),
+    /// A Temporal object (`Temporal.Duration` and the other types).
+    #[cfg(feature = "temporal")]
+    Temporal(Box<crate::builtins::temporal::TemporalData>),
     /// A `JSON.rawJSON` object ([[IsRawJSON]]); its text is the frozen
     /// `rawJSON` property.
     RawJSON,
@@ -497,6 +500,8 @@ impl Class {
             // Shared with every RegExp of the same source and flags, and
             // with the compile cache; each counts it (TASK-103.52).
             Class::RegExp(r) => r.matcher.heap_bytes(),
+            #[cfg(feature = "temporal")]
+            Class::Temporal(_) => size_of::<crate::builtins::temporal::TemporalData>(),
             _ => 0,
         }
     }

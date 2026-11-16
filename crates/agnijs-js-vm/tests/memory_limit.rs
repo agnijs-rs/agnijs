@@ -378,6 +378,9 @@ fn payload_may_be_uncounted(class: &agnijs_js_vm::object::Class) -> bool {
         Host(_) => true,
         #[cfg(feature = "intl")]
         Intl(_) => true,
+        // A fixed-size value (counted by `payload_bytes` all the same).
+        #[cfg(feature = "temporal")]
+        Temporal(_) => true,
     }
 }
 

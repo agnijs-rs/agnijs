@@ -329,6 +329,8 @@ fn unsupported_class(c: &Class) -> Option<&'static str> {
         Class::Host(_) => "a host object (host classes have no snapshot hook)",
         #[cfg(feature = "intl")]
         Class::Intl(_) => "an Intl service object",
+        #[cfg(feature = "temporal")]
+        Class::Temporal(_) => "a Temporal object",
         Class::RawJSON => "a JSON.rawJSON object",
         Class::DisposableStack(_) => "a DisposableStack",
         Class::CallSite(_) => "a CallSite",
