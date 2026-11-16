@@ -170,7 +170,7 @@ Performance work (interpreter dispatch, inline caches, string and shape tuning, 
 
 ## 14. JIT readiness
 
-Later tiers (TASK-101: snapshots, a baseline JIT, an optimizing tier, AOT) are optional and post-v1. The interpreter stays the default and the fallback. The baseline JIT keeps the interpreter's frames, so leaving machine code means continuing in the interpreter at the frame's `pc`. ADR 0019 gives the rationale, the tiering and deoptimization strategy, the platform story and the code generator choice (Cranelift). Every engine change keeps these constraints:
+Later tiers (TASK-101: snapshots, a baseline JIT, an optimizing tier, AOT) are optional and post-v1. Snapshots and the baseline JIT are built; ADR 0028 decides against an optimizing tier for now, and `docs/aot-research.md` defers AOT. The interpreter stays the default and the fallback. The baseline JIT keeps the interpreter's frames, so leaving machine code means continuing in the interpreter at the frame's `pc`. ADR 0019 gives the rationale, the tiering and deoptimization strategy, the platform story and the code generator choice (Cranelift). Every engine change keeps these constraints:
 
 | | Constraint |
 | --- | --- |

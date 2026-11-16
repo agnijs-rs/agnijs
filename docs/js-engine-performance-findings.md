@@ -2,7 +2,7 @@
 
 This is the investigation in TASK-100.14. It explains why the AgniJS engine is slower or heavier than the interim engine (QuickJS-NG) on the M9 benchmarks ([switch-over report](https://github.com/jcannon98188/gable/blob/main/docs/js-engine-switch-over.md)) and the micro-benchmarks (`crates/agnijs-js-bench`). It measures and explains only. Nothing in the engine changed. Each cause worth fixing has its own backlog ticket, listed in [the tickets](#the-tickets).
 
-The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-11](#re-measurement-2026-11-11) has the numbers taken after TASK-100.16 to TASK-100.35 and the baseline JIT, before the security hardening. A re-measurement on 2026-11-12 at `107fa7c` found the interpreter within noise of that and the tiered JIT slower on four workloads; its tables were not committed, and [Tiered JIT follow-up, 2026-11-14](#tiered-jit-follow-up-2026-11-14) is what became of that finding.
+The investigation's numbers come from the integration tip `3ade2ef`, on an i9-9900KF under Windows 11, release builds. They are kept below as the historical baseline. [Re-measurement, 2026-11-11](#re-measurement-2026-11-11) has the numbers taken after TASK-100.16 to TASK-100.35 and the baseline JIT, before the security hardening. A re-measurement on 2026-11-12 at `107fa7c` found the interpreter within noise of that and the tiered JIT slower on four workloads; its tables were not committed, and [Tiered JIT follow-up, 2026-11-14](#tiered-jit-follow-up-2026-11-14) is what became of that finding. [Performance-tier close-out, 2026-11-16](#performance-tier-close-out-2026-11-16) has the JIT off, on and forced in one binary on both benchmark sets, profiles of the Gable benches and machine code sizes: the evidence for ADR 0028 and `docs/aot-research.md`.
 
 ## Re-measurement, 2026-11-11
 
@@ -224,6 +224,119 @@ Now over main before (`f064ee6`), 5 rounds: `AGNIJS_JIT=on`, 26 workloads, geome
 
 - Every instruction after one that can call out is an entry from the interpreter, so every instruction's block has two predecessors and nothing is known across it: the dump shows `mov eax, 3` followed two instructions later by a test of that tag. Entering only at loop heads and after calls would let those tests fold, and shrink the code.
 - The shared-state and context pointers are reloaded from the stack in hot loops (15 and 3 times an iteration in prop-monomorphic).
+
+## Performance-tier close-out, 2026-11-16
+
+The measurements behind the close-out of TASK-101.3 (the baseline JIT), ADR 0028 (no optimizing tier, TASK-101.4) and `docs/aot-research.md` (TASK-101.5). Nothing in the engine changed for them.
+
+**Method.** `main` at `0f03d8f`. One `bench` binary and one copy of Gable's harness, both built with `--features jit` from one checkout path; the harness is Gable's `native/engine-harness` copied out of the tree with path dependencies on this commit, running the bundles Gable built on 2026-11-10. Each workload runs once per mode (`AGNIJS_JIT=off`, `on`, `force`) in every round, the modes taking turns in a rotating order, 9 rounds, one process per run (5 iterations after 1 warm-up). A figure is the median over the rounds of each run's median sample; a ratio is the median of the per-round ratios over `off` in the same binary, with the lowest and highest round beside it. Same machine as above (i9-9900KF, Windows 11), under the machine's heavy-job lock so that nothing else was building or measuring. The odd rounds of `off` against the even ones differ by under 1.5% on every steady workload but string-concat, string-methods (2.5%) and json-parse (4.3%), and by up to 5% on the sub-millisecond start-up pairs. Because the modes share one binary, the layout differences between builds described above do not enter these ratios.
+
+### Micro-benchmarks, JIT off, on and forced in one binary
+
+| workload | off ms | `on` | range | `force` | range |
+| --- | ---: | ---: | --- | ---: | --- |
+| loop-arith | 104.78 | 0.325 | 0.320 to 0.331 | 0.329 | 0.325 to 0.335 |
+| loop-array-index | 97.04 | 0.232 | 0.221 to 0.236 | 0.237 | 0.228 to 0.238 |
+| prop-monomorphic | 81.89 | 0.313 | 0.282 to 0.320 | 0.318 | 0.289 to 0.325 |
+| prop-polymorphic | 129.51 | 0.272 | 0.260 to 0.278 | 0.274 | 0.267 to 0.281 |
+| prop-write-alloc | 80.10 | 1.014 | 0.971 to 1.072 | 1.312 | 1.276 to 1.370 |
+| string-concat | 62.87 | 0.989 | 0.957 to 1.024 | 1.327 | 1.274 to 1.391 |
+| string-methods | 33.50 | 1.011 | 0.936 to 1.031 | 1.024 | 0.951 to 1.055 |
+| array-methods | 330.12 | 1.004 | 0.987 to 1.026 | 1.200 | 1.167 to 1.295 |
+| map-set | 125.32 | 1.003 | 0.943 to 1.110 | 1.086 | 1.041 to 1.120 |
+| closures | 62.09 | 0.790 | 0.764 to 0.838 | 0.694 | 0.683 to 0.712 |
+| calls-recursive | 56.62 | 0.363 | 0.359 to 0.371 | 0.375 | 0.367 to 0.381 |
+| method-calls | 120.10 | 1.017 | 0.968 to 1.037 | 0.753 | 0.730 to 0.796 |
+| regex | 107.76 | 1.009 | 0.977 to 1.057 | 1.055 | 1.038 to 1.131 |
+| regex-tokenize | 31.95 | 0.915 | 0.887 to 1.014 | 0.934 | 0.918 to 1.010 |
+| regex-long-input | 1.80 | 0.999 | 0.987 to 1.020 | 1.213 | 1.195 to 1.243 |
+| json-stringify | 50.66 | 0.997 | 0.984 to 1.021 | 0.999 | 0.977 to 1.051 |
+| json-parse | 49.17 | 1.000 | 0.936 to 1.029 | 1.022 | 1.003 to 1.045 |
+| promise-chain | 15.20 | 1.026 | 0.960 to 1.123 | 1.128 | 1.073 to 1.216 |
+| async-await | 15.60 | 1.005 | 0.978 to 1.045 | 1.020 | 1.010 to 1.050 |
+| compile-source | 13.78 | 1.019 | 0.965 to 1.072 | 403 | 392 to 413 |
+| bytecode-load | 2.12 | 1.012 | 0.831 to 1.146 | 2631 | 2214 to 2715 |
+| engine-startup | 0.62 | 1.028 | 0.907 to 1.061 | 1.418 | 1.302 to 1.486 |
+| snapshot-startup | 0.56 | 0.947 | 0.889 to 1.059 | 1.491 | 1.383 to 1.561 |
+| bundle-cold | 2.67 | 0.998 | 0.962 to 1.059 | 2065 | 2013 to 2185 |
+| bundle-snapshot | 2.03 | 1.002 | 0.971 to 1.074 | 9.70 | 9.17 to 10.02 |
+
+Geomean in mode `on`: **0.777** over the 25 workloads, 0.717 over the 19 that are not start-up or load. Forced, over those 19: 0.751. The forced figures of the load workloads are compile time: every one of the generated script's 501 functions is compiled on first sight, 5.8 s and 17.4 MB of machine code for 160 KB of source.
+
+- **Mode `on` gains on seven workloads and loses on none.** Loops over numbers, array elements and properties run 3 to 4.3 times faster, a recursive call 2.8 times, closures 1.27 times, regex-tokenize 1.09 times. Every other workload is within 3% of the interpreter, which is the noise of this measurement.
+- **method-calls does not gain in mode `on`** (1.017), though its compiled code is faster (0.753 forced). The loop is compiled after 1000 offers and given up some 420 iterations later (`AGNIJS_JIT_STATS`: one block compiled, one abandoned, 1254 callees run in the interpreter from inside call outs). Its callees are two methods, one of them with a `super` call, and a getter. A callee without a loop is compiled only after 200 calls per instruction of its body, from compiled code, and the loop's judgement comes first: each callee run in the interpreter counts as 20 call outs against it. The rule is deliberate. It is what keeps mode `on` from losing on code whose callees never become worth compiling, which is most of Gable's (below). Letting the loop wait for its callees would make this workload gain and was not tried, because it moves mode `on` towards forced mode on exactly the benches where forced mode loses.
+- **Forced mode loses where code is mostly calls into the runtime**: allocation, strings, array methods and collections are 2 to 33% slower, as ADR 0020 records.
+
+### Gable benches, JIT off, on and forced in one binary
+
+| bench | off ms | `on` | range | `force` | range | peak RSS off, on, force (MiB) |
+| --- | ---: | ---: | --- | ---: | --- | --- |
+| rxjs-operators | 182.98 | 1.005 | 0.983 to 1.009 | 0.760 | 0.728 to 0.792 | 9.6, 14.4, 42.6 |
+| rxjs-higher-order | 270.07 | 1.036 | 1.011 to 1.054 | 1.027 | 0.990 to 1.065 | 12.9, 39.4, 43.9 |
+| rxjs-subject-fanout | 124.20 | 0.719 | 0.691 to 0.779 | 0.717 | 0.673 to 0.732 | 12.1, 27.0, 45.6 |
+| signal-churn | 476.87 | 1.015 | 0.989 to 1.030 | 1.004 | 0.978 to 1.142 | 13.8, 19.8, 30.7 |
+| signal-create | 90.21 | 1.023 | 0.954 to 1.035 | 1.008 | 0.947 to 1.051 | 16.9, 16.9, 28.6 |
+| template-mount | 69.88 | 1.025 | 0.991 to 1.038 | 1.200 | 1.160 to 1.209 | 30.8, 57.5, 89.7 |
+| template-update | 40.96 | 1.026 | 0.997 to 1.259 | 1.152 | 1.100 to 1.179 | 15.2, 20.2, 90.6 |
+| list-diff | 857.79 | 1.023 | 1.005 to 1.077 | 1.087 | 1.068 to 1.100 | 79.3, 106.8, 103.0 |
+| ui-bundle-startup | 98.97 | 1.004 | 0.986 to 1.030 | 9.62 | 9.45 to 9.88 | 42.7, 42.7, 116.0 |
+
+Geomean in mode `on`: **0.981** over the nine, forced 1.263; without ui-bundle-startup, 0.978 and 0.980. The five rxjs and signal benches alone: 0.951 in mode `on`, 0.893 forced.
+
+- **Compiled code pays on two of the nine**: rxjs-subject-fanout (1.39 times faster, in both modes) and rxjs-operators (1.32 times, forced only: tiered, its functions are entered from interpreted callers and stay interpreted, as ADR 0020 says).
+- **Three are level when forced.** signal-churn (1.004) and signal-create (1.008) are within noise of the interpreter, slower in 5 and 6 of the 9 rounds. rxjs-higher-order is 2.7% slower, in 8 rounds of 9; earlier builds measured it at 1.02 and 1.03, so the difference is small and real.
+- **The template benches lose when forced**, by 9 to 20%, and start-up by nearly ten times (compile time).
+- **Mode `on` costs about 2% where it gains nothing**: six benches sit at 1.015 to 1.036, slower than the interpreter in 7 to 9 rounds of 9. That is the price of compiling blocks that are then given up, and of the memory it takes: tiered peak RSS is 5 to 27 MiB higher on five benches.
+
+### Where Gable's time goes
+
+A sampling profile of each bench in the interpreter (`tools/winprof`, 1 ms interval, 20 iterations, JIT off), each sample put in one class by its innermost engine frame. "Dispatch" is the run loop itself with everything inlined into it (operand decoding, the inline-cache hit paths, arithmetic on numbers). "Property access" is everything out of line: cache misses and fills, megamorphic and dictionary lookups, keyed access, property definition. "Calls" is frame push and pop, argument copying, closure and environment creation. "Collector" is inclusive of everything under a collection.
+
+| bench | samples | dispatch | calls | property access | environments | collector | allocator | built-ins | regex | other |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rxjs-operators | 1745 | 47.0 | 29.3 | 15.3 | 4.1 | 0.0 | 0.2 | 0.5 | 0.1 | 3.4 |
+| rxjs-higher-order | 2424 | 38.5 | 17.4 | 25.5 | 4.0 | 3.7 | 0.5 | 1.1 | 0.2 | 9.1 |
+| rxjs-subject-fanout | 1149 | 39.6 | 25.1 | 18.0 | 6.3 | 3.5 | 0.9 | 1.2 | 0.4 | 5.0 |
+| signal-churn | 4450 | 48.4 | 16.3 | 28.2 | 2.9 | 0.0 | 0.1 | 0.2 | 0.1 | 3.8 |
+| signal-create | 806 | 38.5 | 17.4 | 26.9 | 2.9 | 6.0 | 1.4 | 1.5 | 0.2 | 5.3 |
+| template-mount | 608 | 28.8 | 16.1 | 22.5 | 2.8 | 13.3 | 2.8 | 3.5 | 1.2 | 9.1 |
+| template-update | 309 | 37.2 | 16.5 | 23.3 | 1.9 | 8.4 | 1.6 | 2.9 | 0.6 | 7.4 |
+| list-diff | 8074 | 20.6 | 8.4 | 44.4 | 2.0 | 9.8 | 2.3 | 4.4 | 0.3 | 7.8 |
+
+Percent of samples; "other" includes arithmetic and conversion helpers (0.4 to 1.5%). The classes are drawn by function name and are approximate at the edges.
+
+- **Dispatch is 21 to 48%.** That is all a compiled tier removes by itself.
+- **Out-of-line property access is 15 to 44%**, calls 8 to 29%: together as much as dispatch on every bench, and more on four. Both are Rust code that every tier calls.
+- **The collector is 0 to 13%, the system allocator under 3%, regular expressions nothing.** Since TASK-100.21 and TASK-100.35 allocation is no longer where Gable's time goes.
+
+The same benches forced, by where the sampled instruction is (40 iterations after 3 warm-ups; a stack cannot be walked through machine code, so only the innermost frame is used):
+
+| bench | machine code | JIT runtime glue | property access | calls | interpreter loop | collector | compiling | other |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| rxjs-operators | 60.2 | 10.7 | 9.8 | 8.0 | 0.0 | 0.1 | 4.0 | 7.2 |
+| rxjs-subject-fanout | 61.4 | 8.6 | 7.2 | 6.2 | 0.1 | 3.6 | 5.8 | 7.1 |
+| rxjs-higher-order | 37.6 | 13.9 | 19.3 | 7.6 | 2.8 | 3.6 | 2.9 | 12.3 |
+| signal-churn | 40.0 | 20.0 | 20.0 | 6.5 | 6.6 | 0.0 | 0.6 | 6.3 |
+| signal-create | 33.1 | 14.9 | 22.5 | 7.2 | 2.6 | 5.4 | 2.7 | 11.6 |
+
+"Machine code" is compiled code and the call thunk. The two template benches are left out: compiling was 45 and 59% of their samples, so their split says nothing about steady state. The profiler crashed on list-diff forced (an access violation in the profiler while walking a stack through machine code; the bench itself ran three times without it, 43 iterations each, with the right checksum).
+
+- **Where compiled code wins (the first two rows), 60% of the time is in machine code.** Where it only draws level, machine code is 33 to 40% and the rest is the runtime it calls: property access the caches cannot serve, the glue of a call out, calls it cannot make itself.
+- `AGNIJS_JIT_STATS` agrees. Forced, per direct call made: 0.2 call outs in rxjs-operators and 0.3 in rxjs-subject-fanout, against 1.5 in rxjs-higher-order, 1.9 in signal-create, 2.4 in signal-churn, 3.6 in template-mount and 3.8 in list-diff.
+
+### Machine code size
+
+Forced mode compiles every function that runs, which is what a build-time compiler would do with every function.
+
+| program | source | bytecode container | functions compiled | machine code | compile time |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| the generated script of compile-source (300 functions of ten lines, each called once) | 160 KB | 0.68 MB | 505 | 17.45 MB | 6.0 s |
+| rxjs bundle, the three rxjs benches | 71 KB | 0.28 MB | 78 to 107 | 0.96 to 1.23 MB | 0.40 to 0.51 s |
+| signals bundle, the two signal benches | 83 KB | 0.33 MB | 47 to 61 | 0.57 to 0.68 MB | 0.24 to 0.27 s |
+| template bundle, the three template benches | 266 KB | 1.03 MB | 260 to 294 | 8.1 to 8.7 MB | 3.3 to 3.5 s |
+| `@gable/ui` bundle, start-up only | 1.42 MB | 4.91 MB | 163 (217 more refused, most of them module code) | 2.41 MB | 0.92 s |
+
+The benches run only part of their bundle, so the machine code column covers fewer functions than the bytecode column. A compiled function averages 11 to 35 KB of machine code. The generated script is the one case where every function is compiled: 17.4 MB of machine code beside 0.68 MB of bytecode, which is 26 times the bytecode and about 110 times the source (run with the `agnijs` command, which compiles four more blocks than the bench does). The container sizes are what `agnijs compile` writes. The cause is known (ADR 0020, the open compile-time item): every property site is expanded four ways inline, and every instruction after a call out is an entry point.
 
 ## Summary
 

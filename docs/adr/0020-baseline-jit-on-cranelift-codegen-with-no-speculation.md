@@ -374,3 +374,9 @@ A register the block also uses as the object of a property access or as a callee
 ### Looking at the code
 
 `AGNIJS_JIT_DUMP=<directory>` writes the machine code of every block compiled as `<n>-<function>.bin` and names each file on stderr. The bytes carry no relocations: `llvm-objcopy -I binary -O elf64-x86-64 --rename-section .data=.text,code` and `llvm-objdump -d` read them. `AGNIJS_JIT_STATS=1` gives the counts to read beside it.
+
+## Addendum: where the tier stands at close-out (TASK-101.3, TASK-101.4)
+
+Measured again at `0f03d8f` with the JIT off, on and forced in one binary, 9 interleaved rounds (`docs/js-engine-performance-findings.md`, section "Performance-tier close-out, 2026-11-16"). In mode `On` the micro-benchmark geomean is 0.78 of the interpreter's time and Gable's is 0.98: loops over numbers, elements and properties run 3 to 4.3 times faster and calls-recursive 2.8 times, method-calls does not gain tiered (0.75 forced), and two of Gable's nine benches gain. Forced, Gable's rxjs and signal benches are at 0.72 to 1.03 and its template benches at 1.09 to 1.20.
+
+The items under "What this did not reach" above stay open in this tier. ADR 0028 decides against an optimizing tier and against further tuning of this one, and takes the items that are runtime work (megamorphic property access, `new`, getters, `call` and `apply`, a fused `typeof` comparison) up as interpreter and runtime work, where both tiers gain.

@@ -1,11 +1,11 @@
 ---
 id: TASK-101.3.2
 title: 'Baseline JIT: inline IC hit paths in machine code, and MAP_JIT on macOS'
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-10T08:41:00Z'
-updated_date: '2026-11-10T12:40:00Z'
+updated_date: '2026-11-16T14:16:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -22,7 +22,7 @@ Measured in ADR 0020: compiled code is about 2.9x faster on blocks that run inli
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Named property loads and stores that hit a monomorphic IC run without calling out of compiled code
-- [ ] #2 prop-monomorphic and method-calls are faster with AGNIJS_JIT=on than interpreted, measured with agnijs-js-bench
+- [x] #2 prop-monomorphic is faster with AGNIJS_JIT=on than interpreted, and method-calls is faster as compiled code (AGNIJS_JIT=force) and within measurement noise (3%) of the interpreter with AGNIJS_JIT=on, measured with agnijs-js-bench
 - [x] #3 On macOS with the allow-jit entitlement, the probe succeeds using MAP_JIT and pthread_jit_write_protect_np
 <!-- AC:END -->
 
@@ -61,6 +61,17 @@ Feature-off build vs main: within noise except prop-write-alloc 1.05-1.08 and pr
 
 test262 with the feature off, AGNIJS_JIT=on and AGNIJS_JIT=force: default and --precompile 42231/42231, intl402 981/981, RegExp suites 2511/2511 in auto, backtracking-only and linear-when-eligible; 0 regressions in all 18 runs. GC-stress slice (AGNIJS_GC_STRESS=16, force): 5949/5949. Feature-off cargo test --workspace green. Gable suites via the path-patched harness: 759 passed, 1 known yjs timing failure (off, on, force); harness manifest and lockfile restored.
 Pre-existing CI failure, not from this task: the regex-crate step with the linear matcher compiled out (crates/agnijs-js-regex/tests/nesting.rs:208), already failing in run 42789813130.
+
+## Close-out (2026-11-16)
+
+Re-measured at main 0f03d8f: one bench binary built with --features jit, AGNIJS_JIT off/on/force taking turns within each round, 9 rounds, median of the per-round ratios over off (docs/js-engine-performance-findings.md, "Performance-tier close-out, 2026-11-16").
+
+- prop-monomorphic: on 0.313 (0.282 to 0.320), force 0.318. Faster in every round.
+- method-calls: on 1.017 (0.968 to 1.037), force 0.753 (0.730 to 0.796). Compiled code is faster; mode on does not gain.
+- Cause, from AGNIJS_JIT_STATS: the loop is compiled and given up about 420 iterations later (1 compiled, 1 abandoned, 1254 callees run in the interpreter from call outs). Its callees are two methods (one with a super call) and a getter. A loop-free callee compiles only after 200 calls per instruction from compiled code; the loop's judgement comes first and counts each interpreted callee as 20 call outs.
+- No fix was made. Letting the loop wait for its callees would make method-calls gain, but the same rule is what keeps mode on from losing on Gable's call-dense benches, where forced code is level or 9 to 20% slower; changing it is tuning the tiering policy, with every gate to re-run, for a tier ADR 0028 decides not to invest in further.
+
+AC #2 as written ("prop-monomorphic and method-calls are faster with AGNIJS_JIT=on") was not met for method-calls. Reworded (maintainer's instruction of 2026-11-16 allows rewording with the rationale recorded): the criterion now asks for what the tier was built to show and the measurement supports, that prop-monomorphic is faster tiered and that method-calls is faster as compiled code and not slower tiered. Flagged for the owner: if the original wording is wanted, the missing piece is exactly the tiering rule above.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
@@ -69,4 +80,6 @@ Pre-existing CI failure, not from this task: the regex-crate step with the linea
 Compiled code now runs inline-cache hits without leaving machine code: named loads/stores (monomorphic to 4-way polymorphic, prototype data, array length) and dense element get/set, guarded by shape compares plus proto_epoch with every miss going to Runtime::slow at the same pc (no deopt, no GC maps; I3 documented in ADR 0020 and tested under GC stress). macOS uses MAP_JIT (per-thread write protection where supported, mprotect after copy otherwise), exercised by a signed hardened-runtime probe in a new macOS jit CI job alongside Linux and Windows.
 
 Mode on: prop-monomorphic 0.76x, prop-polymorphic 0.71x, loop-arith 0.35x, loop-array-index 0.81x of interpreted time; no micro or Gable bench loses beyond noise (tiering tuned: per-instruction compile threshold, adaptive abandon). method-calls is only 0.97-0.98x, so AC #2 is not met: calls still round-trip through the interpreter's frame push. TASK-101.3.3 records compiled calls as the follow-up. All test262, intl402, RegExp, GC-stress and Gable gates pass with the feature off, on and force.
+
+Close-out (2026-11-16): re-measured in one binary over 9 interleaved rounds, prop-monomorphic runs at 0.31 of interpreted time in mode on; method-calls at 0.75 forced and 1.02 in mode on, where the loop is given up before its loop-free callees are compiled. AC #2 was reworded to what the measurement supports, with the rationale in the notes; the original wording (method-calls faster in mode on) is not met and is flagged for the owner. No code changed.
 <!-- SECTION:FINAL_SUMMARY:END -->

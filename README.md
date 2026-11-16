@@ -35,7 +35,7 @@ test262 is the correctness gate. The pinned commit is in `crates/agnijs-js-test2
 | `agnijs-cli` | The `agnijs` command: run files, stdin and `eval`, a REPL, bytecode and snapshots, `--inspect` ([README](crates/agnijs-cli/README.md)) |
 | `agnijs-fuzz` | Fuzz targets and a bounded, seeded fuzzer; `fuzz/` runs the same targets under libFuzzer ([docs/fuzzing.md](docs/fuzzing.md)) |
 
-The specification is [`docs/js-engine-spec.md`](docs/js-engine-spec.md); decisions are recorded as ADRs in [`docs/adr`](docs/adr). Performance findings are in [`docs/js-engine-performance-findings.md`](docs/js-engine-performance-findings.md).
+The specification is [`docs/js-engine-spec.md`](docs/js-engine-spec.md); decisions are recorded as ADRs in [`docs/adr`](docs/adr). Performance findings are in [`docs/js-engine-performance-findings.md`](docs/js-engine-performance-findings.md). The research note on ahead-of-time compilation is [`docs/aot-research.md`](docs/aot-research.md).
 
 ## Building and testing
 

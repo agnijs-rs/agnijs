@@ -25,3 +25,4 @@ Crate names in these records use the current `agnijs-*` names; where a record sa
 - [25. JSON is the engine's only module type, import maps live beside the Node resolver, and decorators and ShadowRealm wait at Stage 2.7](0025-json-is-the-only-module-type-import-maps-live-beside-the-node-resolver-and-stage-2-7-proposals-wait.md)
 - [26. The `agnijs` crate is the public embedding surface; the engine interface is its full layer and implementor items stay outside it](0026-the-agnijs-crate-is-the-public-embedding-surface-over-the-engine-interface.md)
 - [27. Temporal adopts temporal_rs behind the agnijs-js-temporal seam, with the IANA data Intl already links](0027-temporal-adopts-temporal-rs-behind-the-agnijs-js-temporal-seam.md)
+- [28. No optimizing JIT tier: the baseline stays the top tier, and performance work goes to the interpreter and the runtime](0028-no-optimizing-jit-tier-the-baseline-stays-the-top-tier.md)
