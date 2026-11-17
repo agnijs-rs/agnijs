@@ -1,11 +1,11 @@
 ---
 id: TASK-103.13
 title: TypeScript support through Oxc behind an optional seam
-status: In Progress
+status: Done
 assignee:
   - '@claude'
 created_date: '2026-11-09T02:15:00Z'
-updated_date: '2026-11-16T16:50:00Z'
+updated_date: '2026-11-17T02:26:00Z'
 labels:
   - needs-triage
 dependencies: []
@@ -21,11 +21,11 @@ Run .ts files directly. Level 1 (type stripping with source positions preserved,
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An ADR decides the Oxc adoption, the seam, the version pinning policy and the fallback, with measured binary-size and compile-time cost of the optional crate
-- [ ] #2 The optional crate turns TypeScript source into JavaScript plus a source map through oxc_transformer: type annotations, interfaces and type-only imports and exports are stripped, and enums, namespaces, parameter properties, decorators and JSX are transformed, with documented options and the pinned TypeScript version level
-- [ ] #3 Errors, stack traces and debugger breakpoints show original .ts positions, verified through the CDP adapter; syntax errors in TypeScript surface as host-visible diagnostics with positions
-- [ ] #4 The engine core and its test262 baselines gain no dependency or change; the crate is excluded from the default engine build and from the standalone-export CI job unless enabled, and ADR 0016 boundary tests pass
-- [ ] #5 A fixture suite covers the supported TypeScript syntax and the unsupported or erasable-only edges, and is run in CI
+- [x] #1 An ADR decides the Oxc adoption, the seam, the version pinning policy and the fallback, with measured binary-size and compile-time cost of the optional crate
+- [x] #2 The optional crate turns TypeScript source into JavaScript plus a source map through oxc_transformer: type annotations, interfaces and type-only imports and exports are stripped, and enums, namespaces, parameter properties, decorators and JSX are transformed, with documented options and the pinned TypeScript version level
+- [x] #3 Errors, stack traces and debugger breakpoints show original .ts positions, verified through the CDP adapter; syntax errors in TypeScript surface as host-visible diagnostics with positions
+- [x] #4 The engine core and its test262 baselines gain no dependency or change; the crate is excluded from the default engine build and from the standalone-export CI job unless enabled, and ADR 0016 boundary tests pass
+- [x] #5 A fixture suite covers the supported TypeScript syntax and the unsupported or erasable-only edges, and is run in CI
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -42,3 +42,15 @@ Run .ts files directly. Level 1 (type stripping with source positions preserved,
 <!-- SECTION:NOTES:BEGIN -->
 ADR 0029 written first. Measured Oxc 0.158 alone: 2.50 MB stripped (size profile), 51 s clean release / 30 s debug, 68 new lock entries with no existing version changed, MSRV 1.97. No recursion guard in Oxc: 451 B stack per source byte release worst (nested parens), 1,704 B debug; hence the worker thread sized from input length. Scope unchanged by the ADR: legacy decorators only (TC39 decorators refused, as the engine lacks them), CLI feature added as the 'run .ts directly' front end.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+TypeScript runs through Oxc 0.158 (pinned exactly) in the optional crate agnijs-js-typescript, which no engine crate depends on (ADR 0029, with addenda for what hostile input and fuzzing found). transpile() returns JavaScript and a Source Map v3; Mode::Transform strips types and transforms enums, namespaces, parameter properties, JSX and legacy decorators, Mode::StripOnly accepts erasable syntax only; what would not run is refused with a position. Oxc runs on a worker thread with an input-sized stack; max_source_len bounds time and memory.
+
+Work, each pushed after gates: dd3e36f ADR 0029; d5a08a3 the crate, fixtures, boundary test and CI job (TASK-103.13.1); 345ec5f .ts positions in Error.stack, Exception::stack and CDP breakpoints, the CLI `typescript` feature and examples/embed-typescript (TASK-103.13.2); 68e04c9 the typescript fuzz target, defences against the Oxc bugs it found, and the docs (TASK-103.13.3), and a1e8072 (a guide fragment that is not a doctest).
+
+The default build, its binary size (20,569,088 bytes), the C API, the 1.88 MSRV and the test262 baselines are unchanged; the crate needs Rust 1.97 and is outside the semver policy for now.
+
+Left for later: nested switch statements are quadratic in Oxc's analysis (about 2.3 s per worst MiB, documented); names across merged namespace blocks are refused rather than qualified; no C API entry point (an ABI addition to decide separately); the Oxc bugs listed in ADR 0029 are worth reporting upstream.
+<!-- SECTION:FINAL_SUMMARY:END -->
